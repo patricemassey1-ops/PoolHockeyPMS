@@ -1,6 +1,6 @@
 import os
 import streamlit as st
-from services.storage import path_players_db, path_roster, path_backup_history
+from services.storage import path_players_db, path_roster, path_backup_history, path_contracts
 from services.drive import drive_ready, drive_list_files, drive_download_file, drive_upload_file
 
 def render(ctx: dict) -> None:
@@ -17,6 +17,7 @@ def render(ctx: dict) -> None:
 
     targets = {
         "Players DB (data/hockey.players.csv)": path_players_db(),
+        "Contracts (data/puckpedia.contracts.csv)": path_contracts(),
         f"Roster (equipes_joueurs_{season}.csv)": path_roster(season),
         "Backup history (backup_history.csv)": path_backup_history(),
     }

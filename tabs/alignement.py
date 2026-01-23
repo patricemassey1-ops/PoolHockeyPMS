@@ -1,5 +1,5 @@
 import streamlit as st
-from services.storage import path_roster, safe_read_csv, path_players_db
+from services.storage import path_roster, safe_read_csv, path_players_db, path_contracts
 from services.players_db import load_players_map, norm_player_key, country_to_flag_emoji
 
 def render(ctx: dict) -> None:
@@ -7,6 +7,7 @@ def render(ctx: dict) -> None:
     season = ctx.get("season")
     roster_path = path_roster(season)
     st.caption(f"Roster: {roster_path}")
+    st.caption(f"Contracts: {path_contracts()}")
 
     df = safe_read_csv(roster_path)
     if df.empty:
