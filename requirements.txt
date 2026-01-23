@@ -1,0 +1,12 @@
+streamlit==1.41.1
+numpy==1.26.4
+pandas==2.2.2
+
+pyarrow==15.0.2
+protobuf==4.25.3
+
+google-api-python-client==2.154.0
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+google-auth-httplib2==0.2.0
+
