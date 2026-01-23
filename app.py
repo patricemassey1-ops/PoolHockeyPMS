@@ -55,7 +55,8 @@ if st.session_state["active_tab"] not in NAV_TABS:
     st.session_state["active_tab"] = NAV_TABS[0]
 
 active_tab = st.sidebar.radio("Navigation", NAV_TABS, key="active_tab")
-st.sidebar.caption(f"DATA_DIR: {DATA_DIR}")
+from services.storage import ASSETS_PREVIEWS_DIR
+st.sidebar.caption(f"DATA_DIR: {DATA_DIR} | ASSETS: {ASSETS_PREVIEWS_DIR}")
 
 # =========================================================
 # CONTEXT (passed to every tab)

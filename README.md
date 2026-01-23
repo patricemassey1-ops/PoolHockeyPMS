@@ -1,10 +1,15 @@
-# PoolHockey — Modular Starter
+# PoolHockey — Modular Starter (v2)
 
-## Files
-- app.py : routing + theme + ctx
-- tabs/* : one file per tab (render(ctx))
-- services/* : shared logic (storage, players_db, drive, ui)
-- data/ : CSV files (not included here)
+✅ Supports your repo layout:
+- `assets/previews/` : team logos (preferred)
+- `data/` : CSVs + (optional) logo copies
+- Some CSVs may also exist at repo root (legacy) — we fallback safely.
+
+## Expected files
+- `data/hockey.players.csv`
+- `data/puckpedia.contracts.csv`
+- `data/equipes_joueurs_<season>.csv`
+- (optional) `data/backup_history.csv`
 
 ## Secrets (Streamlit Cloud)
 ```toml
@@ -16,3 +21,11 @@ client_secret = "..."
 refresh_token = "..."
 redirect_uri = "..."
 ```
+
+## Admin tab
+- Lists Drive files in your folder_id
+- Restore selected CSV into local targets:
+  - Players DB
+  - Contracts
+  - Roster
+  - Backup history
