@@ -9,6 +9,7 @@ st.set_page_config(page_title="Pool Hockey", layout="wide")
 from services.storage import DATA_DIR, ensure_data_dir, season_default
 from services.ui import apply_theme
 from services.drive import resolve_drive_folder_id
+from services.enrich import resolve_update_players_db
 from tabs import home, joueurs, alignement, transactions, gm, historique, classement, admin
 
 ensure_data_dir()
@@ -66,6 +67,7 @@ ctx = {
     "season": season_lbl,
     "is_admin": is_admin,
     "drive_folder_id": drive_folder_id,
+    "update_players_db": resolve_update_players_db(),
 }
 
 # =========================================================

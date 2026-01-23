@@ -1,17 +1,19 @@
-# PoolHockey — Modular Starter (v2)
+# PoolHockey — Modular (v3)
 
-✅ Supports your repo layout:
+This version keeps your repo layout:
+
 - `assets/previews/` : team logos (preferred)
 - `data/` : CSVs + (optional) logo copies
-- Some CSVs may also exist at repo root (legacy) — we fallback safely.
+- Fallbacks to repo root for legacy CSV copies
 
-## Expected files
+## Files you mentioned (supported)
 - `data/hockey.players.csv`
 - `data/puckpedia.contracts.csv`
 - `data/equipes_joueurs_<season>.csv`
-- (optional) `data/backup_history.csv`
+- `data/backup_history.csv`
 
-## Secrets (Streamlit Cloud)
+## Drive (OAuth)
+Put in Streamlit Secrets:
 ```toml
 gdrive_folder_id = "1hIJovsHid2L1cY_wKM_sY-wVZKXAwrh1"
 
@@ -22,10 +24,9 @@ refresh_token = "..."
 redirect_uri = "..."
 ```
 
-## Admin tab
-- Lists Drive files in your folder_id
-- Restore selected CSV into local targets:
-  - Players DB
-  - Contracts
-  - Roster
-  - Backup history
+## Players DB Admin UI
+The Players DB admin panel is in `services/players_db_admin.py` (copied from your `players_db.py`)
+and rendered inside `tabs/admin.py`.
+
+It requires `update_players_db` callable. By default we try to import it from `pms_enrich.py`.
+If your function lives elsewhere, wire it in `services/enrich.py`.
