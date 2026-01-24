@@ -65,6 +65,26 @@ def _guess_col(df: pd.DataFrame, names) -> str:
     return ""
 
 
+def _as_float(x) -> Optional[float]:
+    try:
+        if pd.isna(x):
+            return None
+        s = str(x).replace(",", "").replace("$", "").strip()
+        if not s:
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
+def _money(v) -> str:
+    f = _as_float(v)
+    if f is None:
+        s = str(v or "").strip()
+        return s if s else "—"
+    return f"{int(round(f)):,}".replace(",", " ") + " $"
+
+
 # =====================================================
 # Loaders
 # =====================================================
@@ -79,16 +99,17 @@ def load_players_db(data_dir: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     name_col = _guess_col(df, ["Joueur", "Player", "Name", "name"])
+    if not name_col:
+        name_col = df.columns[0]
+
     df = df.copy()
     df["_display_name"] = df[name_col].astype(str)
     df["_name_key"] = df[name_col].astype(str).map(_norm_name)
 
-    # normalisation Level
     if "Level" not in df.columns:
         df["Level"] = ""
 
-    # NHL ID
-    nhl_col = _guess_col(df, ["NHL ID", "NHL_ID", "playerId", "nhl_id"])
+    nhl_col = _guess_col(df, ["NHL ID", "NHL_ID", "playerId", "nhl_id", "player_id"])
     df["_nhl_id"] = df[nhl_col].astype(str) if nhl_col else ""
 
     df.attrs["__path__"] = path
@@ -102,7 +123,10 @@ def load_contracts(data_dir: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    name_col = _guess_col(df, ["Player", "Joueur", "Name"])
+    name_col = _guess_col(df, ["Player", "Joueur", "Name", "name"])
+    if not name_col:
+        name_col = df.columns[0]
+
     df = df.copy()
     df["_name_key"] = df[name_col].astype(str).map(_norm_name)
     df.attrs["__path__"] = path
@@ -116,8 +140,10 @@ def load_points(data_dir: str, season: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    name_col = _guess_col(df, ["Joueur", "Player", "Name"])
-    pts_col = _guess_col(df, ["Fantasy Points", "Points", "Pts"])
+    name_col = _guess_col(df, ["Joueur", "Player", "Name", "name"])
+    pts_col = _guess_col(df, ["Fantasy Points", "FantasyPoints", "Points", "Pts", "Total", "FPTS"])
+    if not name_col or not pts_col:
+        return pd.DataFrame()
 
     out = df[[name_col, pts_col]].copy()
     out["_name_key"] = out[name_col].astype(str).map(_norm_name)
@@ -130,30 +156,212 @@ def load_points(data_dir: str, season: str) -> pd.DataFrame:
 
 
 # =====================================================
-# Level resolution (⭐ IMPORTANT)
+# Level resolution + badge
 # =====================================================
-def resolve_level(player_row: pd.Series | None, contract_row: pd.Series | None) -> str:
-    # 1) Players DB (source de vérité)
+def resolve_level(player_row: Optional[pd.Series], contract_row: Optional[pd.Series]) -> str:
     if player_row is not None:
         lvl = str(player_row.get("Level") or "").upper().strip()
         if lvl in ("ELC", "STD"):
             return lvl
 
-    # 2) Puckpedia (détection ELC)
     if contract_row is not None:
-        t = str(contract_row.get("Type") or contract_row.get("Contract Type") or "").upper()
+        # détecte ELC via champs variés
+        t = str(contract_row.get("Type") or contract_row.get("Contract Type") or contract_row.get("Level") or "").upper()
         if "ELC" in t or "ENTRY" in t:
             return "ELC"
 
     return "—"
 
 
+def level_badge_html(level: str) -> str:
+    lvl = (level or "—").upper().strip()
+    if lvl == "ELC":
+        bg, fg = "#133d1f", "#b7f7c6"
+        txt = "ELC"
+    elif lvl == "STD":
+        bg, fg = "#11304a", "#bfe2ff"
+        txt = "STD"
+    else:
+        bg, fg = "#2a2d33", "#d6d6d6"
+        txt = "—"
+    return f"""
+    <span style="
+        display:inline-block;
+        padding:2px 10px;
+        border-radius:999px;
+        font-weight:700;
+        font-size:12px;
+        background:{bg};
+        color:{fg};
+        border:1px solid rgba(255,255,255,0.08);
+        letter-spacing:0.5px;
+    ">{txt}</span>
+    """
+
+
 # =====================================================
-# UI rendering
+# Extractors
+# =====================================================
+def _row_by_key(df: pd.DataFrame, key: str) -> Optional[pd.Series]:
+    if df is None or df.empty or not key:
+        return None
+    m = df.loc[df["_name_key"] == key]
+    return None if m.empty else m.iloc[0]
+
+
+def _contract_by_key(df: pd.DataFrame, key: str) -> Optional[pd.Series]:
+    if df is None or df.empty or not key:
+        return None
+    m = df.loc[df["_name_key"] == key]
+    return None if m.empty else m.iloc[0]
+
+
+def _points_by_key(df: pd.DataFrame, key: str) -> Optional[Tuple[float, int, int]]:
+    if df is None or df.empty or not key:
+        return None
+    m = df.loc[df["_name_key"] == key]
+    if m.empty:
+        return None
+    r = m.iloc[0]
+    return (float(r.get("_pts", 0) or 0), int(r.get("rank", 0) or 0), int(df.shape[0]))
+
+
+def _get_contract_fields(crow: Optional[pd.Series]) -> Dict[str, str]:
+    if crow is None:
+        return {"aav": "—", "expiry": "—", "term": "—", "clause": "—"}
+    aav = crow.get("AAV", "") or crow.get("Cap Hit", "") or crow.get("CapHit", "") or ""
+    expiry = crow.get("Expiry", "") or crow.get("Expiry Year", "") or crow.get("End", "") or ""
+    term = crow.get("Term", "") or ""
+    clause = crow.get("Clause", "") or crow.get("Clauses", "") or ""
+    return {
+        "aav": _money(aav),
+        "expiry": str(expiry).strip() if str(expiry).strip() else "—",
+        "term": str(term).strip() if str(term).strip() else "—",
+        "clause": str(clause).strip() if str(clause).strip() else "—",
+    }
+
+
+def _get_basic_fields(prow: pd.Series) -> Dict[str, str]:
+    pos = str(prow.get("Pos", "") or "").strip() or "—"
+    team = str(prow.get("Team", "") or prow.get("Equipe", "") or "").strip() or "—"
+    country = str(prow.get("Country", "") or "").strip() or "—"
+    salary = prow.get("Salary", "") or prow.get("Cap Hit", "") or prow.get("AAV", "") or ""
+    salary = _money(salary)
+    return {"pos": pos, "team": team, "country": country, "salary": salary}
+
+
+def _headshot_url(nhl_id: str) -> str:
+    nhl_id = str(nhl_id or "").strip()
+    if not nhl_id or nhl_id.lower() == "nan":
+        return ""
+    return f"https://assets.nhle.com/mugs/nhl/{nhl_id}.png"
+
+
+# =====================================================
+# UI blocks
+# =====================================================
+def _profile_block(title: str, players: pd.DataFrame, contracts: pd.DataFrame, points: pd.DataFrame, key: str) -> None:
+    prow = _row_by_key(players, key)
+    if prow is None:
+        st.warning("Joueur introuvable.")
+        return
+    crow = _contract_by_key(contracts, key)
+    lvl = resolve_level(prow, crow)
+    badge = level_badge_html(lvl)
+
+    basic = _get_basic_fields(prow)
+    cfields = _get_contract_fields(crow)
+    prk = _points_by_key(points, key)
+
+    colL, colR = st.columns([1, 2], gap="large")
+    with colL:
+        u = _headshot_url(str(prow.get("_nhl_id") or ""))
+        if u:
+            try:
+                st.image(u, use_container_width=True)
+            except Exception:
+                st.info("Photo indisponible.")
+        else:
+            st.info("Photo indisponible (NHL ID manquant).")
+
+    with colR:
+        st.subheader(title)
+        st.markdown(f"**Nom** : {prow.get('_display_name','—')}  \n**Level (Pool)** : {badge}", unsafe_allow_html=True)
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.caption("Position")
+            st.write(basic["pos"])
+        with c2:
+            st.caption("Équipe NHL")
+            st.write(basic["team"])
+        with c3:
+            st.caption("Pays")
+            st.write(basic["country"])
+
+        st.markdown("##### Salaire / Contrat")
+        c4, c5, c6, c7 = st.columns(4)
+        with c4:
+            st.caption("Salaire/Cap")
+            st.write(basic["salary"])
+        with c5:
+            st.caption("AAV")
+            st.write(cfields["aav"])
+        with c6:
+            st.caption("Expiry")
+            st.write(cfields["expiry"])
+        with c7:
+            st.caption("Clause")
+            st.write(cfields["clause"])
+
+        if prk is not None:
+            pts, rank, total = prk
+            st.markdown("##### Classement")
+            st.write(f"Points: **{pts:.1f}**  |  Rang: **{rank} / {total}**")
+
+
+def _cmp_table(players: pd.DataFrame, contracts: pd.DataFrame, points: pd.DataFrame, a_key: str, b_key: str) -> pd.DataFrame:
+    def row_for(key: str) -> Dict[str, Any]:
+        prow = _row_by_key(players, key)
+        crow = _contract_by_key(contracts, key)
+        if prow is None:
+            return {"Nom": "—"}
+        lvl = resolve_level(prow, crow)
+        basic = _get_basic_fields(prow)
+        cfields = _get_contract_fields(crow)
+        prk = _points_by_key(points, key)
+
+        pts = "—"
+        rk = "—"
+        if prk is not None:
+            pts = f"{prk[0]:.1f}"
+            rk = f"{prk[1]} / {prk[2]}"
+
+        return {
+            "Nom": str(prow.get("_display_name") or "—"),
+            "Level": lvl,
+            "Pos": basic["pos"],
+            "Team": basic["team"],
+            "Country": basic["country"],
+            "Salary/Cap": basic["salary"],
+            "AAV": cfields["aav"],
+            "Expiry": cfields["expiry"],
+            "Points": pts,
+            "Rank": rk,
+        }
+
+    a = row_for(a_key)
+    b = row_for(b_key)
+    df = pd.DataFrame([a, b], index=["Joueur A", "Joueur B"])
+    return df
+
+
+# =====================================================
+# Main render
 # =====================================================
 def render(ctx: dict) -> None:
     st.header("👤 Joueurs")
-    st.caption("Recherche + fiche joueur + Level (STD / ELC) + comparatif")
+    st.caption("Recherche hockey.players.csv + Level STD/ELC + classement + comparatif")
 
     data_dir = _data_dir(ctx)
     season = _season(ctx)
@@ -163,94 +371,101 @@ def render(ctx: dict) -> None:
     points = load_points(data_dir, season)
 
     if players.empty:
-        st.error("hockey.players.csv introuvable ou vide")
+        st.error("Players DB introuvable ou vide. Vérifie `data/hockey.players.csv`.")
         return
+
+    # -------------------------
+    # Filtre Level
+    # -------------------------
+    st.markdown("### 🎚️ Filtres")
+    level_filter = st.radio("Level", ["Tous", "ELC seulement", "STD seulement"], horizontal=True, key="players_level_filter")
+
+    # options candidates (limiter)
+    df_opts = players[["_display_name", "_name_key", "Level"]].copy()
+
+    # enrichir temporairement le Level via contracts pour filtrer correctement
+    if not contracts.empty:
+        # map key->detected level
+        c = contracts[["_name_key"]].copy()
+        # détection simple
+        tcol = _guess_col(contracts, ["Type", "Contract Type", "Level"])
+        if tcol:
+            c["_lvl"] = contracts[tcol].astype(str).str.upper().apply(lambda x: "ELC" if ("ELC" in x or "ENTRY" in x) else "")
+            lvl_map = dict(zip(c["_name_key"], c["_lvl"]))
+            # fill only if empty
+            df_opts["_lvl_tmp"] = df_opts["Level"].astype(str).str.upper().str.strip()
+            df_opts.loc[df_opts["_lvl_tmp"].isin(["", "NAN"]), "_lvl_tmp"] = df_opts["_name_key"].map(lvl_map).fillna("")
+        else:
+            df_opts["_lvl_tmp"] = df_opts["Level"].astype(str).str.upper().str.strip()
+    else:
+        df_opts["_lvl_tmp"] = df_opts["Level"].astype(str).str.upper().str.strip()
+
+    if level_filter == "ELC seulement":
+        df_opts = df_opts[df_opts["_lvl_tmp"] == "ELC"]
+    elif level_filter == "STD seulement":
+        df_opts = df_opts[df_opts["_lvl_tmp"] == "STD"]
 
     # -------------------------
     # Recherche
     # -------------------------
-    q = st.text_input("🔎 Rechercher un joueur")
-    df_disp = players[["_display_name", "_name_key"]]
+    st.markdown("### 🔎 Recherche")
+    q = st.text_input("Tape un nom (Marner, Draisaitl, Savoie...)")
 
     if q.strip():
-        k = _norm_name(q)
-        df_disp = df_disp[
-            df_disp["_display_name"].str.lower().str.contains(q.lower(), na=False)
-            | df_disp["_name_key"].str.contains(k, na=False)
-        ]
+        qs = _norm_name(q)
+        mask = df_opts["_display_name"].astype(str).str.lower().str.contains(q.lower(), na=False)
+        if qs:
+            mask = mask | df_opts["_name_key"].astype(str).str.contains(qs, na=False)
+        df_opts = df_opts.loc[mask]
 
-    names = df_disp["_display_name"].head(200).tolist()
-    if not names:
-        st.info("Aucun joueur trouvé")
+    # limiter pour perf
+    candidates = df_opts.head(300)
+    opts = candidates["_display_name"].tolist()
+    if not opts:
+        st.info("Aucun joueur trouvé avec ces filtres.")
         return
 
-    sel = st.selectbox("Choisir un joueur", names)
+    sel = st.selectbox("Choisir un joueur", opts, key="players_pick_main")
     key = _norm_name(sel)
 
-    prow = players.loc[players["_name_key"] == key].iloc[0]
-    crow = contracts.loc[contracts["_name_key"] == key].iloc[0] if not contracts.empty and key in contracts["_name_key"].values else None
-
-    level = resolve_level(prow, crow)
-
     # -------------------------
-    # Fiche joueur
+    # Profil
     # -------------------------
     st.divider()
-    st.subheader("🧾 Fiche joueur")
-
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        nhl_id = str(prow.get("_nhl_id") or "").strip()
-        if nhl_id:
-            st.image(f"https://assets.nhle.com/mugs/nhl/{nhl_id}.png")
-        else:
-            st.info("Photo indisponible")
-
-    with col2:
-        st.markdown(f"""
-**Nom** : {prow['_display_name']}  
-**Position** : {prow.get('Pos','—')}  
-**Équipe NHL** : {prow.get('Team','—')}  
-**Pays** : {prow.get('Country','—')}  
-**Level (Pool)** : **{level}**
-""")
-
-    # -------------------------
-    # Classement
-    # -------------------------
-    if not points.empty and key in points["_name_key"].values:
-        r = points.loc[points["_name_key"] == key].iloc[0]
-        st.markdown(f"### 🏆 Classement\n**Points** : {r['_pts']}  \n**Rang** : {r['rank']} / {points.shape[0]}")
+    st.markdown("### 🧾 Profil joueur")
+    _profile_block("Profil", players, contracts, points, key)
 
     # -------------------------
     # Comparatif
     # -------------------------
     st.divider()
-    st.subheader("⚖️ Comparatif 2 joueurs")
+    st.markdown("### ⚖️ Comparatif (2 joueurs)")
 
-    a, b = st.columns(2)
-    with a:
-        j1 = st.selectbox("Joueur A", players["_display_name"].head(2000), index=0)
-    with b:
-        j2 = st.selectbox("Joueur B", players["_display_name"].head(2000), index=1)
+    # listes filtrées pour cohérence
+    pool = df_opts["_display_name"].head(2000).tolist()
+    if len(pool) < 2:
+        pool = players["_display_name"].head(2000).tolist()
 
-    for title, name in [("Joueur A", j1), ("Joueur B", j2)]:
-        k = _norm_name(name)
-        p = players.loc[players["_name_key"] == k].iloc[0]
-        c = contracts.loc[contracts["_name_key"] == k].iloc[0] if not contracts.empty and k in contracts["_name_key"].values else None
-        lvl = resolve_level(p, c)
+    colA, colB = st.columns(2, gap="large")
+    with colA:
+        a_name = st.selectbox("Joueur A", pool, index=0, key="cmp_a")
+    with colB:
+        b_name = st.selectbox("Joueur B", pool, index=1, key="cmp_b")
 
-        st.markdown(f"""
-**{title}**  
-Nom : {p['_display_name']}  
-Position : {p.get('Pos','—')}  
-Level : **{lvl}**
-""")
+    a_key = _norm_name(a_name)
+    b_key = _norm_name(b_name)
+
+    df_cmp = _cmp_table(players, contracts, points, a_key, b_key)
+
+    # badges pour Level dans table
+    df_show = df_cmp.copy()
+    df_show["Level"] = df_show["Level"].apply(lambda x: "ELC 🟢" if x == "ELC" else ("STD 🔵" if x == "STD" else "—"))
+    st.dataframe(df_show, use_container_width=True)
 
     # -------------------------
-    # Debug
+    # Debug sources (sans ctx brut)
     # -------------------------
     with st.expander("🧪 Debug (sources)", expanded=False):
-        st.write("Players DB:", players.attrs.get("__path__"))
+        st.write("Players DB:", players.attrs.get("__path__", ""))
         st.write("Contracts:", contracts.attrs.get("__path__", "(absent)"))
         st.write("Points:", points.attrs.get("__path__", "(absent)"))
