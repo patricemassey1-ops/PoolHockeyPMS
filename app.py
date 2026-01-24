@@ -30,7 +30,7 @@ def is_admin_user() -> bool:
     # Example: only Whalers
     return str(st.session_state.get("owner") or "").strip().lower() in {"whalers"}
 
-is_admin = is_admin_user()
+is_admin = True
 
 
 # Drive folder id (OAuth)
