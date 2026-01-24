@@ -30,7 +30,7 @@ def is_admin_user() -> bool:
     # Example: only Whalers
     return str(st.session_state.get("owner") or "").strip().lower() in {"whalers"}
 
-is_admin = is_admin_user()
+is_admin = True
 
 # Drive folder id (OAuth)
 drive_folder_id = resolve_drive_folder_id(default="1hIJovsHid2L1cY_wKM_sY-wVZKXAwrh1")
@@ -49,9 +49,6 @@ NAV_TABS = [
 ]
 if is_admin:
     NAV_TABS.append("🛠️ Gestion Admin")
-
-is_admin = True
-
 
 if "active_tab" not in st.session_state:
     st.session_state["active_tab"] = NAV_TABS[0]
