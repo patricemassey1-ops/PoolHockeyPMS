@@ -2,6 +2,7 @@
 import os
 import pandas as pd
 import streamlit as st
+from io import StringIO
 
 from services.storage import (
     path_players_db,
@@ -62,15 +63,17 @@ def render(ctx: dict) -> None:
     st.divider()
 
     # =====================================================
-    # 📥 Import roster Fantrax par équipe (dropdown)
+    # 📥 Import roster Fantrax par équipe (dropdown) — ROBUST
     #   - Upload d'un CSV Fantrax (ex: Red_Wings.csv)
     #   - Choix équipe/propriétaire dans dropdown
+    #   - Parse robuste (Skaters + Goalies, lignes “cassées” ignorées)
     #   - Remplace seulement cette équipe dans equipes_joueurs_<saison>.csv
     # =====================================================
     st.subheader("📥 Import roster Fantrax (par équipe)")
     st.caption(
         "Upload un CSV Fantrax (comme Red_Wings.csv). On convertit et on remplace seulement l’équipe choisie "
-        "dans data/equipes_joueurs_<saison>.csv."
+        "dans data/equipes_joueurs_<saison>.csv. "
+        "Parser robuste: sections Skaters/Goalies + lignes mal formées ignorées."
     )
 
     def _slot_from_status(status: str) -> str:
@@ -86,68 +89,142 @@ def render(ctx: dict) -> None:
     # ⚠️ Ajuste cette liste si tes noms d’équipes/propriétaires diffèrent
     OWNER_CHOICES = ["Canadiens", "Cracheurs", "Nordiques", "Prédateurs", "Red Wings", "Whalers"]
 
+    def _read_fantrax_csv(uploaded_file) -> pd.DataFrame:
+        """
+        Parse un export Fantrax qui contient souvent:
+        - une section Skaters, une section Goalies
+        - des lignes titre/séparateurs
+        - parfois des lignes qui ont +/− de colonnes (tokenizing error)
+        On:
+        - repère l'entête qui contient Player/Status/Salary
+        - lit chaque bloc avec engine=python + on_bad_lines=skip
+        - concatène
+        """
+        raw = uploaded_file.getvalue()
+        try:
+            text = raw.decode("utf-8")
+        except Exception:
+            text = raw.decode("latin-1", errors="ignore")
+
+        lines = [ln.rstrip("\n") for ln in text.splitlines()]
+        # garde seulement les lignes non vides
+        lines = [ln for ln in lines if ln.strip()]
+
+        # entête typique attendue
+        def is_header(ln: str) -> bool:
+            l = ln.strip()
+            return ("Player" in l and "Status" in l and "Salary" in l and "," in l)
+
+        header_idxs = [i for i, ln in enumerate(lines) if is_header(ln)]
+        if not header_idxs:
+            # fallback: cherche ligne avec "ID,Pos,Player"
+            for i, ln in enumerate(lines):
+                if ln.strip().startswith("ID") and "Player" in ln and "," in ln:
+                    header_idxs = [i]
+                    break
+
+        if not header_idxs:
+            return pd.DataFrame()
+
+        blocks = []
+        for hi, hidx in enumerate(header_idxs):
+            # le bloc se termine à la prochaine entête (ou fin)
+            next_h = header_idxs[hi + 1] if hi + 1 < len(header_idxs) else len(lines)
+            block_lines = lines[hidx:next_h]
+
+            # sécurise: trop petit => skip
+            if len(block_lines) < 2:
+                continue
+
+            buf = "\n".join(block_lines)
+            try:
+                df = pd.read_csv(
+                    StringIO(buf),
+                    engine="python",
+                    sep=",",
+                    on_bad_lines="skip",  # <-- évite "Expected X fields saw Y"
+                )
+                if df is not None and not df.empty:
+                    blocks.append(df)
+            except Exception:
+                # si ce bloc est vraiment sale, on ignore
+                pass
+
+        if not blocks:
+            return pd.DataFrame()
+
+        out = pd.concat(blocks, ignore_index=True)
+
+        # certains exports répètent l'entête dans les données; filtre les lignes où Player == "Player"
+        if "Player" in out.columns:
+            out = out[out["Player"].astype(str).str.strip().ne("Player")]
+
+        # garde colonnes clés si elles existent
+        return out
+
     fantrax_csv = st.file_uploader("CSV Fantrax roster", type=["csv"], key="fantrax_roster_csv")
     if fantrax_csv is not None:
         try:
-            imp = pd.read_csv(fantrax_csv)
+            imp = _read_fantrax_csv(fantrax_csv)
 
-            # Ton format exact (selon screenshot):
-            # ID, Pos, Player, Team, Eligible, Status, Age, Salary, Contract, ...
-            required_cols = ["Player", "Pos", "Team", "Status", "Salary"]
-            missing = [c for c in required_cols if c not in imp.columns]
-            if missing:
-                st.error("Colonnes manquantes dans le CSV Fantrax: " + ", ".join(missing))
-                st.caption("Colonnes détectées: " + ", ".join([str(c) for c in imp.columns]))
+            if imp.empty:
+                st.error("Impossible de parser ce CSV Fantrax (aucune table détectée).")
             else:
-                owner_pick = st.selectbox(
-                    "Équipe (Propriétaire) à assigner à ce CSV",
-                    OWNER_CHOICES,
-                    key="fantrax_owner_pick",
-                )
-
-                # Construire le roster au format de ton app
-                out = pd.DataFrame(
-                    {
-                        "Propriétaire": owner_pick,
-                        "Joueur": imp["Player"].astype(str).str.strip(),
-                        "Pos": imp["Pos"].astype(str).str.strip(),
-                        "Equipe": imp["Team"].astype(str).str.strip(),
-                        "Salaire": imp["Salary"],
-                        "Level": "",  # sera rempli/forcé ensuite via hockey.players.csv si tu veux
-                        "Statut": imp["Status"].astype(str).str.strip(),
-                        "Slot": imp["Status"].astype(str).map(_slot_from_status),
-                        "IR Date": "",
-                    }
-                )
-
-                # Charger l'existant et remplacer seulement l'équipe choisie
-                dest = path_roster(season)  # data/equipes_joueurs_<season>.csv
-                try:
-                    cur = pd.read_csv(dest) if os.path.exists(dest) else pd.DataFrame()
-                except Exception:
-                    cur = pd.DataFrame()
-
-                if not cur.empty and "Propriétaire" in cur.columns:
-                    cur_other = cur[cur["Propriétaire"].astype(str) != str(owner_pick)]
+                # Ton format attendu (après parse): Player, Pos, Team, Status, Salary
+                required_cols = ["Player", "Pos", "Team", "Status", "Salary"]
+                missing = [c for c in required_cols if c not in imp.columns]
+                if missing:
+                    st.error("Colonnes manquantes après parse: " + ", ".join(missing))
+                    st.caption("Colonnes détectées: " + ", ".join([str(c) for c in imp.columns]))
                 else:
-                    cur_other = pd.DataFrame()
+                    owner_pick = st.selectbox(
+                        "Équipe (Propriétaire) à assigner à ce CSV",
+                        OWNER_CHOICES,
+                        key="fantrax_owner_pick",
+                    )
 
-                final = pd.concat([cur_other, out], ignore_index=True)
+                    out = pd.DataFrame(
+                        {
+                            "Propriétaire": owner_pick,
+                            "Joueur": imp["Player"].astype(str).str.strip(),
+                            "Pos": imp["Pos"].astype(str).str.strip(),
+                            "Equipe": imp["Team"].astype(str).str.strip(),
+                            "Salaire": imp["Salary"],
+                            "Level": "",
+                            "Statut": imp["Status"].astype(str).str.strip(),
+                            "Slot": imp["Status"].astype(str).map(_slot_from_status),
+                            "IR Date": "",
+                        }
+                    )
 
-                colA, colB = st.columns([1, 1])
-                with colA:
-                    st.caption("Aperçu importé (20 lignes)")
-                    st.dataframe(out.head(20), use_container_width=True)
-                with colB:
-                    st.caption("Résumé")
-                    st.write(f"- Joueurs importés: **{len(out)}**")
-                    st.write(f"- Destination: `{dest}`")
+                    dest = path_roster(season)  # data/equipes_joueurs_<season>.csv
 
-                if st.button("✅ Importer cette équipe (replace)", type="primary", key="do_fantrax_import"):
-                    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-                    final.to_csv(dest, index=False)
-                    st.success(f"✅ Import OK: {owner_pick} remplacé dans {dest}")
-                    st.caption("Va dans Alignement pour valider.")
+                    try:
+                        cur = pd.read_csv(dest) if os.path.exists(dest) else pd.DataFrame()
+                    except Exception:
+                        cur = pd.DataFrame()
+
+                    if not cur.empty and "Propriétaire" in cur.columns:
+                        cur_other = cur[cur["Propriétaire"].astype(str) != str(owner_pick)]
+                    else:
+                        cur_other = pd.DataFrame()
+
+                    final = pd.concat([cur_other, out], ignore_index=True)
+
+                    colA, colB = st.columns([1, 1])
+                    with colA:
+                        st.caption("Aperçu importé (20 lignes)")
+                        st.dataframe(out.head(20), use_container_width=True)
+                    with colB:
+                        st.caption("Résumé")
+                        st.write(f"- Lignes importées: **{len(out)}**")
+                        st.write(f"- Destination: `{dest}`")
+
+                    if st.button("✅ Importer cette équipe (replace)", type="primary", key="do_fantrax_import"):
+                        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+                        final.to_csv(dest, index=False)
+                        st.success(f"✅ Import OK: {owner_pick} remplacé dans {dest}")
+                        st.caption("Va dans Alignement pour valider.")
 
         except Exception as e:
             st.error(f"Erreur lecture/parse CSV: {e}")
