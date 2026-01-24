@@ -1,503 +1,634 @@
-# tabs/admin.py
+# admin.py
+# ============================================================
+# PMS Pool Hockey — Admin Module (Streamlit)
+# - Backups & Restore (Drive OAuth)
+# - Restore local fallback
+# - Équipes: Import / Preview / Validate / Reload / Rollback
+# ============================================================
+
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+import io
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
-from services.drive import (
-    drive_ready,
-    drive_list_files,
-    drive_download_file,
-    drive_upload_file,
-)
-from services.event_log import append_event, event_log_path
+# ---- Google OAuth Drive deps
+# pip: google-auth, google-auth-oauthlib, google-api-python-client
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+    from google.oauth2.credentials import Credentials
+except Exception:
+    build = None  # type: ignore
+    MediaIoBaseDownload = None  # type: ignore
+    MediaIoBaseUpload = None  # type: ignore
+    Credentials = None  # type: ignore
 
 
-# =========================
-# Helpers
-# =========================
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+# ============================================================
+# Config (adapte si besoin)
+# ============================================================
 
+DATA_DIR_DEFAULT = "Data"  # ton repo: /Data
+DRIVE_FOLDER_ID_DEFAULT = ""  # tu le passes via param ou secrets
 
-def _data_dir(ctx: dict) -> str:
-    return str(ctx.get("DATA_DIR") or "data")
-
-
-def _season(ctx: dict) -> str:
-    return str(ctx.get("season") or st.session_state.get("season") or "2025-2026").strip() or "2025-2026"
-
-
-def _is_admin(ctx: dict) -> bool:
-    return bool(ctx.get("is_admin") or st.session_state.get("is_admin") or False)
-
-
-def _drive_folder_id(ctx: dict) -> str:
-    # priorité: ctx -> secrets gdrive_folder_id -> compat old key
-    return (
-        str(ctx.get("drive_folder_id") or "").strip()
-        or str(st.secrets.get("gdrive_folder_id", "") or "").strip()
-        or str(st.secrets.get("drive_folder_id", "") or "").strip()
-    )
-
-
-def _critical_files(data_dir: str, season: str) -> List[Tuple[str, str]]:
-    """
-    (label, full_path)
-    """
+# Fichiers “critiques” qu’on backup/restore souvent
+# Adapte au besoin
+def critical_files_for_season(season_lbl: str) -> List[str]:
+    season_lbl = str(season_lbl or "").strip() or "2025-2026"
     return [
-        (f"equipes_joueurs_{season}.csv", os.path.join(data_dir, f"equipes_joueurs_{season}.csv")),
-        ("hockey.players.csv", os.path.join(data_dir, "hockey.players.csv")),
-        ("puckpedia.contracts.csv", os.path.join(data_dir, "puckpedia.contracts.csv")),
-        ("backup_history.csv", os.path.join(data_dir, "backup_history.csv")),
-        (f"transactions_{season}.csv", os.path.join(data_dir, f"transactions_{season}.csv")),
-        (f"points_periods_{season}.csv", os.path.join(data_dir, f"points_periods_{season}.csv")),
-        (f"event_log_{season}.csv", os.path.join(data_dir, f"event_log_{season}.csv")),
+        f"equipes_joueurs_{season_lbl}.csv",
+        "hockey.players.csv",
+        "puckpedia.contracts.csv",
+        "backup_history.csv",
+        f"transactions_{season_lbl}.csv",
+        f"points_periods_{season_lbl}.csv",
+        f"event_log_{season_lbl}.csv",
     ]
 
 
-def _ensure_parent(path: str) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+# ============================================================
+# Drive OAuth helpers (minimal, robust)
+# ============================================================
+
+def oauth_drive_enabled() -> bool:
+    """
+    True si on a des creds OAuth valides dans st.session_state (ou secrets).
+    Ici, on considère "drive_creds" en session_state.
+    """
+    return bool(st.session_state.get("drive_creds"))
 
 
-def _append_backup_history(data_dir: str, row: Dict) -> None:
+def get_oauth_drive_service() -> Optional[Any]:
     """
-    Append dans data/backup_history.csv (créé si absent). Ne lève pas d'exception.
+    Retourne un service Drive (googleapiclient) si creds dispo.
     """
-    path = os.path.join(data_dir, "backup_history.csv")
-    _ensure_parent(path)
-    cols = ["timestamp", "action", "mode", "file", "drive_name", "drive_id", "result", "details"]
+    if build is None or Credentials is None:
+        return None
+    creds_dict = st.session_state.get("drive_creds")
+    if not creds_dict:
+        return None
 
     try:
-        if os.path.exists(path):
-            df = pd.read_csv(path)
-        else:
-            df = pd.DataFrame(columns=cols)
-
-        for c in cols:
-            if c not in df.columns:
-                df[c] = ""
-
-        out = {c: row.get(c, "") for c in cols}
-        df = pd.concat([df, pd.DataFrame([out])], ignore_index=True)
-        df.to_csv(path, index=False)
+        creds = Credentials.from_authorized_user_info(creds_dict)
+        svc = build("drive", "v3", credentials=creds)
+        return svc
     except Exception:
-        pass
+        return None
 
 
-def _human_bytes(n) -> str:
-    try:
-        n = int(n)
-    except Exception:
-        return ""
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if n < 1024:
-            return f"{n} {unit}"
-        n = n / 1024
-    return f"{int(n)} PB"
+def list_drive_csv_files(svc: Any, folder_id: str) -> List[Dict[str, str]]:
+    """
+    Liste les CSV dans un folder Drive. Retour: [{id,name}, ...]
+    """
+    if not svc or not folder_id:
+        return []
+    q = f"'{folder_id}' in parents and trashed=false and mimeType='text/csv'"
+    res = svc.files().list(
+        q=q,
+        fields="files(id,name,createdTime,modifiedTime)",
+        pageSize=200,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+    files = res.get("files", []) or []
+    # tri par modifiedTime desc si présent
+    def _key(x):
+        return x.get("modifiedTime") or x.get("createdTime") or ""
+    files.sort(key=_key, reverse=True)
+    return [{"id": f["id"], "name": f["name"]} for f in files if f.get("id") and f.get("name")]
 
 
-# =========================
-# Drive UI blocks
-# =========================
-def _ui_drive_restore(ctx: dict) -> None:
-    data_dir = _data_dir(ctx)
-    season = _season(ctx)
-    folder_id = _drive_folder_id(ctx)
+def drive_download_file(svc: Any, file_id: str) -> bytes:
+    """
+    Download binaire d’un fichier Drive.
+    """
+    if not svc or not file_id:
+        raise ValueError("drive_download_file: svc/file_id missing")
 
-    st.markdown("### ☁️ Drive — Restore selected CSV (OAuth)")
-    st.caption("Dossier Drive: My Drive / PMS Pool Data / PoolHockeyData")
-    st.code(f"folder_id = {folder_id or '(missing)'}")
-
-    if not folder_id:
-        st.warning("folder_id manquant. Ajoute `gdrive_folder_id` dans Secrets Streamlit Cloud.")
-        return
-
-    if not drive_ready():
-        st.warning("Drive OAuth non prêt. Ajoute `[gdrive_oauth]` + `gdrive_folder_id` dans Secrets.")
-        return
-
-    files = drive_list_files(folder_id=folder_id, name_contains="", limit=500)
-    csv_files = [f for f in files if str(f.get("name", "")).lower().endswith(".csv")]
-
-    if not csv_files:
-        st.info("Aucun CSV détecté dans le dossier Drive.")
-        return
-
-    def _label(f):
-        nm = f.get("name", "")
-        mt = f.get("modifiedTime", "")
-        sz = _human_bytes(f.get("size", 0))
-        return f"{nm}  —  {mt}  —  {sz}"
-
-    options = {_label(f): f for f in csv_files}
-    pick_label = st.selectbox("Choisir un CSV à restaurer", list(options.keys()), key="admin_restore_drive_pick")
-    picked = options.get(pick_label)
-
-    # destination locale
-    crit = _critical_files(data_dir, season)
-    dest_names = [lab for lab, _ in crit] + ["(custom filename in data/)"]
-    dest_pick = st.selectbox("Restaurer vers (local)", dest_names, key="admin_restore_drive_dest")
-
-    custom = ""
-    if dest_pick == "(custom filename in data/)":
-        custom = st.text_input("Nom fichier destination (dans data/)", value="custom.csv", key="admin_restore_drive_custom")
-
-    if dest_pick == "(custom filename in data/)":
-        dest_path = os.path.join(data_dir, custom.strip() or "custom.csv")
-        dest_name = os.path.basename(dest_path)
-    else:
-        dest_map = {lab: path for lab, path in crit}
-        dest_path = dest_map.get(dest_pick, "")
-        dest_name = dest_pick
-
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        go = st.button("⬇️ Restore maintenant", type="primary", key="admin_restore_drive_go")
-    with c2:
-        st.caption("Le fichier local est remplacé par la version Drive choisie.")
-
-    if go:
-        if not picked:
-            st.error("Aucun fichier Drive sélectionné.")
-            return
-        if not dest_path:
-            st.error("Destination locale invalide.")
-            return
-
-        res = drive_download_file(picked.get("id", ""), dest_path)
-        ts = _now_iso()
-
-        if res.get("ok"):
-            st.success(f"✅ Restored: `{dest_name}`")
-
-            _append_backup_history(
-                data_dir,
-                {
-                    "timestamp": ts,
-                    "action": "restore",
-                    "mode": "drive",
-                    "file": dest_name,
-                    "drive_name": picked.get("name", ""),
-                    "drive_id": picked.get("id", ""),
-                    "result": "ok",
-                    "details": "",
-                },
-            )
-
-            append_event(
-                data_dir=data_dir,
-                season=season,
-                owner=str(st.session_state.get("selected_owner") or ""),
-                event_type="restore",
-                summary=f"Restore depuis Drive → {dest_name}",
-                payload={"drive_file": picked.get("name", ""), "dest": dest_name},
-            )
-
-            st.rerun()
-        else:
-            st.error("❌ Restore échoué")
-            st.code(res.get("error", "unknown error"))
-
-            _append_backup_history(
-                data_dir,
-                {
-                    "timestamp": ts,
-                    "action": "restore",
-                    "mode": "drive",
-                    "file": dest_name,
-                    "drive_name": picked.get("name", ""),
-                    "drive_id": picked.get("id", ""),
-                    "result": "fail",
-                    "details": str(res.get("error", "")),
-                },
-            )
+    request = svc.files().get_media(fileId=file_id, supportsAllDrives=True)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while done is False:
+        status, done = downloader.next_chunk()
+        # status peut être None
+    return fh.getvalue()
 
 
-def _ui_drive_backup(ctx: dict) -> None:
-    data_dir = _data_dir(ctx)
-    season = _season(ctx)
-    folder_id = _drive_folder_id(ctx)
+def _find_drive_file_by_name(svc: Any, folder_id: str, name: str) -> Optional[Dict[str, str]]:
+    """
+    Cherche un fichier par name dans folder_id. Retour {id,name} ou None.
+    """
+    if not svc or not folder_id or not name:
+        return None
+    # échappement basique
+    safe_name = name.replace("'", "\\'")
+    q = f"'{folder_id}' in parents and trashed=false and name='{safe_name}'"
+    res = svc.files().list(
+        q=q,
+        fields="files(id,name)",
+        pageSize=10,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+    files = res.get("files", []) or []
+    if not files:
+        return None
+    f = files[0]
+    return {"id": f["id"], "name": f["name"]}
 
-    st.markdown("### ☁️ Drive — Backup now (OAuth)")
-    st.caption("Upload UPSERT: si le fichier existe déjà dans Drive, il est mis à jour.")
-    st.code(f"folder_id = {folder_id or '(missing)'}")
 
-    if not folder_id:
-        st.warning("folder_id manquant. Ajoute `gdrive_folder_id` dans Secrets Streamlit Cloud.")
-        return
+def drive_upload_upsert_csv(
+    svc: Any,
+    folder_id: str,
+    local_path: str,
+    drive_name: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Upload/Upsert: si drive_name existe dans folder, update, sinon create.
+    Retour {id,name}
+    """
+    if not svc or not folder_id:
+        raise ValueError("drive_upload_upsert_csv: svc/folder_id missing")
+    if not local_path or not os.path.exists(local_path):
+        raise FileNotFoundError(local_path)
 
-    if not drive_ready():
-        st.warning("Drive OAuth non prêt. Ajoute `[gdrive_oauth]` + `gdrive_folder_id` dans Secrets.")
-        return
+    drive_name = drive_name or os.path.basename(local_path)
+    existing = _find_drive_file_by_name(svc, folder_id, drive_name)
 
-    crit = _critical_files(data_dir, season)
-    labels = [lab for lab, _ in crit]
-
-    selected = st.multiselect(
-        "Choisir les fichiers à sauvegarder",
-        options=labels,
-        default=labels,
-        key="admin_backup_files",
+    media = MediaIoBaseUpload(
+        io.FileIO(local_path, "rb"),
+        mimetype="text/csv",
+        resumable=True,
     )
 
-    if st.button("⬆️ Backup maintenant", type="primary", key="admin_backup_go"):
-        if not selected:
-            st.warning("Aucun fichier sélectionné.")
-            return
+    if existing:
+        file_id = existing["id"]
+        updated = svc.files().update(
+            fileId=file_id,
+            media_body=media,
+            fields="id,name",
+            supportsAllDrives=True,
+        ).execute()
+        return {"id": updated["id"], "name": updated["name"]}
+    else:
+        metadata = {"name": drive_name, "parents": [folder_id]}
+        created = svc.files().create(
+            body=metadata,
+            media_body=media,
+            fields="id,name",
+            supportsAllDrives=True,
+        ).execute()
+        return {"id": created["id"], "name": created["name"]}
 
-        ok_count = 0
-        fail_count = 0
-        results = []
 
-        for lab, path in crit:
-            if lab not in selected:
-                continue
+# ============================================================
+# Data helpers
+# ============================================================
 
-            ts = _now_iso()
+def ensure_data_dir(data_dir: str) -> str:
+    data_dir = data_dir or DATA_DIR_DEFAULT
+    os.makedirs(data_dir, exist_ok=True)
+    return data_dir
 
-            if not os.path.exists(path):
-                fail_count += 1
-                results.append((lab, "missing local file"))
-                _append_backup_history(
-                    data_dir,
-                    {
-                        "timestamp": ts,
-                        "action": "backup",
-                        "mode": "drive",
-                        "file": lab,
-                        "drive_name": lab,
-                        "drive_id": "",
-                        "result": "fail",
-                        "details": "missing local file",
-                    },
-                )
-                continue
 
-            res = drive_upload_file(folder_id, path, drive_name=lab)
-            if res.get("ok"):
-                ok_count += 1
-                results.append((lab, f"ok ({res.get('mode')})"))
-                _append_backup_history(
-                    data_dir,
-                    {
-                        "timestamp": ts,
-                        "action": "backup",
-                        "mode": "drive",
-                        "file": lab,
-                        "drive_name": lab,
-                        "drive_id": res.get("id", ""),
-                        "result": "ok",
-                        "details": res.get("mode", ""),
-                    },
-                )
-            else:
-                fail_count += 1
-                results.append((lab, f"fail: {res.get('error')}"))
-                _append_backup_history(
-                    data_dir,
-                    {
-                        "timestamp": ts,
-                        "action": "backup",
-                        "mode": "drive",
-                        "file": lab,
-                        "drive_name": lab,
-                        "drive_id": "",
-                        "result": "fail",
-                        "details": str(res.get("error", "")),
-                    },
-                )
+def read_csv_bytes_to_df(csv_bytes: bytes) -> pd.DataFrame:
+    try:
+        return pd.read_csv(io.BytesIO(csv_bytes))
+    except Exception:
+        return pd.read_csv(io.BytesIO(csv_bytes), encoding="latin-1")
 
-        append_event(
-            data_dir=data_dir,
-            season=season,
-            owner=str(st.session_state.get("selected_owner") or ""),
-            event_type="backup",
-            summary=f"Backup Drive — ok:{ok_count} fail:{fail_count}",
-            payload={"results": results},
+
+def validate_equipes_df(df: pd.DataFrame) -> Tuple[bool, List[str], List[str]]:
+    """
+    Adapte expected à TES colonnes.
+    """
+    expected = [
+        "Propriétaire",
+        "Joueur",
+        "Position",
+        "Equipe",   # ou "Équipe" chez toi
+        "Statut",
+    ]
+    cols = list(df.columns)
+    missing = [c for c in expected if c not in cols]
+    extras = [c for c in cols if c not in expected]
+    ok = (len(missing) == 0)
+    return ok, missing, extras
+
+
+def reload_equipes_in_memory(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    for c in ["Propriétaire", "Joueur", "Position", "Equipe", "Statut", "Équipe"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.strip()
+    st.session_state["equipes_df"] = df
+    st.session_state["equipes_path"] = path
+    st.session_state["equipes_last_loaded"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return df
+
+
+# ============================================================
+# UI blocks
+# ============================================================
+
+def ui_backups_restore_drive(
+    *,
+    svc: Any,
+    folder_id: str,
+    data_dir: str,
+    season_lbl: str,
+) -> None:
+    """
+    Section Drive: Restore selected CSV + Backup now (multi-select).
+    """
+    st.markdown("## ☁️ Backups & Restore (Drive)")
+    st.caption("Dossier Drive: My Drive / PMS Pool Data / PoolHockeyData")
+    st.code(f"folder_id = {folder_id}")
+
+    # ---- Restore selected CSV (Drive)
+    st.markdown("### ☁️ Drive — Restore selected CSV (OAuth)")
+    drive_csvs = list_drive_csv_files(svc, folder_id)
+
+    if not drive_csvs:
+        st.info("Aucun CSV détecté dans le dossier Drive.")
+    else:
+        selected = st.selectbox(
+            "Choisir un CSV à restaurer depuis Drive",
+            drive_csvs,
+            format_func=lambda x: x["name"],
+            key="admin_restore_drive_select",
         )
 
-        if fail_count == 0:
-            st.success(f"✅ Backup terminé — {ok_count} fichiers")
-        else:
-            st.warning(f"⚠️ Backup terminé — ok:{ok_count} fail:{fail_count}")
-            st.dataframe(pd.DataFrame(results, columns=["file", "result"]), use_container_width=True, hide_index=True)
+        # Destination locale (dropdown)
+        crit = critical_files_for_season(season_lbl)
+        default_dest = f"equipes_joueurs_{season_lbl}.csv"
+        dest_choice = st.selectbox(
+            "Restaurer vers (local /Data)",
+            crit,
+            index=crit.index(default_dest) if default_dest in crit else 0,
+            key="admin_restore_drive_dest",
+        )
+        target_path = os.path.join(data_dir, dest_choice)
+
+        if st.button("⬇️ Restaurer depuis Drive", use_container_width=True, key="admin_restore_drive_btn"):
+            try:
+                content = drive_download_file(svc, selected["id"])
+                with open(target_path, "wb") as f:
+                    f.write(content)
+                st.success(f"✅ Restauré → `{target_path}`")
+                # reload auto si equipes
+                if dest_choice.lower().startswith("equipes_joueurs_"):
+                    try:
+                        reload_equipes_in_memory(target_path)
+                        st.info("🔄 Équipes rechargées en mémoire.")
+                    except Exception as e:
+                        st.warning(f"Équipes: reload échoué: {e}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Restore Drive échoué: {e}")
+
+    st.divider()
+
+    # ---- Backup now (Drive) (upsert)
+    st.markdown("### ☁️ Drive — Backup now (OAuth)")
+    st.caption("Upload UPSERT: si le fichier existe déjà dans Drive, il est mis à jour.")
+
+    crit = critical_files_for_season(season_lbl)
+    default_sel = [x for x in crit if os.path.exists(os.path.join(data_dir, x))]
+    selected_files = st.multiselect(
+        "Choisir les fichiers à sauvegarder",
+        crit,
+        default=default_sel,
+        key="admin_backup_drive_multiselect",
+    )
+
+    if st.button("⬆️ Backup maintenant", use_container_width=True, key="admin_backup_drive_btn"):
+        ok_count, fail_count = 0, 0
+        for name in selected_files:
+            local_path = os.path.join(data_dir, name)
+            try:
+                if not os.path.exists(local_path):
+                    fail_count += 1
+                    st.warning(f"⛔ Introuvable local: {local_path}")
+                    continue
+                res = drive_upload_upsert_csv(svc, folder_id, local_path, drive_name=name)
+                ok_count += 1
+                st.success(f"✅ Drive upsert: {res['name']}")
+            except Exception as e:
+                fail_count += 1
+                st.error(f"❌ Backup échoué ({name}): {e}")
+
+        st.info(f"Backup terminé: ✅ {ok_count} | ❌ {fail_count}")
 
 
-def _ui_local_restore(ctx: dict) -> None:
-    data_dir = _data_dir(ctx)
-    season = _season(ctx)
+def ui_restore_local_fallback(*, data_dir: str, season_lbl: str) -> None:
+    """
+    Upload local -> write into /Data + optional reload
+    """
+    st.markdown("## 📦 Restore local (fallback)")
+    st.caption("Si Drive OAuth n’est pas prêt, tu peux uploader un CSV et choisir la destination locale.")
 
-    st.markdown("### 📦 Restore local (fallback)")
-    st.caption("Si Drive OAuth n’est pas prêt, tu peux uploader un CSV et choisir sa destination locale.")
+    crit = critical_files_for_season(season_lbl)
+    dest_choice = st.selectbox(
+        "Restaurer vers (local)",
+        crit,
+        index=0,
+        key="admin_restore_local_dest",
+    )
+    target_path = os.path.join(data_dir, dest_choice)
 
-    crit = _critical_files(data_dir, season)
-    dest_names = [lab for lab, _ in crit] + ["(custom filename in data/)"]
+    uploaded = st.file_uploader("Uploader un CSV", type=["csv"], key="admin_restore_local_uploader")
 
-    up = st.file_uploader("Uploader un CSV", type=["csv"], key="admin_local_restore_upload")
-
-    dest_pick = st.selectbox("Restaurer vers (local)", dest_names, key="admin_local_restore_dest")
-    custom = ""
-    if dest_pick == "(custom filename in data/)":
-        custom = st.text_input("Nom fichier destination (dans data/)", value="custom.csv", key="admin_local_restore_custom")
-
-    if dest_pick == "(custom filename in data/)":
-        dest_path = os.path.join(data_dir, custom.strip() or "custom.csv")
-        dest_name = os.path.basename(dest_path)
-    else:
-        dest_map = {lab: path for lab, path in crit}
-        dest_path = dest_map.get(dest_pick, "")
-        dest_name = dest_pick
-
-    if st.button("💾 Restore local maintenant", type="primary", key="admin_local_restore_go"):
-        if up is None:
-            st.error("Uploader un fichier CSV d'abord.")
+    if st.button("💾 Restore local maintenant", use_container_width=True, key="admin_restore_local_btn"):
+        if uploaded is None:
+            st.warning("Upload un fichier CSV d’abord.")
             return
-        if not dest_path:
-            st.error("Destination invalide.")
-            return
-
-        _ensure_parent(dest_path)
         try:
-            content = up.getvalue()
-            with open(dest_path, "wb") as f:
-                f.write(content)
-
-            ts = _now_iso()
-            _append_backup_history(
-                data_dir,
-                {
-                    "timestamp": ts,
-                    "action": "restore",
-                    "mode": "local",
-                    "file": dest_name,
-                    "drive_name": "",
-                    "drive_id": "",
-                    "result": "ok",
-                    "details": "",
-                },
-            )
-            append_event(
-                data_dir=data_dir,
-                season=season,
-                owner=str(st.session_state.get("selected_owner") or ""),
-                event_type="restore",
-                summary=f"Restore local → {dest_name}",
-                payload={"dest": dest_name},
-            )
-            st.success(f"✅ Restored local: `{dest_name}`")
+            with open(target_path, "wb") as f:
+                f.write(uploaded.getbuffer())
+            st.success(f"✅ Restauré → `{target_path}`")
+            if dest_choice.lower().startswith("equipes_joueurs_"):
+                try:
+                    reload_equipes_in_memory(target_path)
+                    st.info("🔄 Équipes rechargées en mémoire.")
+                except Exception as e:
+                    st.warning(f"Équipes: reload échoué: {e}")
             st.rerun()
         except Exception as e:
-            st.error("❌ Restore local échoué")
-            st.code(str(e))
+            st.error(f"Restore local échoué: {e}")
 
 
-# =========================
-# Players DB Admin (hook)
-# =========================
-def _ui_players_db_admin(ctx: dict) -> None:
-    st.markdown("### 🗂️ Players DB (Admin)")
+def ui_equipes_import_preview_validate_reload_rollback(
+    *,
+    svc: Optional[Any],
+    drive_ok: bool,
+    folder_id: str,
+    data_dir: str,
+    season_lbl: str,
+) -> None:
+    """
+    Bloc unique:
+    - Preview (Drive/Local)
+    - Validate structure
+    - Import + Reload
+    - Rollback Drive -> Local + Reload
+    """
+    with st.expander("👥 Équipes — Import / Preview / Validate / Reload / Rollback", expanded=False):
+        st.caption("Importer le CSV `equipes_joueurs_YYYY-YYYY.csv`, prévisualiser, valider, recharger en mémoire, et rollback depuis Drive.")
 
-    update_fn = ctx.get("update_players_db")
-    if not callable(update_fn):
-        st.warning(
-            "update_players_db introuvable. Assure-toi que `pms_enrich.py` expose `update_players_db` "
-            "et que `app.py` le passe dans ctx."
-        )
-        return
+        target_path = os.path.join(data_dir, f"equipes_joueurs_{season_lbl}.csv")
+        st.code(f"Destination locale: {target_path}")
 
-    data_dir = _data_dir(ctx)
-    season = _season(ctx)
+        # session state preview
+        st.session_state.setdefault("equipes_preview_df", None)
+        st.session_state.setdefault("equipes_preview_src", "")
 
-    colA, colB, colC = st.columns([1, 1, 1])
-    with colA:
-        roster_only = st.checkbox("⚡ Roster actif seulement", value=bool(st.session_state.get("pdb_roster_only", False)), key="pdb_roster_only")
-    with colB:
-        details = st.checkbox("Afficher détails", value=bool(st.session_state.get("pdb_details", False)), key="pdb_details")
-    with colC:
-        lock = st.checkbox("LOCK", value=bool(st.session_state.get("pdb_lock", False)), key="pdb_lock")
+        colA, colB = st.columns(2)
 
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        reset_cache = st.button("🧹 Reset cache", key="pdb_reset_cache")
-    with c2:
-        reset_progress = st.button("🧹 Reset progress", key="pdb_reset_progress")
-    with c3:
-        reset_failed = st.button("🧽 Reset failed only", key="pdb_reset_failed")
+        # ---- Drive source
+        with colA:
+            st.markdown("### ☁️ Drive (OAuth)")
+            if drive_ok and svc and folder_id:
+                drive_csvs = list_drive_csv_files(svc, folder_id)
+                drive_equipes = [x for x in (drive_csvs or []) if "equipes_joueurs" in str(x.get("name", "")).lower()]
 
-    st.divider()
+                if not drive_equipes:
+                    st.info("Aucun CSV `equipes_joueurs...` trouvé sur Drive.")
+                else:
+                    selected_drive = st.selectbox(
+                        "Choisir un CSV équipes sur Drive",
+                        drive_equipes,
+                        format_func=lambda x: x["name"],
+                        key="equipes_drive_select",
+                    )
 
-    colX, colY = st.columns(2)
-    with colX:
-        go_update = st.button("⬆️ Mettre à jour Players DB", type="primary", key="pdb_go_update")
-    with colY:
-        go_resume = st.button("▶️ Resume Country fill", key="pdb_go_resume")
+                    if st.button("👁️ Preview (Drive)", use_container_width=True, key="equipes_preview_drive"):
+                        try:
+                            content = drive_download_file(svc, selected_drive["id"])
+                            df_prev = read_csv_bytes_to_df(content)
+                            st.session_state["equipes_preview_df"] = df_prev
+                            st.session_state["equipes_preview_src"] = f"Drive: {selected_drive['name']}"
+                            st.success("Preview chargé.")
+                        except Exception as e:
+                            st.error(f"Erreur preview Drive: {e}")
 
-    if go_update or go_resume or reset_cache or reset_progress or reset_failed:
-        try:
-            res = update_fn(
-                data_dir=data_dir,
-                season=season,
-                mode="resume" if go_resume else "update",
-                roster_only=roster_only,
-                details=details,
-                lock=lock,
-                reset_cache=reset_cache,
-                reset_progress=reset_progress,
-                reset_failed_only=reset_failed,
-            )
-            st.success("✅ Terminé.")
-            st.json(res if isinstance(res, dict) else {"result": str(res)})
+                    if st.button("⬇️ Importer (Drive) + Reload", use_container_width=True, key="equipes_import_drive"):
+                        try:
+                            content = drive_download_file(svc, selected_drive["id"])
+                            df_check = read_csv_bytes_to_df(content)
 
-            append_event(
-                data_dir=data_dir,
-                season=season,
-                owner=str(st.session_state.get("selected_owner") or ""),
-                event_type="players_db",
-                summary=f"Players DB: {'resume' if go_resume else 'update'}",
-                payload=res if isinstance(res, dict) else {"result": str(res)},
-            )
-        except Exception as e:
-            st.error("❌ Players DB error")
-            st.code(str(e))
+                            ok, missing, extras = validate_equipes_df(df_check)
+                            if not ok:
+                                st.error(f"❌ Colonnes manquantes: {missing}")
+                                st.stop()
+
+                            with open(target_path, "wb") as f:
+                                f.write(content)
+
+                            reload_equipes_in_memory(target_path)
+                            st.success("✅ Import Drive + reload OK.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erreur import Drive: {e}")
+            else:
+                st.warning("Drive OAuth non disponible.")
+
+        # ---- Local source
+        with colB:
+            st.markdown("### 📦 Local (fallback)")
+            uploaded = st.file_uploader("Uploader un CSV équipes", type=["csv"], key="equipes_local_uploader")
+
+            if uploaded is not None:
+                if st.button("👁️ Preview (Local)", use_container_width=True, key="equipes_preview_local"):
+                    try:
+                        df_prev = pd.read_csv(uploaded)
+                        st.session_state["equipes_preview_df"] = df_prev
+                        st.session_state["equipes_preview_src"] = f"Local: {uploaded.name}"
+                        st.success("Preview chargé.")
+                    except Exception as e:
+                        st.error(f"Erreur preview Local: {e}")
+
+                if st.button("💾 Importer (Local) + Reload", use_container_width=True, key="equipes_import_local"):
+                    try:
+                        df_check = pd.read_csv(uploaded)
+                        ok, missing, extras = validate_equipes_df(df_check)
+                        if not ok:
+                            st.error(f"❌ Colonnes manquantes: {missing}")
+                            st.stop()
+
+                        uploaded.seek(0)
+                        with open(target_path, "wb") as f:
+                            f.write(uploaded.getbuffer())
+
+                        reload_equipes_in_memory(target_path)
+                        st.success("✅ Import Local + reload OK.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erreur import Local: {e}")
+
+        st.divider()
+
+        # ---- Preview + Validate + Reload current local
+        st.markdown("### 🧼 Preview & Validation")
+        df_prev = st.session_state.get("equipes_preview_df")
+
+        if df_prev is None or not isinstance(df_prev, pd.DataFrame) or df_prev.empty:
+            st.info("Aucun preview chargé. Clique sur **Preview (Drive)** ou **Preview (Local)**.")
+        else:
+            st.caption(f"Source: **{st.session_state.get('equipes_preview_src','')}**")
+            st.dataframe(df_prev.head(50), use_container_width=True)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("🧪 Valider structure (colonnes attendues)", use_container_width=True, key="equipes_validate_btn"):
+                    ok, missing, extras = validate_equipes_df(df_prev)
+                    if ok:
+                        st.success("✅ Structure OK (colonnes attendues présentes).")
+                        if extras:
+                            st.info(f"Colonnes additionnelles (ok): {extras}")
+                    else:
+                        st.error(f"❌ Colonnes manquantes: {missing}")
+                        if extras:
+                            st.info(f"Colonnes additionnelles: {extras}")
+
+            with c2:
+                if st.button("🔄 Reload depuis fichier local actuel", use_container_width=True, key="equipes_reload_current_btn"):
+                    if not os.path.exists(target_path):
+                        st.error("Le fichier local cible n'existe pas encore.")
+                    else:
+                        try:
+                            reload_equipes_in_memory(target_path)
+                            st.success("✅ Reload effectué.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erreur reload: {e}")
+
+        st.divider()
+
+        # ---- Rollback from Drive
+        st.markdown("### 🧯 Rollback rapide (Drive)")
+        st.caption("Restaure un ancien `equipes_joueurs...` depuis Drive vers le fichier local, puis reload.")
+
+        if drive_ok and svc and folder_id:
+            try:
+                drive_csvs = list_drive_csv_files(svc, folder_id)
+                drive_equipes_all = [x for x in (drive_csvs or []) if "equipes_joueurs" in str(x.get("name", "")).lower()]
+
+                if not drive_equipes_all:
+                    st.info("Aucun CSV `equipes_joueurs...` disponible pour rollback sur Drive.")
+                else:
+                    rb = st.selectbox(
+                        "Choisir un backup équipes (Drive)",
+                        drive_equipes_all,
+                        format_func=lambda x: x["name"],
+                        key="equipes_rollback_select",
+                    )
+
+                    if st.button("🧯 Rollback (Drive) → Local + Reload", use_container_width=True, key="equipes_rollback_btn"):
+                        content = drive_download_file(svc, rb["id"])
+                        df_check = read_csv_bytes_to_df(content)
+                        ok, missing, extras = validate_equipes_df(df_check)
+                        if not ok:
+                            st.error(f"Rollback refusé: colonnes manquantes {missing}")
+                            st.stop()
+
+                        with open(target_path, "wb") as f:
+                            f.write(content)
+
+                        reload_equipes_in_memory(target_path)
+                        st.success(f"✅ Rollback effectué depuis `{rb['name']}` + reload OK.")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Erreur rollback Drive: {e}")
+        else:
+            st.warning("Drive OAuth non disponible — rollback Drive impossible.")
 
 
-# =========================
-# Main render
-# =========================
-def render(ctx: dict) -> None:
-    st.header("🛠️ Gestion Admin")
+# ============================================================
+# Main entry: render admin tab
+# ============================================================
 
-    if not _is_admin(ctx):
+def render_admin_tab(
+    *,
+    is_admin: bool,
+    season_lbl: str,
+    data_dir: str = DATA_DIR_DEFAULT,
+    folder_id: str = DRIVE_FOLDER_ID_DEFAULT,
+) -> None:
+    """
+    Call this from app.py when active_tab == "🛠️ Gestion Admin"
+    """
+    if not is_admin:
         st.warning("Accès admin requis.")
-        return
+        st.stop()
 
-    data_dir = _data_dir(ctx)
-    season = _season(ctx)
-    os.makedirs(data_dir, exist_ok=True)
+    data_dir = ensure_data_dir(data_dir)
+    season_lbl = str(season_lbl or "").strip() or "2025-2026"
 
-    # -------- Drive section
-    with st.expander("☁️ Backups & Restore (Drive)", expanded=True):
-        _ui_drive_restore(ctx)
-        st.divider()
-        _ui_drive_backup(ctx)
-        st.divider()
-        _ui_local_restore(ctx)
+    st.subheader("🛠️ Gestion Admin")
 
-        # ✅ OPTION A: pas d'expander imbriqué — debug visible
-        st.divider()
-        st.markdown("#### 🔎 Debug (paths)")
-        st.write("Fichiers critiques attendus localement :")
-        st.code("\n".join([p for _, p in _critical_files(data_dir, season)]))
-        st.write("Event log :")
-        st.code(event_log_path(data_dir, season))
+    # ---- Drive service
+    svc = get_oauth_drive_service()
+    drive_ok = bool(svc) and bool(folder_id)
+
+    # ---- Equipes block (import/preview/validate/reload/rollback)
+    ui_equipes_import_preview_validate_reload_rollback(
+        svc=svc,
+        drive_ok=drive_ok,
+        folder_id=folder_id,
+        data_dir=data_dir,
+        season_lbl=season_lbl,
+    )
 
     st.divider()
 
-    # -------- Players DB
-    with st.expander("🗂️ Players DB (Admin)", expanded=True):
-        _ui_players_db_admin(ctx)
+    # ---- Backups & Restore (Drive)
+    if drive_ok and svc and folder_id:
+        with st.expander("🧷 Backups & Restore (Drive)", expanded=False):
+            ui_backups_restore_drive(
+                svc=svc,
+                folder_id=folder_id,
+                data_dir=data_dir,
+                season_lbl=season_lbl,
+            )
+    else:
+        st.info("Drive OAuth indisponible. Les fonctions Drive sont désactivées (fallback local disponible).")
+
+    st.divider()
+
+    # ---- Restore local fallback
+    with st.expander("📦 Restore local (fallback)", expanded=False):
+        ui_restore_local_fallback(data_dir=data_dir, season_lbl=season_lbl)
+
+
+# ============================================================
+# Optional: quick self-test (run directly)
+# ============================================================
+
+def _demo_page():
+    st.set_page_config(page_title="Admin Demo", layout="wide")
+    st.title("Admin Demo")
+
+    # Simule admin + season
+    is_admin = True
+    season_lbl = "2025-2026"
+
+    # Mets ton folder_id ici ou en param depuis app.py
+    folder_id = st.text_input("Drive folder_id", value=st.session_state.get("folder_id", DRIVE_FOLDER_ID_DEFAULT))
+    st.session_state["folder_id"] = folder_id
+
+    st.info("⚠️ Pour Drive OAuth: st.session_state['drive_creds'] doit contenir les creds OAuth (dict).")
+
+    render_admin_tab(is_admin=is_admin, season_lbl=season_lbl, data_dir=DATA_DIR_DEFAULT, folder_id=folder_id)
+
+
+if __name__ == "__main__":
+    _demo_page()
