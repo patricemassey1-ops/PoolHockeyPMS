@@ -6,6 +6,10 @@ import streamlit as st
 # =========================================================
 st.set_page_config(page_title="Pool Hockey", layout="wide")
 
+from services.auth import require_password
+require_password()
+
+
 from services.event_log import append_event
 from services.storage import DATA_DIR, ensure_data_dir, season_default
 from services.ui import apply_theme
