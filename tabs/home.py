@@ -75,7 +75,7 @@ def render(ctx: dict) -> None:
     # ----------------------------
     with st.expander("🔎 Debug — chemins de logos (optionnel)", expanded=False):
         st.caption("Résolution: assets/previews puis data.")
-        for fn in ["Whalers_Logo.png","Nordiques_Logo.png","Predateurs_Logo.png","Cracheurs_Logo.png","Red_Wings_Logo.png"]:
+        for fn in ["Whalers_Logo.png","Nordiques_Logo.png","Predateurs_Logo.png","Cracheurs_Logo.png","Canadiens_Logo.png","Red_Wings_Logo.png"]:
             p = path_team_logo(fn)
             if p:
                 st.write(f"- {fn} → {p}")
