@@ -389,6 +389,145 @@ def ui_restore_local_fallback(*, data_dir: str, season_lbl: str) -> None:
         except Exception as e:
             st.error(f"Restore local échoué: {e}")
 
+import numpy as np
+
+def _norm_team_slot(s: Any) -> str:
+    return str(s or "").strip().lower()
+
+def _norm_level(v: Any) -> str:
+    s = str(v or "").strip().upper()
+    if s in {"ELC", "STD"}:
+        return s
+    return "0" if s in {"", "0", "NONE", "NAN"} else s
+
+def _infer_level_from_salary_and_player(
+    df: pd.DataFrame,
+    players_db: Optional[pd.DataFrame] = None,
+) -> pd.Series:
+    """
+    Heuristique safe:
+      1) Si players_db fourni et contient 'Joueur' + 'Level' -> mapping par nom.
+      2) Sinon, fallback: salaire <= 1.0M => ELC (approx) sinon STD
+    Retourne une Series de Level (ELC/STD/0) alignée sur df.
+    """
+    # 1) mapping via players_db (source de vérité si dispo)
+    if isinstance(players_db, pd.DataFrame) and not players_db.empty:
+        if "Joueur" in players_db.columns and "Level" in players_db.columns:
+            mp = (
+                players_db[["Joueur", "Level"]]
+                .dropna()
+                .assign(Joueur=lambda x: x["Joueur"].astype(str).str.strip())
+                .assign(Level=lambda x: x["Level"].astype(str).str.strip().str.upper())
+            )
+            level_map = dict(zip(mp["Joueur"], mp["Level"]))
+
+            def _map_name(name):
+                return level_map.get(str(name or "").strip(), "0")
+
+            mapped = df["Joueur"].apply(_map_name) if "Joueur" in df.columns else pd.Series(["0"] * len(df))
+            mapped = mapped.apply(_norm_level)
+            # garde juste ELC/STD sinon 0
+            mapped = mapped.apply(lambda x: x if x in {"ELC","STD"} else "0")
+            return mapped
+
+    # 2) fallback salaire
+    sal = pd.to_numeric(df.get("Salaire", 0), errors="coerce").fillna(0)
+    # Heuristique simple: <= 1,000,000 => ELC sinon STD
+    return sal.apply(lambda x: "ELC" if float(x) <= 1_000_000 else "STD")
+
+def apply_equipes_quality_checks_and_enrich(
+    df: pd.DataFrame,
+    players_db: Optional[pd.DataFrame] = None,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    - Auto-map Level (ELC/STD) quand Level==0
+    - Flags/alertes (IR Date rempli mais Slot != IR)
+    - Check cohérence Salaire vs Level (heuristique)
+    Retourne df enrichi + dict stats/alertes.
+    """
+    out = df.copy()
+
+    # Normalisations
+    if "Level" in out.columns:
+        out["Level"] = out["Level"].apply(_norm_level)
+    else:
+        out["Level"] = "0"
+
+    if "Salaire" in out.columns:
+        out["Salaire"] = pd.to_numeric(out["Salaire"], errors="coerce").fillna(0).astype(int)
+    else:
+        out["Salaire"] = 0
+
+    if "Slot" not in out.columns:
+        out["Slot"] = ""
+    if "Statut" not in out.columns:
+        out["Statut"] = ""
+
+    # IR Date "présent?"
+    if "IR Date" not in out.columns:
+        out["IR Date"] = ""
+    ir_date_present = out["IR Date"].astype(str).str.strip().ne("") & out["IR Date"].astype(str).str.lower().ne("nan")
+
+    # ---- 1) Auto-map Level quand == 0
+    need = out["Level"].isin({"0", "", "NONE"}) | out["Level"].isna()
+    if need.any():
+        inferred = _infer_level_from_salary_and_player(out, players_db=players_db)
+        # applique seulement là où missing/0
+        out.loc[need, "Level"] = inferred.loc[need].apply(_norm_level)
+
+    # ---- 2) Alerte IR Date rempli mais Slot != IR
+    slot_is_ir = out["Slot"].astype(str).str.strip().str.upper().eq("IR")
+    flag_ir_mismatch = ir_date_present & (~slot_is_ir)
+    out["⚠️ IR mismatch"] = flag_ir_mismatch
+
+    # ---- 3) Check cohérence Salaire vs Level (heuristique)
+    # Heuristique: si Level=ELC mais salaire > 1.5M => suspect
+    #             si Level=STD mais salaire <= 0 => suspect (souvent mapping manquant)
+    lvl = out["Level"].astype(str).str.upper()
+    sal = out["Salaire"].astype(int)
+
+    suspect_elc = (lvl.eq("ELC") & (sal > 1_500_000))
+    suspect_std = (lvl.eq("STD") & (sal <= 0))
+    out["⚠️ Salary/Level suspect"] = (suspect_elc | suspect_std)
+
+    stats = {
+        "rows": int(len(out)),
+        "level_autofilled": int(need.sum()),
+        "ir_mismatch": int(flag_ir_mismatch.sum()),
+        "salary_level_suspect": int((suspect_elc | suspect_std).sum()),
+    }
+    return out, stats
+
+def _preview_style_row(row: pd.Series):
+    """
+    Style de preview:
+      - IR mismatch: surligne
+      - Salary/Level suspect: surligne
+      - Slot IR: léger highlight
+      - Slot Mineur: léger highlight
+    """
+    styles = [""] * len(row)
+
+    slot = str(row.get("Slot", "")).strip().upper()
+    statut = str(row.get("Statut", "")).strip().lower()
+
+    ir_mis = bool(row.get("⚠️ IR mismatch", False))
+    sus = bool(row.get("⚠️ Salary/Level suspect", False))
+
+    # Priorité aux warnings
+    if ir_mis:
+        return ["background-color: rgba(255, 0, 0, 0.18)"] * len(row)
+    if sus:
+        return ["background-color: rgba(255, 165, 0, 0.16)"] * len(row)
+
+    # Sinon coloration "soft"
+    if slot == "IR" or "ir" in statut:
+        return ["background-color: rgba(160, 120, 255, 0.10)"] * len(row)
+    if slot in {"MINEUR", "MIN", "AHL"} or "mineur" in statut:
+        return ["background-color: rgba(120, 200, 255, 0.10)"] * len(row)
+
+    return styles
+
 
 def ui_equipes_import_preview_validate_reload_rollback(
     *,
@@ -508,7 +647,29 @@ def ui_equipes_import_preview_validate_reload_rollback(
             st.info("Aucun preview chargé. Clique sur **Preview (Drive)** ou **Preview (Local)**.")
         else:
             st.caption(f"Source: **{st.session_state.get('equipes_preview_src','')}**")
-            st.dataframe(df_prev.head(50), use_container_width=True)
+            # Enrich + checks pour preview
+            df_qc, stats = apply_equipes_quality_checks_and_enrich(df_prev)
+
+            # Résumé rapide
+            cA, cB, cC, cD = st.columns(4)
+            cA.metric("Lignes", stats["rows"])
+            cB.metric("Level auto-rempli", stats["level_autofilled"])
+            cC.metric("⚠️ IR mismatch", stats["ir_mismatch"])
+            cD.metric("⚠️ Salaire/Level suspect", stats["salary_level_suspect"])
+
+            # Preview colorée
+            try:
+                st.dataframe(
+                    df_qc.head(80).style.apply(_preview_style_row, axis=1),
+                    use_container_width=True
+                )
+            except Exception:
+                # fallback si style plante (rare)
+                st.dataframe(df_qc.head(80), use_container_width=True)
+
+            # Option: garder aussi en session_state pour valider/importer exactement ce preview enrichi
+            st.session_state["equipes_preview_df_qc"] = df_qc
+
 
             c1, c2 = st.columns(2)
             with c1:
