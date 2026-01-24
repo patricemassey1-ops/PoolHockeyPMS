@@ -63,7 +63,7 @@ is_admin = True
 
 
 # Drive folder id (OAuth)
-folder_id = st.secrets.get("gdrive_folder_id", "")
+folder_id = st.secrets.get("gdrive_folder_id", "1hIJovsHid2L1cY_wKM_sY-wVZKXAwrh1")
 
 
 # =========================================================
