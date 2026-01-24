@@ -181,19 +181,36 @@ def render(ctx: dict) -> None:
         if missing:
             raise ValueError("Colonnes manquantes après parse: " + ", ".join(missing))
 
+        df = fantrax_df.copy()
+
+        # 🔥 FIX CRITIQUE
+        # - enlève lignes NaN
+        # - enlève "Skaters", "Goalies", titres, lignes vides
+        df["Player"] = df["Player"].astype(str).str.strip()
+        df = df[
+            df["Player"].notna()
+            & df["Player"].ne("")
+            & (~df["Player"].str.lower().isin(["player", "skaters", "goalies", "nan"]))
+        ]
+
+        # sécurités supplémentaires
+        df = df[df["Salary"].notna()]
+        df = df[df["Pos"].notna()]
+
         return pd.DataFrame(
             {
                 "Propriétaire": owner,
-                "Joueur": fantrax_df["Player"].astype(str).str.strip(),
-                "Pos": fantrax_df["Pos"].astype(str).str.strip(),
-                "Equipe": fantrax_df["Team"].astype(str).str.strip(),
-                "Salaire": fantrax_df["Salary"],
+                "Joueur": df["Player"],
+                "Pos": df["Pos"].astype(str).str.strip(),
+                "Equipe": df["Team"].astype(str).str.strip(),
+                "Salaire": pd.to_numeric(df["Salary"], errors="coerce").fillna(0).astype(int),
                 "Level": "",
-                "Statut": fantrax_df["Status"].astype(str).str.strip(),
-                "Slot": fantrax_df["Status"].astype(str).map(_slot_from_status),
+                "Statut": df["Status"].astype(str).str.strip(),
+                "Slot": df["Status"].astype(str).map(_slot_from_status),
                 "IR Date": "",
             }
         )
+
 
     def _load_current_roster(dest: str) -> pd.DataFrame:
         try:
