@@ -1,5 +1,6 @@
 # tabs/admin.py
 import os
+import re
 import pandas as pd
 import streamlit as st
 from io import StringIO
@@ -29,7 +30,6 @@ def render(ctx: dict) -> None:
     season = ctx.get("season")
     update_fn = ctx.get("update_players_db")
 
-    # Targets locaux (toujours sous /data grâce à services.storage)
     targets = {
         "Players DB (data/hockey.players.csv)": path_players_db(),
         "Contracts (data/puckpedia.contracts.csv)": path_contracts(),
@@ -63,18 +63,32 @@ def render(ctx: dict) -> None:
     st.divider()
 
     # =====================================================
-    # 📥 Import roster Fantrax par équipe (dropdown) — ROBUST
-    #   - Upload d'un CSV Fantrax (ex: Red_Wings.csv)
-    #   - Choix équipe/propriétaire dans dropdown
-    #   - Parse robuste (Skaters + Goalies, lignes “cassées” ignorées)
-    #   - Remplace seulement cette équipe dans equipes_joueurs_<saison>.csv
+    # 📥 Import roster Fantrax (BATCH) — multi-files
     # =====================================================
-    st.subheader("📥 Import roster Fantrax (par équipe)")
+    st.subheader("📥 Import roster Fantrax — BATCH (multi-fichiers)")
     st.caption(
-        "Upload un CSV Fantrax (comme Red_Wings.csv). On convertit et on remplace seulement l’équipe choisie "
-        "dans data/equipes_joueurs_<saison>.csv. "
-        "Parser robuste: sections Skaters/Goalies + lignes mal formées ignorées."
+        "Upload 1 à 6+ fichiers Fantrax (même pattern). "
+        "On parse Skaters+Goalies, puis on remplace chaque équipe dans data/equipes_joueurs_<saison>.csv."
     )
+
+    # ⚠️ Ajuste si tes noms de propriétaires diffèrent
+    OWNER_CHOICES = ["Canadiens", "Cracheurs", "Nordiques", "Prédateurs", "Red Wings", "Whalers"]
+
+    # mapping “slug” -> owner officiel
+    OWNER_ALIASES = {
+        "canadiens": "Canadiens",
+        "montreal": "Canadiens",
+        "mtl": "Canadiens",
+        "cracheurs": "Cracheurs",
+        "nordiques": "Nordiques",
+        "predateurs": "Prédateurs",
+        "prédateurs": "Prédateurs",
+        "predateurs_": "Prédateurs",
+        "redwings": "Red Wings",
+        "red_wings": "Red Wings",
+        "red-wings": "Red Wings",
+        "whalers": "Whalers",
+    }
 
     def _slot_from_status(status: str) -> str:
         s = str(status or "").strip().lower()
@@ -86,20 +100,28 @@ def render(ctx: dict) -> None:
             return "IR"
         return "Actifs"
 
-    # ⚠️ Ajuste cette liste si tes noms d’équipes/propriétaires diffèrent
-    OWNER_CHOICES = ["Canadiens", "Cracheurs", "Nordiques", "Prédateurs", "Red Wings", "Whalers"]
+    def _guess_owner_from_filename(fname: str) -> str:
+        base = os.path.splitext(os.path.basename(fname or ""))[0]
+        s = base.strip().lower()
+        s = s.replace(" ", "_")
+        s = re.sub(r"[^a-z0-9_\-]+", "", s)
+
+        # direct alias hits
+        if s in OWNER_ALIASES:
+            return OWNER_ALIASES[s]
+
+        # try contains
+        for k, v in OWNER_ALIASES.items():
+            if k and k in s:
+                return v
+
+        # fallback: title-case-ish
+        # ex: "red_wings" -> "Red Wings"
+        pretty = s.replace("-", " ").replace("_", " ").strip().title()
+        return pretty if pretty else ""
 
     def _read_fantrax_csv(uploaded_file) -> pd.DataFrame:
-        """
-        Parse un export Fantrax qui contient souvent:
-        - une section Skaters, une section Goalies
-        - des lignes titre/séparateurs
-        - parfois des lignes qui ont +/− de colonnes (tokenizing error)
-        On:
-        - repère l'entête qui contient Player/Status/Salary
-        - lit chaque bloc avec engine=python + on_bad_lines=skip
-        - concatène
-        """
+        """Parse un export Fantrax multi-sections + lignes brisées."""
         raw = uploaded_file.getvalue()
         try:
             text = raw.decode("utf-8")
@@ -107,17 +129,14 @@ def render(ctx: dict) -> None:
             text = raw.decode("latin-1", errors="ignore")
 
         lines = [ln.rstrip("\n") for ln in text.splitlines()]
-        # garde seulement les lignes non vides
         lines = [ln for ln in lines if ln.strip()]
 
-        # entête typique attendue
         def is_header(ln: str) -> bool:
             l = ln.strip()
             return ("Player" in l and "Status" in l and "Salary" in l and "," in l)
 
         header_idxs = [i for i, ln in enumerate(lines) if is_header(ln)]
         if not header_idxs:
-            # fallback: cherche ligne avec "ID,Pos,Player"
             for i, ln in enumerate(lines):
                 if ln.strip().startswith("ID") and "Player" in ln and "," in ln:
                     header_idxs = [i]
@@ -128,11 +147,8 @@ def render(ctx: dict) -> None:
 
         blocks = []
         for hi, hidx in enumerate(header_idxs):
-            # le bloc se termine à la prochaine entête (ou fin)
             next_h = header_idxs[hi + 1] if hi + 1 < len(header_idxs) else len(lines)
             block_lines = lines[hidx:next_h]
-
-            # sécurise: trop petit => skip
             if len(block_lines) < 2:
                 continue
 
@@ -141,13 +157,12 @@ def render(ctx: dict) -> None:
                 df = pd.read_csv(
                     StringIO(buf),
                     engine="python",
-                    sep=",",
-                    on_bad_lines="skip",  # <-- évite "Expected X fields saw Y"
+                    sep=",",              # change to sep=None if you ever get ";" locale CSV
+                    on_bad_lines="skip",  # 핵: ignore broken lines
                 )
                 if df is not None and not df.empty:
                     blocks.append(df)
             except Exception:
-                # si ce bloc est vraiment sale, on ignore
                 pass
 
         if not blocks:
@@ -155,79 +170,116 @@ def render(ctx: dict) -> None:
 
         out = pd.concat(blocks, ignore_index=True)
 
-        # certains exports répètent l'entête dans les données; filtre les lignes où Player == "Player"
         if "Player" in out.columns:
             out = out[out["Player"].astype(str).str.strip().ne("Player")]
 
-        # garde colonnes clés si elles existent
         return out
 
-    fantrax_csv = st.file_uploader("CSV Fantrax roster", type=["csv"], key="fantrax_roster_csv")
-    if fantrax_csv is not None:
+    def _fantrax_to_roster_df(fantrax_df: pd.DataFrame, owner: str) -> pd.DataFrame:
+        required_cols = ["Player", "Pos", "Team", "Status", "Salary"]
+        missing = [c for c in required_cols if c not in fantrax_df.columns]
+        if missing:
+            raise ValueError("Colonnes manquantes après parse: " + ", ".join(missing))
+
+        return pd.DataFrame(
+            {
+                "Propriétaire": owner,
+                "Joueur": fantrax_df["Player"].astype(str).str.strip(),
+                "Pos": fantrax_df["Pos"].astype(str).str.strip(),
+                "Equipe": fantrax_df["Team"].astype(str).str.strip(),
+                "Salaire": fantrax_df["Salary"],
+                "Level": "",
+                "Statut": fantrax_df["Status"].astype(str).str.strip(),
+                "Slot": fantrax_df["Status"].astype(str).map(_slot_from_status),
+                "IR Date": "",
+            }
+        )
+
+    def _load_current_roster(dest: str) -> pd.DataFrame:
         try:
-            imp = _read_fantrax_csv(fantrax_csv)
+            return pd.read_csv(dest) if os.path.exists(dest) else pd.DataFrame()
+        except Exception:
+            return pd.DataFrame()
 
-            if imp.empty:
-                st.error("Impossible de parser ce CSV Fantrax (aucune table détectée).")
+    def _replace_owner_block(cur: pd.DataFrame, owner: str, block: pd.DataFrame) -> pd.DataFrame:
+        if cur is not None and not cur.empty and "Propriétaire" in cur.columns:
+            other = cur[cur["Propriétaire"].astype(str) != str(owner)]
+        else:
+            other = pd.DataFrame()
+        return pd.concat([other, block], ignore_index=True)
+
+    batch_files = st.file_uploader(
+        "Upload CSV Fantrax (multi)",
+        type=["csv"],
+        accept_multiple_files=True,
+        key="fantrax_batch_files",
+    )
+
+    dest_roster = path_roster(season)
+    st.caption(f"Destination roster: `{dest_roster}`")
+
+    if batch_files:
+        st.markdown("#### 📦 Fichiers détectés")
+        rows = []
+        for i, f in enumerate(batch_files):
+            fname = getattr(f, "name", f"file_{i}.csv")
+            guess = _guess_owner_from_filename(fname)
+            rows.append((fname, guess))
+        st.dataframe(pd.DataFrame(rows, columns=["Fichier", "Équipe devinée"]), use_container_width=True)
+
+        st.markdown("#### ✅ Assigner les équipes (au besoin)")
+        assignments = {}
+        for i, f in enumerate(batch_files):
+            fname = getattr(f, "name", f"file_{i}.csv")
+            guess = _guess_owner_from_filename(fname)
+            default_idx = OWNER_CHOICES.index(guess) if guess in OWNER_CHOICES else 0
+            pick = st.selectbox(
+                f"Équipe pour {fname}",
+                OWNER_CHOICES,
+                index=default_idx,
+                key=f"pick_owner__{i}",
+            )
+            assignments[fname] = pick
+
+        dry = st.checkbox("Mode test (dry-run, n'écrit pas)", value=False, key="fantrax_dry")
+        if st.button("🚀 Importer TOUT (replace par équipe)", type="primary", key="fantrax_batch_go"):
+            cur = _load_current_roster(dest_roster)
+            done, failed = [], []
+
+            for i, f in enumerate(batch_files):
+                fname = getattr(f, "name", f"file_{i}.csv")
+                owner = assignments.get(fname) or OWNER_CHOICES[0]
+                try:
+                    df_f = _read_fantrax_csv(f)
+                    if df_f.empty:
+                        raise ValueError("Aucune table détectée (parse vide).")
+
+                    block = _fantrax_to_roster_df(df_f, owner=owner)
+                    cur = _replace_owner_block(cur, owner=owner, block=block)
+                    done.append((fname, owner, len(block)))
+                except Exception as e:
+                    failed.append((fname, owner, str(e)))
+
+            if dry:
+                st.success(f"✅ Dry-run terminé. OK: {len(done)} | Échecs: {len(failed)}")
             else:
-                # Ton format attendu (après parse): Player, Pos, Team, Status, Salary
-                required_cols = ["Player", "Pos", "Team", "Status", "Salary"]
-                missing = [c for c in required_cols if c not in imp.columns]
-                if missing:
-                    st.error("Colonnes manquantes après parse: " + ", ".join(missing))
-                    st.caption("Colonnes détectées: " + ", ".join([str(c) for c in imp.columns]))
-                else:
-                    owner_pick = st.selectbox(
-                        "Équipe (Propriétaire) à assigner à ce CSV",
-                        OWNER_CHOICES,
-                        key="fantrax_owner_pick",
-                    )
+                try:
+                    os.makedirs(os.path.dirname(dest_roster) or ".", exist_ok=True)
+                    cur.to_csv(dest_roster, index=False)
+                    st.success(f"✅ Import batch OK → {dest_roster}")
+                except Exception as e:
+                    st.error(f"Écriture roster impossible: {e}")
+                    failed.append(("WRITE", "-", str(e)))
 
-                    out = pd.DataFrame(
-                        {
-                            "Propriétaire": owner_pick,
-                            "Joueur": imp["Player"].astype(str).str.strip(),
-                            "Pos": imp["Pos"].astype(str).str.strip(),
-                            "Equipe": imp["Team"].astype(str).str.strip(),
-                            "Salaire": imp["Salary"],
-                            "Level": "",
-                            "Statut": imp["Status"].astype(str).str.strip(),
-                            "Slot": imp["Status"].astype(str).map(_slot_from_status),
-                            "IR Date": "",
-                        }
-                    )
+            if done:
+                st.markdown("#### ✅ Imports OK")
+                st.dataframe(pd.DataFrame(done, columns=["Fichier", "Équipe", "Lignes"]), use_container_width=True)
 
-                    dest = path_roster(season)  # data/equipes_joueurs_<season>.csv
+            if failed:
+                st.markdown("#### ❌ Échecs")
+                st.dataframe(pd.DataFrame(failed, columns=["Fichier", "Équipe", "Erreur"]), use_container_width=True)
 
-                    try:
-                        cur = pd.read_csv(dest) if os.path.exists(dest) else pd.DataFrame()
-                    except Exception:
-                        cur = pd.DataFrame()
-
-                    if not cur.empty and "Propriétaire" in cur.columns:
-                        cur_other = cur[cur["Propriétaire"].astype(str) != str(owner_pick)]
-                    else:
-                        cur_other = pd.DataFrame()
-
-                    final = pd.concat([cur_other, out], ignore_index=True)
-
-                    colA, colB = st.columns([1, 1])
-                    with colA:
-                        st.caption("Aperçu importé (20 lignes)")
-                        st.dataframe(out.head(20), use_container_width=True)
-                    with colB:
-                        st.caption("Résumé")
-                        st.write(f"- Lignes importées: **{len(out)}**")
-                        st.write(f"- Destination: `{dest}`")
-
-                    if st.button("✅ Importer cette équipe (replace)", type="primary", key="do_fantrax_import"):
-                        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-                        final.to_csv(dest, index=False)
-                        st.success(f"✅ Import OK: {owner_pick} remplacé dans {dest}")
-                        st.caption("Va dans Alignement pour valider.")
-
-        except Exception as e:
-            st.error(f"Erreur lecture/parse CSV: {e}")
+            st.caption("Va dans Alignement pour valider.")
 
     st.divider()
 
