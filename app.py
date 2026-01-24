@@ -93,6 +93,9 @@ st.sidebar.caption(f"DATA_DIR: {DATA_DIR} | ASSETS: {ASSETS_PREVIEWS_DIR}")
 # =========================================================
 # CONTEXT (passed to every tab)
 # =========================================================
+
+drive_folder_id = str(st.secrets.get("gdrive_folder_id", "") or "").strip()
+
 ctx = {
     "DATA_DIR": DATA_DIR,
     "season": season_lbl,
