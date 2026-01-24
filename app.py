@@ -50,6 +50,9 @@ NAV_TABS = [
 if is_admin:
     NAV_TABS.append("🛠️ Gestion Admin")
 
+is_admin = True
+
+
 if "active_tab" not in st.session_state:
     st.session_state["active_tab"] = NAV_TABS[0]
 if st.session_state["active_tab"] not in NAV_TABS:
