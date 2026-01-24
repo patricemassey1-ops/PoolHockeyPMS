@@ -23,7 +23,7 @@ def render(ctx: dict) -> None:
     owners = ctx.get("owners")
     if not isinstance(owners, list) or not owners:
         # fallback safe
-        owners = ["Canadiens", "Cracheurs", "Nordiques", "Prédateurs", "Red Wings", "Whalers"]
+        owners = ["Canadiens", "Cracheurs", "Nordiques", "Predateurs", "Red Wings", "Whalers"]
 
     if "selected_owner" not in st.session_state:
         st.session_state["selected_owner"] = owners[0]
