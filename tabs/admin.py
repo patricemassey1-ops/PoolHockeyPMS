@@ -29,7 +29,6 @@ def render(ctx: dict) -> None:
 
     import pandas as pd
 
-import pandas as pd
 
 def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     rename = {}
