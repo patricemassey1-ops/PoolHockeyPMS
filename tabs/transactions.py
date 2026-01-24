@@ -746,3 +746,5 @@ def render(ctx: dict) -> None:
         with st.expander("🧪 Debug (sources)", expanded=False):
             st.write("equipes_joueurs:", eq.attrs.get("__path__", ""))
             st.write("transactions:", tx.attrs.get("__path__", _transactions_path(data_dir, season)))
+
+
