@@ -9,7 +9,7 @@ st.set_page_config(page_title="Pool Hockey", layout="wide")
 from services.auth import require_password
 require_password()
 
-
+from pms_enrich import update_players_db
 from services.event_log import append_event
 from services.storage import DATA_DIR, ensure_data_dir, season_default
 from services.ui import apply_theme
@@ -101,8 +101,9 @@ ctx = {
     "season": season_lbl,
     "is_admin": is_admin,
     "drive_folder_id": drive_folder_id,
-    "update_players_db": resolve_update_players_db(),
+    "update_players_db": update_players_db,   # ✅ IMPORTANT
 }
+
 
 # =========================================================
 # ROUTING (one single chain)
