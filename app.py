@@ -6,13 +6,36 @@ import streamlit as st
 # =========================================================
 st.set_page_config(page_title="Pool Hockey", layout="wide")
 
+from services.event_log import append_event
 from services.storage import DATA_DIR, ensure_data_dir, season_default
 from services.ui import apply_theme
 from services.drive import resolve_drive_folder_id
 from services.enrich import resolve_update_players_db
 from tabs import home, joueurs, alignement, transactions, gm, historique, classement, admin
 
+
 ensure_data_dir()
+# -------------------------------------------------
+# Event Log: "App started" (1x par session)
+# -------------------------------------------------
+DATA_DIR = str(globals().get("DATA_DIR") or "data")
+season = str(st.session_state.get("season") or "2025-2026").strip() or "2025-2026"
+
+boot_key = f"boot_logged__{season}"
+if not st.session_state.get(boot_key, False):
+    st.session_state[boot_key] = True
+    try:
+        append_event(
+            data_dir=DATA_DIR,
+            season=season,
+            owner=str(st.session_state.get("selected_owner") or ""),
+            event_type="system",
+            summary="App started",
+            payload={"page": "app.py"},
+        )
+    except Exception:
+        # jamais casser l'app à cause du log
+        pass
 
 # =========================================================
 # SINGLE CSS/THEME INJECTION (one time)
