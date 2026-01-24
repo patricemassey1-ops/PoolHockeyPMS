@@ -29,35 +29,37 @@ def render(ctx: dict) -> None:
 
     import pandas as pd
 
-    def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
-        rename = {}
-        for c in df.columns:
-            cc = str(c).strip().lower()
-            if cc in ["owner", "propriétaire", "proprietaire", "team_owner"]:
-                rename[c] = "Propriétaire"
-            elif cc in ["player", "joueur", "name"]:
-                rename[c] = "Joueur"
-            elif cc in ["pos", "position"]:
-                rename[c] = "Pos"
-            elif cc in ["team", "equipe", "équipe", "nhlteam"]:
-                rename[c] = "Equipe"
-            elif cc in ["salary", "salaire", "cap_hit", "caphit"]:
-                rename[c] = "Salaire"
-            elif cc in ["status", "statut"]:
-                rename[c] = "Statut"
-            elif cc in ["contract"]:
-                rename[c] = "Slot"   # ton fichier met Contract=Rachat, on le mappe dans Slot
-        return df.rename(columns=rename)
+import pandas as pd
 
-    def _slot_from_status(status: str) -> str:
-        s = str(status or "").strip().lower()
-        if s in {"act", "active"}:
-            return "Actifs"
-        if s in {"min", "minor"}:
-            return "Mineur"
-        if s in {"res", "reserve", "ir"}:
-            return "IR"
+def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
+    rename = {}
+    for c in df.columns:
+        cc = str(c).strip().lower()
+        if cc in ["owner", "propriétaire", "proprietaire", "team_owner"]:
+            rename[c] = "Propriétaire"
+        elif cc in ["player", "joueur", "name"]:
+            rename[c] = "Joueur"
+        elif cc in ["pos", "position"]:
+            rename[c] = "Pos"
+        elif cc in ["team", "equipe", "équipe", "nhlteam"]:
+            rename[c] = "Equipe"
+        elif cc in ["salary", "salaire", "cap_hit", "caphit"]:
+            rename[c] = "Salaire"
+        elif cc in ["status", "statut"]:
+            rename[c] = "Statut"
+        elif cc in ["contract"]:
+            rename[c] = "Slot"   # ton fichier met Contract=Rachat, on le mappe dans Slot
+    return df.rename(columns=rename)
+
+def _slot_from_status(status: str) -> str:
+    s = str(status or "").strip().lower()
+    if s in {"act", "active"}:
         return "Actifs"
+    if s in {"min", "minor"}:
+        return "Mineur"
+    if s in {"res", "reserve", "ir"}:
+        return "IR"
+    return "Actifs"
 
 st.subheader("📥 Import roster Fantrax (par équipe)")
 st.caption("Upload un CSV Fantrax (comme Red_Wings.csv). On convertit et on remplace seulement l’équipe choisie dans equipes_joueurs_<saison>.csv")
@@ -117,6 +119,7 @@ if up is not None:
             st.success(f"✅ Import OK: {owner_pick} remplacé dans {dest}")
             st.caption("Va dans Alignement pour valider.")
             st.dataframe(out.head(20), use_container_width=True)
+
 
     st.caption("Upload un CSV depuis ton ordi et on l’écrit directement dans le bon fichier sous /data.")
     tgt_local = st.selectbox("Target local", list(targets.keys()), key="local_target")
