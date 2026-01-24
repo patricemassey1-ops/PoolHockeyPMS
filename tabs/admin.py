@@ -120,23 +120,23 @@ def render(ctx: dict) -> None:
                 st.dataframe(out.head(20), use_container_width=True)
 
 
-        st.caption("Upload un CSV depuis ton ordi et on l’écrit directement dans le bon fichier sous /data.")
-        tgt_local = st.selectbox("Target local", list(targets.keys()), key="local_target")
-        up = st.file_uploader("Choisir un CSV", type=["csv"], key="local_csv")
+    st.caption("Upload un CSV depuis ton ordi et on l’écrit directement dans le bon fichier sous /data.")
+    tgt_local = st.selectbox("Target local", list(targets.keys()), key="local_target")
+    up = st.file_uploader("Choisir un CSV", type=["csv"], key="local_csv")
 
-        if st.button("⬇️ Restore (upload → target)", type="primary", key="local_restore"):
-            if not up:
-                st.warning("Choisis un fichier CSV.")
-            else:
-                dest = targets.get(tgt_local, "")
-                try:
-                    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-                    with open(dest, "wb") as f:
-                        f.write(up.getbuffer())
-                    st.success(f"Restore local OK → {dest}")
-                    st.caption("Va dans Alignement / Transactions pour valider.")
-                except Exception as e:
-                    st.error(f"Échec restore local: {e}")
+    if st.button("⬇️ Restore (upload → target)", type="primary", key="local_restore"):
+        if not up:
+            st.warning("Choisis un fichier CSV.")
+        else:
+            dest = targets.get(tgt_local, "")
+            try:
+                os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+                with open(dest, "wb") as f:
+                    f.write(up.getbuffer())
+                st.success(f"Restore local OK → {dest}")
+                st.caption("Va dans Alignement / Transactions pour valider.")
+            except Exception as e:
+                st.error(f"Échec restore local: {e}")
 
     st.divider()
 
