@@ -14,11 +14,6 @@ def render(ctx: dict) -> None:
     season = ctx.get("season")
     update_fn = ctx.get("update_players_db")
 
-    # ---------- Drive restore ----------
-    st.subheader("☁️ Drive — Restore selected CSV")
-    st.caption("Dossier Drive: My Drive / PMS Pool Data / PoolHockeyData")
-    st.code(f"folder_id = {str(folder_id or '').strip() or '(missing)'}")
-
     targets = {
         "Players DB (data/hockey.players.csv)": path_players_db(),
         "Contracts (data/puckpedia.contracts.csv)": path_contracts(),
@@ -26,8 +21,39 @@ def render(ctx: dict) -> None:
         "Backup history (backup_history.csv)": path_backup_history(),
     }
 
+    # =====================================================
+    # 📥 Restore LOCAL (sans Drive) — pour tester tout de suite
+    # =====================================================
+    st.subheader("📥 Import local — Restore selected CSV (sans Drive)")
+    st.caption("Upload un CSV depuis ton ordi et on l’écrit directement dans le bon fichier sous /data.")
+    tgt_local = st.selectbox("Target local", list(targets.keys()), key="local_target")
+    up = st.file_uploader("Choisir un CSV", type=["csv"], key="local_csv")
+
+    if st.button("⬇️ Restore (upload → target)", type="primary", key="local_restore"):
+        if not up:
+            st.warning("Choisis un fichier CSV.")
+        else:
+            dest = targets.get(tgt_local, "")
+            try:
+                os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+                with open(dest, "wb") as f:
+                    f.write(up.getbuffer())
+                st.success(f"Restore local OK → {dest}")
+                st.caption("Va dans Alignement / Transactions pour valider.")
+            except Exception as e:
+                st.error(f"Échec restore local: {e}")
+
+    st.divider()
+
+    # =====================================================
+    # ☁️ Drive restore (OAuth)
+    # =====================================================
+    st.subheader("☁️ Drive — Restore selected CSV (OAuth)")
+    st.caption("Dossier Drive: My Drive / PMS Pool Data / PoolHockeyData")
+    st.code(f"folder_id = {str(folder_id or '').strip() or '(missing)'}")
+
     if not drive_ready():
-        st.warning("Drive OAuth non prêt. Ajoute [gdrive_oauth] + gdrive_folder_id dans Secrets.")
+        st.info("Drive OAuth non prêt. Ajoute [gdrive_oauth] + gdrive_folder_id dans Secrets si tu veux restaurer depuis Drive.")
     else:
         filter_text = st.text_input("Filtre (nom contient)", value=".csv", key="drive_filter")
         if st.button("🔄 Refresh Drive list"):
@@ -56,7 +82,7 @@ def render(ctx: dict) -> None:
             with c2:
                 tgt = st.selectbox("Target", list(targets.keys()), key="drive_target")
 
-            if st.button("⬇️ Restore → target", type="primary"):
+            if st.button("⬇️ Restore Drive → target", type="primary"):
                 if not pick:
                     st.warning("Choisis un fichier.")
                 else:
@@ -83,16 +109,15 @@ def render(ctx: dict) -> None:
 
     st.divider()
 
-    # ---------- Players DB Admin UI ----------
+    # =====================================================
+    # Players DB Admin UI
+    # =====================================================
     st.subheader("🗃️ Players DB (Admin)")
-    pdb_path = path_players_db()
-
     if update_fn is None:
-        st.warning("update_players_db introuvable. Assure-toi que pms_enrich.py expose update_players_db.")
-        st.caption("On affiche quand même l'UI, mais les boutons update/resume vont échouer tant que update_players_db n'est pas fourni.")
+        st.info("update_players_db non trouvé. Les boutons Update/Resume seront désactivés (UI ok).")
 
     render_players_db_admin(
-        pdb_path=pdb_path,
+        pdb_path=path_players_db(),
         data_dir=ctx.get("DATA_DIR", "data"),
         season_lbl=season,
         update_fn=update_fn,
