@@ -206,33 +206,57 @@ def read_csv_bytes_to_df(csv_bytes: bytes) -> pd.DataFrame:
         return pd.read_csv(io.BytesIO(csv_bytes), encoding="latin-1")
 
 
-def validate_equipes_df(df: pd.DataFrame) -> Tuple[bool, List[str], List[str]]:
+def validate_equipes_df(df: pd.DataFrame) -> tuple[bool, list[str], list[str]]:
     """
-    Adapte expected à TES colonnes.
+    Validation du CSV equipes_joueurs basé sur la structure réelle.
     """
     expected = [
         "Propriétaire",
         "Joueur",
-        "Position",
-        "Equipe",   # ou "Équipe" chez toi
+        "Pos",
+        "Equipe",
+        "Salaire",
+        "Level",
         "Statut",
+        "Slot",
+        "IR Date",
     ]
+
     cols = list(df.columns)
+
     missing = [c for c in expected if c not in cols]
     extras = [c for c in cols if c not in expected]
-    ok = (len(missing) == 0)
+
+    ok = len(missing) == 0
     return ok, missing, extras
+
 
 
 def reload_equipes_in_memory(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    for c in ["Propriétaire", "Joueur", "Position", "Equipe", "Statut", "Équipe"]:
+
+    # Nettoyage / normalisation
+    STR_COLS = [
+        "Propriétaire", "Joueur", "Pos", "Equipe",
+        "Statut", "Slot", "IR Date"
+    ]
+    for c in STR_COLS:
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip()
+
+    # Numériques
+    if "Salaire" in df.columns:
+        df["Salaire"] = pd.to_numeric(df["Salaire"], errors="coerce").fillna(0).astype(int)
+
+    if "Level" in df.columns:
+        df["Level"] = df["Level"].astype(str).str.strip()
+
     st.session_state["equipes_df"] = df
     st.session_state["equipes_path"] = path
     st.session_state["equipes_last_loaded"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     return df
+
 
 
 # ============================================================
