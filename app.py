@@ -13,7 +13,7 @@ require_password()
 from services.event_log import append_event
 from services.storage import DATA_DIR, ensure_data_dir, season_default
 from services.ui import apply_theme
-from services.drive import resolve_drive_folder_id
+
 from services.enrich import resolve_update_players_db
 from tabs import home, joueurs, alignement, transactions, gm, historique, classement, admin
 
@@ -63,7 +63,8 @@ is_admin = True
 
 
 # Drive folder id (OAuth)
-drive_folder_id = resolve_drive_folder_id(default="1hIJovsHid2L1cY_wKM_sY-wVZKXAwrh1")
+folder_id = st.secrets.get("gdrive_folder_id", "")
+
 
 # =========================================================
 # NAV (pure logic, no CSS)
