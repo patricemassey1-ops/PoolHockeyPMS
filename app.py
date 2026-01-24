@@ -19,6 +19,8 @@ ensure_data_dir()
 # Event Log: "App started" (1x par session)
 # -------------------------------------------------
 DATA_DIR = str(globals().get("DATA_DIR") or "data")
+os.makedirs(DATA_DIR, exist_ok=True)  # au lieu de ensure_data_dir(), ou en plus
+
 season = str(st.session_state.get("season") or "2025-2026").strip() or "2025-2026"
 
 boot_key = f"boot_logged__{season}"
@@ -34,8 +36,8 @@ if not st.session_state.get(boot_key, False):
             payload={"page": "app.py"},
         )
     except Exception:
-        # jamais casser l'app à cause du log
         pass
+
 
 # =========================================================
 # SINGLE CSS/THEME INJECTION (one time)
