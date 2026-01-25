@@ -118,7 +118,7 @@ if _oauth_ui is None and _oauth_get_service is None:
 
 # Si aucun UI projet trouvé, on utilise l'UI fallback intégrée
 if _oauth_ui is None:
-    _oauth_ui = render_drive_oauth_connect_ui
+    _oauth_ui = (lambda: render_drive_oauth_connect_ui())
 
 
 
