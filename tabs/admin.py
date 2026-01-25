@@ -11,17 +11,18 @@ from pandas.errors import ParserError
 
 # ============================================================
 # ADMIN TAB — STABLE + MULTI IMPORT + AUTO-ASSIGN + ROLLBACK
-#   ✅ Préparer -> attribuer -> importer (pas de rerun destructeur)
-#   ✅ Lecture CSV robuste (auto delimiter + fallback python engine)
-#   ✅ NORMALISATION Fantrax/exports -> schéma PMS (Joueur/Pos/Salaire/Slot/...)
+#   ✅ Préparer -> attribuer -> importer (state conservé)
+#   ✅ Lecture CSV robuste (AUTO delimiter + fallback python engine)
+#   ✅ NORMALISATION Fantrax/exports -> schéma PMS (Propriétaire/Joueur/Pos/Salaire/Slot)
 # ============================================================
+
 
 # -----------------------------
 # State
 # -----------------------------
 def _init_state():
     if "admin_prepared" not in st.session_state:
-        st.session_state["admin_prepared"] = []  # list[dict(filename, team, df)]
+        st.session_state["admin_prepared"] = []  # list[dict(filename, team, df_norm)]
     if "admin_last_parse_report" not in st.session_state:
         st.session_state["admin_last_parse_report"] = []  # list[str]
 
@@ -45,7 +46,7 @@ def _guess_delimiter(sample: str) -> str:
         return max(scores, key=scores.get) if scores else ","
 
 
-def read_csv_robust(upload, *, force_delim: Optional[str] = None, skip_bad: bool = False) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+def read_csv_robust(upload, *, force_delim: Optional[str] = None, skip_bad: bool = True) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Lecture CSV robuste (supporte , ; tab | + encodings)."""
     name = getattr(upload, "name", "upload.csv")
     raw = upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
@@ -79,7 +80,7 @@ def read_csv_robust(upload, *, force_delim: Optional[str] = None, skip_bad: bool
         "warning": "",
     }
 
-    # C engine first
+    # Try C engine (fast)
     try:
         df = pd.read_csv(io.BytesIO(raw), sep=delim, engine="c")
         return df, report
@@ -88,7 +89,7 @@ def read_csv_robust(upload, *, force_delim: Optional[str] = None, skip_bad: bool
     except Exception as e:
         report["warning"] = f"C-engine error: {e}"
 
-    # python engine fallback
+    # Fallback python engine (more tolerant)
     report["engine"] = "python"
     try:
         if skip_bad:
@@ -97,7 +98,7 @@ def read_csv_robust(upload, *, force_delim: Optional[str] = None, skip_bad: bool
             df = pd.read_csv(io.BytesIO(raw), sep=delim, engine="python")
         return df, report
     except Exception:
-        # Try alternate delimiters if guess was wrong
+        # Try alternate delimiters
         alts = [",", ";", "\t", "|"]
         if delim in alts:
             alts.remove(delim)
@@ -157,13 +158,6 @@ def list_backups(data_dir: str, season: str, team: str) -> List[str]:
 # ============================================================
 # NORMALISATION Fantrax/Exports -> schéma PMS Pool
 # ============================================================
-def _rename_first_match(df: pd.DataFrame, candidates: List[str], target: str) -> None:
-    for c in candidates:
-        if c in df.columns and target not in df.columns:
-            df.rename(columns={c: target}, inplace=True)
-            return
-
-
 def _coerce_int_series(s: pd.Series) -> pd.Series:
     s = s.astype(str).str.replace("$", "", regex=False)
     s = s.str.replace(" ", "", regex=False).str.replace("\u00a0", "", regex=False)
@@ -178,66 +172,41 @@ def _derive_slot_from_status(status: str) -> str:
         return "Actif"
     if "IR" in v or "INJ" in v:
         return "IR"
-    if "MIN" in v or "AHL" in v or "PROS" in v:
+    if "MIN" in v or "AHL" in v or "PROS" in v or "NA" in v:
         return "Mineur"
     if "BENCH" in v or "BN" in v:
         return "Banc"
-    if "NA" in v:
-        return "Mineur"
     return "Actif"
 
 
 def normalize_equipes_df(df_in: pd.DataFrame, owner: str) -> pd.DataFrame:
-    """
-    Normalise un CSV Fantrax/export vers le schéma PMS Pool.
-    Garantit: Propriétaire, Joueur, Pos, Salaire, Slot
+    """Assure que le CSV final contient au minimum:
+    Propriétaire, Joueur, Pos, Salaire, Slot
+    + conserve le reste des colonnes si présentes.
     """
     df = df_in.copy()
 
-    # ── Nettoyage colonnes parasites
+    # Drop Unnamed columns
     df = df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed")]
 
-    # =====================================================
-    # DÉTECTION ROBUSTE DE LA COLONNE JOUEUR (PAR CONTENU)
-    # =====================================================
-    def _is_name_col(s: pd.Series) -> bool:
-        if s.dtype == object:
-            sample = s.dropna().astype(str).head(20)
-            if sample.empty:
-                return False
-            # contient des espaces et peu de chiffres purs
-            space_ratio = sample.str.contains(" ").mean()
-            numeric_ratio = sample.str.fullmatch(r"\d+").mean()
-            return space_ratio >= 0.5 and numeric_ratio <= 0.2
-        return False
-
-    joueur_col = None
-
-    # 1️⃣ Priorité aux noms connus
-    for c in ["Player", "Name", "Player Name", "Full Name", "Nom"]:
-        if c in df.columns:
-            joueur_col = c
-            break
-
-    # 2️⃣ Sinon, détection par contenu
-    if joueur_col is None:
-        for c in df.columns:
-            if _is_name_col(df[c]):
-                joueur_col = c
-                break
-
-    # 3️⃣ Fallback ultime (Skaters)
-    if joueur_col is None and "Skaters" in df.columns:
-        joueur_col = "Skaters"
-
-    if joueur_col:
-        df.rename(columns={joueur_col: "Joueur"}, inplace=True)
+    # -----------------------------------------------------
+    # JOUEUR — PRIORITÉ STRICTE AU NOM COMPLET
+    #   (évite que Fantrax ID devienne "Joueur")
+    # -----------------------------------------------------
+    if "Player" in df.columns:
+        df.rename(columns={"Player": "Joueur"}, inplace=True)
+    elif "Name" in df.columns:
+        df.rename(columns={"Name": "Joueur"}, inplace=True)
+    elif "Player Name" in df.columns:
+        df.rename(columns={"Player Name": "Joueur"}, inplace=True)
+    elif "Full Name" in df.columns:
+        df.rename(columns={"Full Name": "Joueur"}, inplace=True)
+    elif "Skaters" in df.columns:
+        df.rename(columns={"Skaters": "Joueur"}, inplace=True)
     else:
         df["Joueur"] = ""
 
-    # =====================================================
-    # AUTRES MAPPINGS
-    # =====================================================
+    # Other common mappings
     for src, dst in [
         (["Pos", "Position"], "Pos"),
         (["Team", "NHL Team", "Equipe", "Équipe"], "Equipe"),
@@ -251,50 +220,37 @@ def normalize_equipes_df(df_in: pd.DataFrame, owner: str) -> pd.DataFrame:
                 df.rename(columns={c: dst}, inplace=True)
                 break
 
-    # ── Colonnes minimales
+    # Minimum required columns
     if "Pos" not in df.columns:
         df["Pos"] = ""
-
     if "Salaire" not in df.columns:
         df["Salaire"] = 0
 
-    # ── Normalisation salaire
-    df["Salaire"] = (
-        df["Salaire"]
-        .astype(str)
-        .str.replace("$", "", regex=False)
-        .str.replace(",", "", regex=False)
-        .str.strip()
-    )
-    df["Salaire"] = pd.to_numeric(df["Salaire"], errors="coerce").fillna(0).astype(int)
+    # Salary normalize
+    df["Salaire"] = _coerce_int_series(df["Salaire"])
 
-    # ── Slot
+    # Slot logic: prefer explicit Slot column; else derive from Statut; else default Actif
     if "Slot" not in df.columns:
         if "Statut" in df.columns:
-            def _slot(v):
-                v = str(v).upper()
-                if "IR" in v:
-                    return "IR"
-                if "MIN" in v or "AHL" in v:
-                    return "Mineur"
-                if "BN" in v or "BENCH" in v:
-                    return "Banc"
-                return "Actif"
-            df["Slot"] = df["Statut"].apply(_slot)
+            df["Slot"] = df["Statut"].apply(_derive_slot_from_status)
         else:
             df["Slot"] = "Actif"
+    else:
+        df["Slot"] = df["Slot"].astype(str).str.strip().replace({"": "Actif"})
 
-    # ── Propriétaire
-    df["Propriétaire"] = owner
+    # Owner
+    df["Propriétaire"] = str(owner).strip()
 
-    # ── Ordre final
+    # Nice ordering (keep extras at end)
     preferred = ["Propriétaire", "Joueur", "Pos", "Equipe", "Salaire", "Level", "Statut", "Slot", "IR Date"]
     cols = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
-    df = df[cols]
+    df = df[cols].copy()
+
+    # Final cleanup
+    df["Joueur"] = df["Joueur"].astype(str).str.strip()
+    df["Pos"] = df["Pos"].astype(str).str.strip()
 
     return df
-
-
 
 
 def validate_min_schema(df: pd.DataFrame) -> Tuple[bool, List[str]]:
@@ -313,7 +269,7 @@ def render(ctx: dict) -> None:
         st.warning("Accès admin requis.")
         return
 
-    DATA_DIR = str(ctx.get("DATA_DIR") or "Data")
+    DATA_DIR = str(ctx.get("DATA_DIR") or "data")
     os.makedirs(DATA_DIR, exist_ok=True)
 
     season = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
@@ -325,7 +281,7 @@ def render(ctx: dict) -> None:
     # 📥 Import multi CSV (NORMALISE)
     # =====================================================
     with st.expander("📥 Import multi CSV équipes (normalisé)", expanded=True):
-        st.caption("Supporte Fantrax/exports. On normalise automatiquement vers: Propriétaire, Joueur, Pos, Salaire, Slot.")
+        st.caption("Supporte Fantrax/exports. Normalise automatiquement vers: Propriétaire, Joueur, Pos, Salaire, Slot.")
 
         delim_choice = st.selectbox("Delimiter (auto par défaut)", ["AUTO", ";", ",", "\t", "|"], index=0, key="adm_delim_choice")
         skip_bad = st.checkbox("Ignorer les lignes brisées (on_bad_lines='skip')", value=True, key="adm_skip_bad")
@@ -352,8 +308,8 @@ def render(ctx: dict) -> None:
                 try:
                     force = None if delim_choice == "AUTO" else (delim_choice if delim_choice != "\t" else "\t")
                     df_raw, rep = read_csv_robust(f, force_delim=force, skip_bad=skip_bad)
-
                     team = infer_team_from_filename(fname)
+
                     df_norm = normalize_equipes_df(df_raw, team)
 
                     ok, missing = validate_min_schema(df_norm)
@@ -388,9 +344,10 @@ def render(ctx: dict) -> None:
 
         # Attribution + preview + import
         if st.session_state["admin_prepared"]:
-            st.markdown("### Attribution des équipes (et preview normalisé)")
+            st.markdown("## Attribution des équipes (et preview normalisé)")
+
             for i, item in enumerate(st.session_state["admin_prepared"]):
-                c1, c2 = st.columns([2, 3])
+                c1, c2 = st.columns([2, 4])
                 with c1:
                     new_team = st.text_input(
                         f"Équipe pour {item['filename']}",
@@ -399,11 +356,10 @@ def render(ctx: dict) -> None:
                     ).strip()
                     if new_team and new_team != item.get("team"):
                         item["team"] = new_team
-                        # re-apply owner column
                         item["df"]["Propriétaire"] = new_team
                     st.caption(f"Lignes: {len(item['df'])}")
                 with c2:
-                    st.dataframe(item["df"].head(20), use_container_width=True)
+                    st.dataframe(item["df"].head(25), use_container_width=True)
 
             do_import = st.button("⬇️ Importer (remplacer équipe + backup)", use_container_width=True, key="adm_do_import")
             if do_import:
@@ -416,7 +372,6 @@ def render(ctx: dict) -> None:
                 else:
                     df_all = pd.DataFrame()
 
-                # ensure schema columns exist
                 if df_all.empty:
                     df_all = pd.DataFrame(columns=["Propriétaire", "Joueur", "Pos", "Equipe", "Salaire", "Level", "Statut", "Slot", "IR Date"])
 
@@ -426,10 +381,8 @@ def render(ctx: dict) -> None:
                         st.error(f"Équipe manquante pour {item['filename']}")
                         st.stop()
 
-                    # backup current team
                     backup_team(df_all, DATA_DIR, season, team)
 
-                    # replace team rows
                     if "Propriétaire" in df_all.columns:
                         df_all = df_all[~df_all["Propriétaire"].astype(str).str.strip().eq(team)].copy()
 
