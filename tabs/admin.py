@@ -27,6 +27,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
+def _first_existing_path(paths):
+    for p in paths:
+        try:
+            if p and os.path.exists(p):
+                return p
+        except Exception:
+            pass
+    return ""
+
 def _fmt_money(n: int) -> str:
     try:
         n = int(n or 0)
@@ -47,13 +56,51 @@ def _parse_money(s: str) -> int:
 # =====================================================
 # Drive helper — SAFE fallback (do not remove)
 # =====================================================
-def _get_drive_service_from_session():
+def _get_drive_service_any(ctx):
     """Return Drive service from session if available, else None (safe fallback)."""
     try:
         return st.session_state.get("drive_service")
     except Exception:
         return None
 
+
+def _resolve_data_dir(ctx: dict) -> str:
+    """Resolve /data vs /Data robustly and anchor to project root."""
+    cand = str((ctx or {}).get("DATA_DIR") or "").strip()
+    if cand:
+        return str(Path(cand))
+    try:
+        root = Path(__file__).resolve().parents[1]
+    except Exception:
+        root = Path.cwd()
+    for name in ("data", "Data", "DATA"):
+        p = root / name
+        if p.exists() and p.is_dir():
+            return str(p)
+    p = root / "data"
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p)
+
+def _get_drive_service_any(ctx: dict = None):
+    """Try ctx/session/service helper to get Drive API service."""
+    try:
+        if ctx and ctx.get("drive_service"):
+            return ctx.get("drive_service")
+    except Exception:
+        pass
+    for key in ("drive_service", "drive_svc", "gdrive_service"):
+        try:
+            svc = st.session_state.get(key)
+            if svc:
+                return svc
+        except Exception:
+            pass
+    try:
+        if callable(_oauth_get_service):
+            return _oauth_get_service()
+    except Exception:
+        pass
+    return None
 
 # ---- Optional: Google Drive client (if installed)
 try:
@@ -66,247 +113,68 @@ except Exception:
     Credentials = None
 
 # ---- Optional: project-specific OAuth helpers (si ton projet les a déjà)
-# On essaie plusieurs noms possibles, sans casser si absent.
+# Objectif: ne jamais crasher si le module OAuth n'existe pas, et supporter
+# - services/ qui n'est pas un package (pas de __init__.py)
+# - plusieurs noms de fonctions possibles
+import importlib
+import importlib.util
+
 _oauth_ui = None
 _oauth_enabled = None
 _oauth_get_service = None
 
-for _mod, _fn_ui, _fn_enabled, _fn_service in [
-    ("services.gdrive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
-    ("services.gdrive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
-    ("services.drive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
-    ("services.drive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
-]:
+def _try_bind_from_module(m):
+    global _oauth_ui, _oauth_enabled, _oauth_get_service
+    if not m:
+        return
+    for cand in ("render_oauth_connect_ui", "render_oauth_ui", "oauth_ui", "render_ui"):
+        fn = getattr(m, cand, None)
+        if callable(fn):
+            _oauth_ui = _oauth_ui or fn
+            break
+    for cand in ("oauth_drive_enabled", "drive_oauth_enabled", "oauth_enabled"):
+        fn = getattr(m, cand, None)
+        if callable(fn):
+            _oauth_enabled = _oauth_enabled or fn
+            break
+    for cand in ("get_drive_service", "drive_get_service", "get_service", "drive_service"):
+        fn = getattr(m, cand, None)
+        if callable(fn):
+            _oauth_get_service = _oauth_get_service or fn
+            break
+
+def _load_module_from_path(mod_name: str, path: Path):
     try:
-        m = __import__(_mod, fromlist=[_fn_ui, _fn_enabled, _fn_service])
-        _oauth_ui = getattr(m, _fn_ui, None) or _oauth_ui
-        _oauth_enabled = getattr(m, _fn_enabled, None) or _oauth_enabled
-        _oauth_get_service = getattr(m, _fn_service, None) or _oauth_get_service
+        spec = importlib.util.spec_from_file_location(mod_name, str(path))
+        if spec and spec.loader:
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            return m
+    except Exception:
+        return None
+    return None
+
+# 1) Tentatives d'import "classiques"
+for _mod in ("services.gdrive_oauth", "services.drive_oauth", "gdrive_oauth", "drive_oauth"):
+    try:
+        m = importlib.import_module(_mod)
+        _try_bind_from_module(m)
     except Exception:
         pass
 
+# 2) Tentative via fichiers: /services/*.py même si ce n'est pas un package
+def _discover_oauth_modules(ROOT_DIR: Path):
+    svc_dir = (ROOT_DIR / "services")
+    if not svc_dir.exists():
+        return []
+    out = []
+    for p in sorted(svc_dir.glob("*.py")):
+        name = p.name.lower()
+        if "oauth" in name and "drive" in name:
+            out.append(p)
+    return out
 
-
-# ---- Optional: OAuth Flow fallback (self-contained) — nécessite google-auth-oauthlib
-try:
-    from google_auth_oauthlib.flow import Flow  # type: ignore
-except Exception:
-    Flow = None
-
-
-def render_drive_oauth_connect_ui() -> None:
-    """
-    UI OAuth Google Drive autonome (fallback).
-    Utilise st.secrets["gdrive_oauth"] (client_id / client_secret / redirect_uri).
-    Stocke les creds dans st.session_state["drive_creds"].
-    """
-    if Flow is None:
-        st.info("OAuth Drive: google-auth-oauthlib indisponible (fallback désactivé).")
-        return
-
-    cfg = st.secrets.get("gdrive_oauth", {})
-    client_id = str(cfg.get("client_id", "") or "")
-    client_secret = str(cfg.get("client_secret", "") or "")
-    redirect_uri = str(cfg.get("redirect_uri", "") or "")
-    if not (client_id and client_secret and redirect_uri):
-        st.info("OAuth Drive: Secrets [gdrive_oauth] incomplets (client_id / client_secret / redirect_uri).")
-        return
-
-    # already connected?
-    if st.session_state.get("drive_creds"):
-        st.success("✅ Drive OAuth connecté.")
-        if st.button("🔌 Déconnecter Drive OAuth", use_container_width=True, key="adm_drive_disconnect"):
-            st.session_state.pop("drive_creds", None)
-            try:
-                st.query_params.clear()
-            except Exception:
-                pass
-            st.rerun()
-        return
-
-    client_config = {
-        "web": {
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uris": [redirect_uri],
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-        }
-    }
-    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
-    flow = Flow.from_client_config(client_config, scopes=scopes, redirect_uri=redirect_uri)
-
-    # handle return ?code=
-    code_param = ""
-    try:
-        qp = st.query_params if hasattr(st, "query_params") else {}
-        c = qp.get("code", "")
-        if isinstance(c, list):
-            code_param = c[0] if c else ""
-        else:
-            code_param = str(c or "")
-    except Exception:
-        code_param = ""
-
-    if code_param:
-        try:
-            flow.fetch_token(code=code_param)
-            creds = flow.credentials
-            st.session_state["drive_creds"] = {
-                "token": creds.token,
-                "refresh_token": creds.refresh_token,
-                "token_uri": creds.token_uri,
-                "client_id": creds.client_id,
-                "client_secret": creds.client_secret,
-                "scopes": creds.scopes,
-            }
-            try:
-                st.query_params.clear()
-            except Exception:
-                pass
-            st.success("✅ Drive OAuth connecté.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"❌ Échec OAuth: {e}")
-            return
-
-    auth_url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
-    st.link_button("🔐 Connecter Google Drive (OAuth)", auth_url, use_container_width=True)
-
-# ============================================================
-# CONFIG
-# ============================================================
-PLAYERS_DB_FILENAME = "hockey.players.csv"
-EQUIPES_COLUMNS = [
-    "Propriétaire", "Joueur", "Pos", "Equipe", "Salaire", "Level", "Statut", "Slot", "IR Date"
-]
-DEFAULT_CAP_GC = 88_000_000
-DEFAULT_CAP_CE = 12_000_000
-
-
-# ============================================================
-# UTILS
-# ============================================================
-def _now_ts() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def _norm(x: Any) -> str:
-    return str(x or "").strip()
-
-def _norm_player(x: Any) -> str:
-    return _norm(x).lower()
-
-def _norm_level(v: Any) -> str:
-    s = _norm(v).upper()
-    return s if s in {"ELC", "STD"} else "0"
-
-def _safe_int(v: Any, default: int = 0) -> int:
-    try:
-        n = pd.to_numeric(v, errors="coerce")
-        if pd.isna(n):
-            return default
-        return int(n)
-    except Exception:
-        return default
-
-def _pick_col(df: pd.DataFrame, candidates: List[str]) -> str:
-    if df is None or df.empty:
-        return ""
-    low = {str(c).strip().lower(): c for c in df.columns}
-    for cand in candidates:
-        key = str(cand).strip().lower()
-        if key in low:
-            return low[key]
-    return ""
-
-
-
-# ============================================================
-# OWNER FROM FILENAME (🧠)
-# ============================================================
-def infer_owner_from_filename(filename: str, owners_choices: List[str]) -> str:
-    """
-    Auto-assign depuis nom de fichier.
-    Ex: "Whalers.csv" -> "Whalers"
-    Priorité: match d'un owner existant (owners_choices), sinon basename.
-    """
-    fn = str(filename or "").strip()
-    if not fn:
-        return ""
-    base = os.path.splitext(os.path.basename(fn))[0].strip()
-    low = fn.lower()
-    base_low = base.lower()
-
-    for o in owners_choices or []:
-        ol = str(o or "").strip().lower()
-        if not ol:
-            continue
-        if ol in low or ol in base_low:
-            return str(o).strip()
-
-    # token match
-    tokens = re.split(r"[^a-z0-9]+", base_low)
-    token_set = {t for t in tokens if t}
-    for o in owners_choices or []:
-        ol = str(o or "").strip().lower()
-        if ol and ol in token_set:
-            return str(o).strip()
-
-    return base or ""
-
-
-# ============================================================
-# ROLLBACK (local) — par équipe
-# ============================================================
-def _backup_dir(data_dir: str, season_lbl: str) -> str:
-    d = os.path.join(str(data_dir or "Data"), "backups_admin", str(season_lbl or "season"))
-    os.makedirs(d, exist_ok=True)
-    return d
-
-def list_team_backups(data_dir: str, season_lbl: str, owner: str) -> List[str]:
-    d = _backup_dir(data_dir, season_lbl)
-    owner_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(owner or "").strip())
-    files: List[str] = []
-    if os.path.isdir(d):
-        for fn in os.listdir(d):
-            if fn.lower().endswith(".csv") and owner_key.lower() in fn.lower():
-                files.append(os.path.join(d, fn))
-    files.sort(reverse=True)
-    return files
-
-def backup_team_rows(df_all: pd.DataFrame, data_dir: str, season_lbl: str, owner: str, note: str = "") -> Optional[str]:
-    if df_all is None or df_all.empty or not owner:
-        return None
-    d = _backup_dir(data_dir, season_lbl)
-    owner_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(owner or "").strip())
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(d, f"equipes_{season_lbl}__{owner_key}__{ts}.csv")
-    sub = df_all[df_all["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
-    if sub.empty:
-        return None
-    sub = ensure_equipes_df(sub)
-    sub.to_csv(path, index=False)
-    if note:
-        st.session_state[f"admin_last_backup_note__{season_lbl}__{owner_key}"] = note
-    return path
-
-def restore_team_from_backup(df_all: pd.DataFrame, backup_path: str, owner: str) -> pd.DataFrame:
-    df_all = ensure_equipes_df(df_all)
-    if not backup_path or not os.path.exists(backup_path) or not owner:
-        return df_all
-    try:
-        sub = pd.read_csv(backup_path)
-        sub = ensure_equipes_df(sub)
-        sub["Propriétaire"] = str(owner).strip()
-    except Exception:
-        return df_all
-
-    df_all = df_all[~df_all["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
-    df_all = pd.concat([df_all, sub], ignore_index=True)
-    return ensure_equipes_df(df_all)
-
-# ============================================================
-# PATHS
+PATHS
 # ============================================================
 def equipes_path(data_dir: str, season_lbl: str) -> str:
     return os.path.join(data_dir, f"equipes_joueurs_{season_lbl}.csv")
@@ -930,7 +798,7 @@ def render(ctx: dict) -> None:
         st.warning("Accès admin requis.")
         return
 
-    DATA_DIR = str(ctx.get("DATA_DIR") or "Data")
+    DATA_DIR = _resolve_data_dir(ctx)
     os.makedirs(DATA_DIR, exist_ok=True)
 
     season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
@@ -943,22 +811,38 @@ def render(ctx: dict) -> None:
 
     # ---- OAuth UI (si ton projet l'avait déjà)
     with st.expander("🔐 Connexion Google Drive (OAuth)", expanded=False):
+        used_path = ""
+        try:
+            used_path = _discover_services_oauth_module()
+        except Exception:
+            used_path = ""
+
         if callable(_oauth_ui):
             try:
                 _oauth_ui()
-            except Exception:
-                st.info("UI OAuth présente mais a échoué — vérifie tes secrets OAuth.")
+            except Exception as e:
+                st.info("UI OAuth détectée mais a échoué — vérifie tes secrets OAuth.")
+                st.caption(str(e))
         else:
-            st.caption("Aucune UI OAuth détectée dans services/*. Tu peux quand même importer en local (fallback).")
+            st.caption("Aucune UI OAuth détectée. Tu peux quand même importer en local (fallback).")
+            if used_path:
+                st.caption(f"services OAuth trouvé mais fonctions manquantes: `{used_path}`")
+
+        svc = _get_drive_service_any(ctx)
+        if svc:
+            st.success("✅ Drive OAuth connecté (service disponible).")
+        else:
+            st.warning("Drive OAuth non disponible (creds manquants ou service indisponible).")
+
+        with st.expander("🧩 Debug OAuth (facultatif)", expanded=False):
+            st.write("services_oauth_file:", used_path or "(aucun)")
+            st.write("has_ui:", bool(callable(_oauth_ui)))
+            st.write("has_get_service:", bool(callable(_oauth_get_service)))
             if callable(_oauth_enabled):
                 try:
-                    st.write("oauth_drive_enabled():", bool(_oauth_enabled()))
+                    st.write("oauth_enabled():", bool(_oauth_enabled()))
                 except Exception:
                     pass
-
-    # ---- caps inputs
-    st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
-    st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
     with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
         st.caption("Définis ici les plafonds utilisés partout (affichage + alertes). Format: `1 000 000 $`.")
@@ -979,7 +863,13 @@ def render(ctx: dict) -> None:
 
     # ---- Players DB index
 
-    players_db = load_players_db(os.path.join(DATA_DIR, PLAYERS_DB_FILENAME))
+    players_db = load_players_db(_first_existing_path([
+        os.path.join(DATA_DIR, "hockey.players.csv"),
+        os.path.join(DATA_DIR, "Hockey.Players.csv"),
+        os.path.join(DATA_DIR, "hockey.players.CSV"),
+        os.path.join(DATA_DIR, "Hockey.Players.CSV"),
+        os.path.join(DATA_DIR, PLAYERS_DB_FILENAME),
+    ]))
     players_idx = build_players_index(players_db)
     if players_idx:
         st.success(f"Players DB détectée: {PLAYERS_DB_FILENAME} (Level auto + infos).")
