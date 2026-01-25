@@ -521,7 +521,65 @@ def render(ctx: dict):
     # =====================================================
     # 🧼 PREVIEW LOCAL + QC APPLY
     # =====================================================
-    with st.expander("🧼 Preview local + alertes", expanded=False):
+    
+    # =====================================================
+    # 📥 IMPORT LOCAL (fallback) — upload CSV vers equipes_joueurs_{season}.csv
+    # =====================================================
+    with st.expander("📥 Import local (fallback) — uploader un CSV équipes", expanded=True):
+        st.caption("Si Drive OAuth n’est pas prêt, uploade ici ton `equipes_joueurs_...csv` pour tester immédiatement.")
+        st.code(f"Destination locale: {e_path}", language="text")
+        up = st.file_uploader("Uploader un CSV (équipes)", type=["csv"], key="adm_local_upload")
+        col1, col2, col3 = st.columns([1,1,2])
+        do_validate_local = col1.button("🧪 Valider colonnes", use_container_width=True, key="adm_local_validate")
+        do_preview_local = col2.button("🧼 Preview", use_container_width=True, key="adm_local_preview")
+        col3.caption("Le fichier est lu, validé, puis sauvegardé dans /Data et chargé en mémoire.")
+
+        if up is not None and (do_validate_local or do_preview_local or st.button("⬇️ Importer → Local + QC + Reload", use_container_width=True, key="adm_local_import")):
+            try:
+                df_up = pd.read_csv(up)
+            except Exception:
+                up.seek(0)
+                df_up = pd.read_csv(up, encoding="latin-1")
+
+            st.dataframe(df_up.head(80), use_container_width=True)
+
+            ok, missing, extras = validate_equipes_df(df_up)
+            if do_validate_local:
+                if ok:
+                    st.success("✅ Colonnes attendues OK.")
+                    if extras:
+                        st.info(f"Colonnes additionnelles: {extras}")
+                else:
+                    st.error(f"❌ Colonnes manquantes: {missing}")
+                    if extras:
+                        st.info(f"Colonnes additionnelles: {extras}")
+
+            if ok:
+                df_imp = ensure_equipes_df(df_up)
+                df_imp_qc, stats = apply_quality(df_imp, players_idx)
+                save_equipes(df_imp_qc, e_path)
+                st.session_state["equipes_df"] = df_imp_qc
+                append_admin_log(
+                    log_path,
+                    action="IMPORT_LOCAL",
+                    owner="",
+                    player="",
+                    note=f"upload={up.name}; level_auto={stats.get('level_autofilled',0)}"
+                )
+                st.success(f"✅ Import local OK → {os.path.basename(e_path)} | Level auto: {stats.get('level_autofilled',0)}")
+                st.rerun()
+
+        st.divider()
+        if st.button("🧱 Créer un fichier équipes vide (squelette)", use_container_width=True, key="adm_local_create_empty"):
+            df_empty = pd.DataFrame(columns=EQUIPES_COLUMNS)
+            save_equipes(df_empty, e_path)
+            st.session_state["equipes_df"] = df_empty
+            append_admin_log(log_path, action="INIT_EMPTY", owner="", player="", note="created empty equipes file")
+            st.success("✅ Fichier équipes vide créé.")
+            st.rerun()
+
+
+with st.expander("🧼 Preview local + alertes", expanded=False):
         if df.empty:
             st.info("Aucun fichier équipes local. Importe depuis Drive ou upload local via l'app.")
         else:
