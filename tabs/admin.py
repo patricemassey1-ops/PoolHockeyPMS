@@ -174,7 +174,9 @@ def _discover_oauth_modules(ROOT_DIR: Path):
             out.append(p)
     return out
 
-PATHS
+# ============================================================
+# PATHS
+# ============================================================
 # ============================================================
 def equipes_path(data_dir: str, season_lbl: str) -> str:
     return os.path.join(data_dir, f"equipes_joueurs_{season_lbl}.csv")
