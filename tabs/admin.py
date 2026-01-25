@@ -1025,6 +1025,20 @@ def enrich_df_from_nhl(df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 
 # ============================================================
+
+# =====================================================
+# PATH HELPERS (safe)
+# =====================================================
+def _first_existing_path(candidates: List[str]) -> str:
+    """Retourne le premier chemin existant dans candidates, sinon '' (safe)."""
+    for p in candidates or []:
+        try:
+            if p and os.path.exists(p):
+                return p
+        except Exception:
+            pass
+    return ""
+
 def render(ctx: dict) -> None:
     if not ctx.get("is_admin"):
         st.warning("Accès admin requis.")
