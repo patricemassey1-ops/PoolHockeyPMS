@@ -1,3 +1,27 @@
+
+
+    # =====================================================
+    # ↩️ UNDO / ROLLBACK par équipe (local)
+    # =====================================================
+    with st.expander("↩️ Undo / Rollback par équipe", expanded=False):
+        st.caption("Avant chaque action (import équipe / add / remove / move), l’Admin crée un backup local par équipe. Tu peux restaurer ici.")
+        owner_rb = st.selectbox("Équipe à restaurer", owners, key="adm_rb_owner")
+        backups = list_team_backups(DATA_DIR, season_lbl, owner_rb)
+        if not backups:
+            st.info("Aucun backup trouvé pour cette équipe.")
+        else:
+            pick = st.selectbox("Backup", backups, format_func=lambda p: os.path.basename(p), key="adm_rb_pick")
+            if st.button("↩️ Restaurer ce backup (remplacer l’équipe)", use_container_width=True, key="adm_rb_restore"):
+                df_all = load_equipes(e_path)
+                # backup current before restore
+                backup_team_rows(df_all, DATA_DIR, season_lbl, owner_rb, note="pre-restore safety")
+                df_all = restore_team_from_backup(df_all, pick, owner_rb)
+                df_all_qc, _ = apply_quality(df_all, players_idx)
+                save_equipes(df_all_qc, e_path)
+                st.session_state["equipes_df"] = df_all_qc
+                append_admin_log(log_path, action="ROLLBACK", owner=owner_rb, player="", note=f"restored={os.path.basename(pick)}")
+                st.success("✅ Rollback appliqué.")
+                st.rerun()
 # tabs/admin.py
 # ============================================================
 # PMS Pool Hockey — Admin Tab (Streamlit)
@@ -18,11 +42,20 @@ from __future__ import annotations
 
 import io
 import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+import zipfile
+
+# OAuth flow (self-contained) — works with Secrets [gdrive_oauth]
+try:
+    from google_auth_oauthlib.flow import Flow
+except Exception:
+    Flow = None
+
 
 # ---- Optional: Google Drive client (if installed)
 try:
@@ -104,6 +137,100 @@ def _pick_col(df: pd.DataFrame, candidates: List[str]) -> str:
 
 # ============================================================
 # PATHS
+
+# ============================================================
+# OWNER FROM FILENAME (🧠)
+# ============================================================
+def infer_owner_from_filename(filename: str, owners_choices: List[str]) -> str:
+    """
+    Heuristique simple:
+    - match substring (case-insensitive) d'un owner dans le nom de fichier
+    - sinon: support formats genre equipes_joueurs_<OWNER>.csv
+    """
+    fn = str(filename or "").strip()
+    if not fn:
+        return ""
+    low = fn.lower()
+
+    # direct substring match
+    for o in owners_choices or []:
+        if not o:
+            continue
+        if o.lower() in low:
+            return o
+
+    # token match (split)
+    tokens = re.split(r'[^a-z0-9]+', low)
+    token_set = set([t for t in tokens if t])
+    for o in owners_choices or []:
+        ol = o.lower()
+        if ol in token_set:
+            return o
+
+    # pattern equipes_joueurs_owner.csv
+    m = re.search(r"equipes[_-]joueurs[_-]([a-z0-9]+)", low)
+    if m:
+        cand = m.group(1)
+        for o in owners_choices or []:
+            if o.lower() == cand:
+                return o
+
+    return ""
+
+
+# ============================================================
+# ROLLBACK (local) — par équipe
+# ============================================================
+def _backup_dir(data_dir: str, season_lbl: str) -> str:
+    d = os.path.join(str(data_dir or "Data"), "backups_admin", str(season_lbl or "season"))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def list_team_backups(data_dir: str, season_lbl: str, owner: str) -> List[str]:
+    d = _backup_dir(data_dir, season_lbl)
+    owner_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(owner or "").strip())
+    files = []
+    if os.path.isdir(d):
+        for fn in os.listdir(d):
+            if fn.lower().endswith(".csv") and owner_key.lower() in fn.lower():
+                files.append(os.path.join(d, fn))
+    files.sort(reverse=True)
+    return files
+
+def backup_team_rows(df_all: pd.DataFrame, data_dir: str, season_lbl: str, owner: str, note: str = "") -> Optional[str]:
+    if df_all is None or df_all.empty or not owner:
+        return None
+    d = _backup_dir(data_dir, season_lbl)
+    owner_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(owner or "").strip())
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(d, f"equipes_{season_lbl}__{owner_key}__{ts}.csv")
+    sub = df_all[df_all["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
+    if sub.empty:
+        return None
+    sub = ensure_equipes_df(sub)
+    sub.to_csv(path, index=False)
+    # keep last backup pointer (session)
+    st.session_state[f"admin_last_backup__{season_lbl}__{owner_key}"] = path
+    if note:
+        st.session_state[f"admin_last_backup_note__{season_lbl}__{owner_key}"] = note
+    return path
+
+def restore_team_from_backup(df_all: pd.DataFrame, backup_path: str, owner: str) -> pd.DataFrame:
+    df_all = ensure_equipes_df(df_all)
+    if not backup_path or not os.path.exists(backup_path) or not owner:
+        return df_all
+    try:
+        sub = pd.read_csv(backup_path)
+        sub = ensure_equipes_df(sub)
+        sub["Propriétaire"] = str(owner).strip()
+    except Exception:
+        return df_all
+
+    # remove existing owner rows, then append backup rows
+    df_all = df_all[~df_all["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
+    df_all = pd.concat([df_all, sub], ignore_index=True)
+    return ensure_equipes_df(df_all)
+
 # ============================================================
 def equipes_path(data_dir: str, season_lbl: str) -> str:
     return os.path.join(data_dir, f"equipes_joueurs_{season_lbl}.csv")
@@ -455,7 +582,7 @@ def render(ctx: dict) -> None:
             except Exception:
                 st.info("UI OAuth présente mais a échoué — vérifie tes secrets OAuth.")
         else:
-            st.caption("Aucune UI OAuth détectée dans services/*. Tu peux quand même importer en local (fallback).")
+            render_drive_oauth_connect_ui()
             if callable(_oauth_enabled):
                 try:
                     st.write("oauth_drive_enabled():", bool(_oauth_enabled()))
@@ -588,25 +715,49 @@ def render(ctx: dict) -> None:
             key="adm_multi_uploads",
         )
 
+        # Si ton Streamlit n’affiche PAS l’option multi, tu peux aussi uploader un .zip de CSV.
+        zip_up = st.file_uploader("Ou uploader un ZIP contenant plusieurs CSV", type=["zip"], key="adm_multi_zip")
+        if zip_up is not None and not uploads:
+            try:
+                z = zipfile.ZipFile(zip_up)
+                uploads = []
+                for name in z.namelist():
+                    if name.lower().endswith(".csv") and not name.endswith("/"):
+                        uploads.append((name, z.read(name)))
+            except Exception as e:
+                st.error(f"ZIP invalide: {e}")
+                uploads = []
+
+
         if not uploads:
             st.info("Ajoute 1+ fichiers pour commencer.")
         else:
             parsed = []
             errors = []
             for f in uploads:
+                file_name = getattr(f, 'name', None) or (f[0] if isinstance(f, tuple) else str(f))
                 try:
-                    df_up = pd.read_csv(f)
+                    if isinstance(f, tuple):
+                        df_up = pd.read_csv(io.BytesIO(f[1]))
+                    else:
+                        df_up = pd.read_csv(f)
                 except Exception:
                     try:
-                        f.seek(0)
-                        df_up = pd.read_csv(f, encoding="latin-1")
+                        try:
+                            f.seek(0)
+                        except Exception:
+                            pass
+                        if isinstance(f, tuple):
+                            df_up = pd.read_csv(io.BytesIO(f[1]), encoding="latin-1")
+                        else:
+                            df_up = pd.read_csv(f, encoding="latin-1")
                     except Exception as e:
-                        errors.append((f.name, f"Lecture CSV impossible: {e}"))
+                        errors.append((file_name, f"Lecture CSV impossible: {e}"))
                         continue
 
                 ok, missing, extras = validate_equipes_df(df_up)
                 if not ok:
-                    errors.append((f.name, f"Colonnes manquantes: {missing}"))
+                    errors.append((file_name, f"Colonnes manquantes: {missing}"))
                     continue
 
                 df_up = ensure_equipes_df(df_up)
@@ -644,8 +795,10 @@ def render(ctx: dict) -> None:
                         st.caption(f"Lignes: {len(p['df'])} | Owners détectés: {', '.join(owners_in_file) if owners_in_file else '—'}")
                     with c2:
                         if owners_choices:
-                            if auto_owner and auto_owner in owners_choices:
-                                idx = owners_choices.index(auto_owner)
+                            fn_owner = infer_owner_from_filename(p['file'], owners_choices) if owners_choices else ''
+                            preferred = auto_owner or fn_owner
+                            if preferred and preferred in owners_choices:
+                                idx = owners_choices.index(preferred)
                             else:
                                 idx = 0
                             chosen = st.selectbox("Équipe", owners_choices, index=idx, key=f"adm_multi_owner_{i}")
@@ -672,10 +825,15 @@ def render(ctx: dict) -> None:
 
                     replaced = {}
                     imported = 0
+                    backed_up = set()
                     for p, chosen in assignments:
                         owner = str(chosen or "").strip()
                         if not owner:
                             continue
+
+                        if owner and owner not in backed_up:
+                            backup_team_rows(merged, DATA_DIR, season_lbl, owner, note=f"pre-import {mode}")
+                            backed_up.add(owner)
 
                         df_up = p["df"].copy()
                         df_up["Propriétaire"] = owner  # force owner
@@ -831,6 +989,7 @@ def render(ctx: dict) -> None:
                 st.warning(f"Rien à ajouter (doublons: {skipped_dupe}, bloqués: {skipped_block}).")
                 st.stop()
 
+            backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-add")
             df2 = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
             df2_qc, stats = apply_quality(df2, players_idx)
             save_equipes(df2_qc, e_path)
@@ -890,6 +1049,7 @@ def render(ctx: dict) -> None:
                     k = (str(r["Propriétaire"]), str(r["Joueur"]), str(r["Statut"]), str(r["Slot"]))
                     return k not in keys
 
+                backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-remove")
                 before = len(df)
                 df2 = df[df.apply(_keep_row, axis=1)].copy()
                 removed = before - len(df2)
@@ -947,6 +1107,7 @@ def render(ctx: dict) -> None:
                     sel_rows["Slot"].astype(str),
                 ))
 
+                backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-move")
                 df2 = df.copy()
                 moved = 0
                 for idx, r in df2.iterrows():
