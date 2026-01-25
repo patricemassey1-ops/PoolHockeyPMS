@@ -123,4 +123,7 @@ elif active_tab == "🏆 Classement":
 elif active_tab == "🛠️ Gestion Admin":
     admin.render(ctx)
 else:
-    st.error("Onglet inconnu.")
+    # Fallback safe: avoid st.error in case of older/partial streamlit builds
+    st.warning(f"Onglet inconnu: {active_tab!r}. Retour à l’accueil.")
+    st.session_state["active_tab"] = NAV_TABS[0]
+    st.rerun()
