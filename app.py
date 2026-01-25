@@ -56,10 +56,21 @@ apply_theme()
 season_lbl = st.session_state.get("season_lbl") or season_default()
 season_lbl = st.sidebar.text_input("Saison", value=season_lbl, key="season_lbl")
 
-# Admin gate (Whalers only)
+# Admin gate (Whalers only) — cache pour éviter le "kick" lors des reruns
 def is_admin_user() -> bool:
-    owner = str(st.session_state.get("selected_owner") or st.session_state.get("owner") or "").strip().lower()
-    return owner in {"whalers"}
+    # owner peut "flicker" vide pendant certains reruns (file_uploader, etc.)
+    owner_now = str(st.session_state.get("selected_owner") or st.session_state.get("owner") or "").strip()
+    if owner_now:
+        st.session_state["owner_last_nonempty"] = owner_now
+
+    owner_eff = str(st.session_state.get("owner_last_nonempty") or owner_now or "").strip().lower()
+    is_admin_now = owner_eff in {"whalers"}
+
+    # cache admin pour garder l’onglet visible pendant la session
+    if is_admin_now:
+        st.session_state["is_admin_cached"] = True
+
+    return bool(st.session_state.get("is_admin_cached") and owner_eff in {"whalers"})
 
 is_admin = is_admin_user()
 
@@ -78,7 +89,7 @@ NAV_TABS = [
     "🕘 Historique",
     "🏆 Classement",
 ]
-if is_admin:
+if is_admin or st.session_state.get("is_admin_cached"):
     NAV_TABS.append("🛠️ Gestion Admin")
 
 if "active_tab" not in st.session_state:
@@ -124,12 +135,7 @@ elif active_tab == "🛠️ Gestion Admin":
     try:
         admin.render(ctx)
     except Exception as e:
-        # Ne pas "kicker" l'utilisateur vers Home si l'Admin plante
-        st.session_state['active_tab'] = '🛠️ Gestion Admin' if '🛠️ Gestion Admin' in (globals().get('NAV_TABS') or []) else st.session_state.get('active_tab')
-        st.error('❌ Erreur dans l’onglet Admin (voir détails ci-dessous)')
+        st.error("❌ Erreur dans l’onglet Admin")
         st.exception(e)
 else:
-    # Fallback safe: avoid st.error in case of older/partial streamlit builds
-    st.warning(f"Onglet inconnu: {active_tab!r}. Retour à l’accueil.")
-    st.session_state["active_tab"] = NAV_TABS[0]
-    st.rerun()
+    st.error("Onglet inconnu.")
