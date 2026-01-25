@@ -118,7 +118,7 @@ if _oauth_ui is None and _oauth_get_service is None:
 
 # Si aucun UI projet trouvé, on utilise l'UI fallback intégrée
 if _oauth_ui is None:
-    _oauth_ui = render_drive_oauth_connect_ui
+    _oauth_ui = (lambda: render_drive_oauth_connect_ui())
 
 
 
@@ -1136,120 +1136,104 @@ def _resolve_data_dir(_ctx) -> str:
         except Exception:
             continue
     return str(_ROOT_DIR / "data")
-DATA_DIR = _resolve_data_dir(ctx)
+# (Removed broken module-level DATA_DIR resolution; handled inside render())
 
-# Resolve /data vs /Data robustly
-try:
-    root = Path(__file__).resolve().parents[1]
-    if not os.path.isabs(DATA_DIR):
-        # if ctx gives relative, anchor to root
-        DATA_DIR = str((root / DATA_DIR).resolve())
-    if not os.path.isdir(DATA_DIR):
-        for name in ("data","Data","DATA"):
-            p = root / name
-            if p.exists() and p.is_dir():
-                DATA_DIR = str(p.resolve())
-                break
-except Exception:
-    pass
-os.makedirs(DATA_DIR, exist_ok=True)
+    season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
+    folder_id = str(ctx.get("drive_folder_id") or "").strip()
 
-season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
-folder_id = str(ctx.get("drive_folder_id") or "").strip()
+    e_path = equipes_path(DATA_DIR, season_lbl)
+    log_path = admin_log_path(DATA_DIR, season_lbl)
 
-e_path = equipes_path(DATA_DIR, season_lbl)
-log_path = admin_log_path(DATA_DIR, season_lbl)
+    st.subheader("🛠️ Gestion Admin")
 
-st.subheader("🛠️ Gestion Admin")
-
-# ---- OAuth UI (si ton projet l'avait déjà)
-with st.expander("🔐 Connexion Google Drive (OAuth)", expanded=False):
-    if callable(_oauth_ui):
-        try:
-            _oauth_ui()
-        except Exception:
-            st.info("UI OAuth présente mais a échoué — vérifie tes secrets OAuth.")
-    else:
-        st.caption("Aucune UI OAuth détectée dans services/*. Tu peux quand même importer en local (fallback).")
-        if callable(_oauth_enabled):
+    # ---- OAuth UI (si ton projet l'avait déjà)
+    with st.expander("🔐 Connexion Google Drive (OAuth)", expanded=False):
+        if callable(_oauth_ui):
             try:
-                st.write("oauth_drive_enabled():", bool(_oauth_enabled()))
+                _oauth_ui()
             except Exception:
-                pass
+                st.info("UI OAuth présente mais a échoué — vérifie tes secrets OAuth.")
+        else:
+            st.caption("Aucune UI OAuth détectée dans services/*. Tu peux quand même importer en local (fallback).")
+            if callable(_oauth_enabled):
+                try:
+                    st.write("oauth_drive_enabled():", bool(_oauth_enabled()))
+                except Exception:
+                    pass
 
-# ---- caps inputs
-st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
-st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
+    # ---- caps inputs
+    st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
+    st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
-with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
-    st.caption("Définis ici les plafonds utilisés partout (affichage + alertes). Format: `1 000 000 $`.")
-    # ---- load settings at first display (Drive -> local cache -> session)
-    svc_for_settings = _drive_service_from_existing_oauth()
-    settings = load_settings_drive_if_needed(DATA_DIR, svc_for_settings, folder_id) if folder_id else load_settings_local(DATA_DIR)
+    with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
+        st.caption("Définis ici les plafonds utilisés partout (affichage + alertes). Format: `1 000 000 $`.")
+        # ---- load settings at first display (Drive -> local cache -> session)
+        svc_for_settings = _drive_service_from_existing_oauth()
+        settings = load_settings_drive_if_needed(DATA_DIR, svc_for_settings, folder_id) if folder_id else load_settings_local(DATA_DIR)
 
-    if "CAP_GC" not in st.session_state:
-        st.session_state["CAP_GC"] = int(settings.get("cap_gc") or DEFAULT_CAP_GC)
-    if "CAP_CE" not in st.session_state:
-        st.session_state["CAP_CE"] = int(settings.get("cap_ce") or DEFAULT_CAP_CE)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        cap_gc_str = st.text_input("Cap GC", value=_fmt_money(st.session_state.get("CAP_GC", DEFAULT_CAP_GC)), key="cap_gc_txt")
-    with col2:
-        cap_ce_str = st.text_input("Cap CE", value=_fmt_money(st.session_state.get("CAP_CE", DEFAULT_CAP_CE)), key="cap_ce_txt")
-
-    # validation anti-absurde
-    cap_gc_val = _parse_money(cap_gc_str)
-    cap_ce_val = _parse_money(cap_ce_str)
-
-    MIN_CAP = 1_000_000
-    MAX_CAP = 200_000_000
-    errs = []
-    if cap_gc_val and (cap_gc_val < MIN_CAP or cap_gc_val > MAX_CAP):
-        errs.append(f"Cap GC invalide ({_fmt_money(cap_gc_val)}) — doit être entre {_fmt_money(MIN_CAP)} et {_fmt_money(MAX_CAP)}.")
-    if cap_ce_val and (cap_ce_val < MIN_CAP or cap_ce_val > MAX_CAP):
-        errs.append(f"Cap CE invalide ({_fmt_money(cap_ce_val)}) — doit être entre {_fmt_money(MIN_CAP)} et {_fmt_money(MAX_CAP)}.")
-
-    if errs:
-        for e in errs:
-            st.error(e)
-        st.info("Corrige la valeur avant de sauvegarder.")
-    else:
-        st.session_state["CAP_GC"] = int(cap_gc_val or 0)
-        st.session_state["CAP_CE"] = int(cap_ce_val or 0)
-
-    b1, b2, b3 = st.columns([1,1,2])
-    with b1:
-        if st.button("💾 Sauvegarder (local + Drive)", use_container_width=True, key="adm_caps_save"):
-            if errs:
-                st.warning("Impossible de sauvegarder — valeurs invalides.")
-            else:
-                ok_local = save_settings_local(DATA_DIR, st.session_state["CAP_GC"], st.session_state["CAP_CE"])
-                ok_drive = False
-                if svc_for_settings and folder_id:
-                    try:
-                        payload = Path(settings_path(DATA_DIR)).read_bytes()
-                        ok_drive = bool(_drive_upload_bytes(svc_for_settings, folder_id, SETTINGS_FILENAME, payload))
-                    except Exception:
-                        ok_drive = False
-                if ok_local:
-                    st.success("✅ Settings sauvegardés en local.")
-                else:
-                    st.error("❌ Échec sauvegarde locale.")
-                if folder_id:
-                    if ok_drive:
-                        st.success("✅ Settings uploadés sur Drive.")
-                    else:
-                        st.warning("⚠️ Drive: upload non effectué (OAuth write scopes manquants ou Drive indisponible).")
-                st.cache_data.clear()
-    with b2:
-        if st.button("🔄 Recharger (local/Drive)", use_container_width=True, key="adm_caps_reload"):
-            st.cache_data.clear()
-            settings = load_settings_drive_if_needed(DATA_DIR, svc_for_settings, folder_id) if folder_id else load_settings_local(DATA_DIR)
+        if "CAP_GC" not in st.session_state:
             st.session_state["CAP_GC"] = int(settings.get("cap_gc") or DEFAULT_CAP_GC)
+        if "CAP_CE" not in st.session_state:
             st.session_state["CAP_CE"] = int(settings.get("cap_ce") or DEFAULT_CAP_CE)
-            st.success("✅ Rechargé.")
-    with b3:
+
+        col1, col2 = st.columns(2)
+        with col1:
+            cap_gc_str = st.text_input("Cap GC", value=_fmt_money(st.session_state.get("CAP_GC", DEFAULT_CAP_GC)), key="cap_gc_txt")
+        with col2:
+            cap_ce_str = st.text_input("Cap CE", value=_fmt_money(st.session_state.get("CAP_CE", DEFAULT_CAP_CE)), key="cap_ce_txt")
+
+        # validation anti-absurde
+        cap_gc_val = _parse_money(cap_gc_str)
+        cap_ce_val = _parse_money(cap_ce_str)
+
+        MIN_CAP = 1_000_000
+        MAX_CAP = 200_000_000
+        errs = []
+        if cap_gc_val and (cap_gc_val < MIN_CAP or cap_gc_val > MAX_CAP):
+            errs.append(f"Cap GC invalide ({_fmt_money(cap_gc_val)}) — doit être entre {_fmt_money(MIN_CAP)} et {_fmt_money(MAX_CAP)}.")
+        if cap_ce_val and (cap_ce_val < MIN_CAP or cap_ce_val > MAX_CAP):
+            errs.append(f"Cap CE invalide ({_fmt_money(cap_ce_val)}) — doit être entre {_fmt_money(MIN_CAP)} et {_fmt_money(MAX_CAP)}.")
+
+        if errs:
+            for e in errs:
+                st.error(e)
+            st.info("Corrige la valeur avant de sauvegarder.")
+        else:
+            st.session_state["CAP_GC"] = int(cap_gc_val or 0)
+            st.session_state["CAP_CE"] = int(cap_ce_val or 0)
+
+        b1, b2, b3 = st.columns([1,1,2])
+        with b1:
+            if st.button("💾 Sauvegarder (local + Drive)", use_container_width=True, key="adm_caps_save"):
+                if errs:
+                    st.warning("Impossible de sauvegarder — valeurs invalides.")
+                else:
+                    ok_local = save_settings_local(DATA_DIR, st.session_state["CAP_GC"], st.session_state["CAP_CE"])
+                    ok_drive = False
+                    if svc_for_settings and folder_id:
+                        try:
+                            payload = Path(settings_path(DATA_DIR)).read_bytes()
+                            ok_drive = bool(_drive_upload_bytes(svc_for_settings, folder_id, SETTINGS_FILENAME, payload))
+                        except Exception:
+                            ok_drive = False
+                    if ok_local:
+                        st.success("✅ Settings sauvegardés en local.")
+                    else:
+                        st.error("❌ Échec sauvegarde locale.")
+                    if folder_id:
+                        if ok_drive:
+                            st.success("✅ Settings uploadés sur Drive.")
+                        else:
+                            st.warning("⚠️ Drive: upload non effectué (OAuth write scopes manquants ou Drive indisponible).")
+                    st.cache_data.clear()
+        with b2:
+            if st.button("🔄 Recharger (local/Drive)", use_container_width=True, key="adm_caps_reload"):
+                st.cache_data.clear()
+                settings = load_settings_drive_if_needed(DATA_DIR, svc_for_settings, folder_id) if folder_id else load_settings_local(DATA_DIR)
+                st.session_state["CAP_GC"] = int(settings.get("cap_gc") or DEFAULT_CAP_GC)
+                st.session_state["CAP_CE"] = int(settings.get("cap_ce") or DEFAULT_CAP_CE)
+                st.success("✅ Rechargé.")
+        with b3:
             st.caption(f"Actuel: **GC** {_fmt_money(int(st.session_state.get('CAP_GC',0)))} • **CE** {_fmt_money(int(st.session_state.get('CAP_CE',0)))}")
 # ---- Players DB index
     players_db = load_players_db(_first_existing_path([
