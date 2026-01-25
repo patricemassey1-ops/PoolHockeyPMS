@@ -1,3 +1,27 @@
+
+
+    # =====================================================
+    # ↩️ UNDO / ROLLBACK par équipe (local)
+    # =====================================================
+    with st.expander("↩️ Undo / Rollback par équipe", expanded=False):
+        st.caption("Avant chaque action (import équipe / add / remove / move), l’Admin crée un backup local par équipe. Tu peux restaurer ici.")
+        owner_rb = st.selectbox("Équipe à restaurer", owners, key="adm_rb_owner")
+        backups = list_team_backups(DATA_DIR, season_lbl, owner_rb)
+        if not backups:
+            st.info("Aucun backup trouvé pour cette équipe.")
+        else:
+            pick = st.selectbox("Backup", backups, format_func=lambda p: os.path.basename(p), key="adm_rb_pick")
+            if st.button("↩️ Restaurer ce backup (remplacer l’équipe)", use_container_width=True, key="adm_rb_restore"):
+                df_all = load_equipes(e_path)
+                # backup current before restore
+                backup_team_rows(df_all, DATA_DIR, season_lbl, owner_rb, note="pre-restore safety")
+                df_all = restore_team_from_backup(df_all, pick, owner_rb)
+                df_all_qc, _ = apply_quality(df_all, players_idx)
+                save_equipes(df_all_qc, e_path)
+                st.session_state["equipes_df"] = df_all_qc
+                append_admin_log(log_path, action="ROLLBACK", owner=owner_rb, player="", note=f"restored={os.path.basename(pick)}")
+                st.success("✅ Rollback appliqué.")
+                st.rerun()
 # tabs/admin.py
 # ============================================================
 # PMS Pool Hockey — Admin Tab (Streamlit)
@@ -26,11 +50,12 @@ import pandas as pd
 import streamlit as st
 import zipfile
 
-# OAuth flow (self-contained) — nécessite google-auth-oauthlib
+# OAuth flow (self-contained) — works with Secrets [gdrive_oauth]
 try:
     from google_auth_oauthlib.flow import Flow
 except Exception:
     Flow = None
+
 
 # ---- Optional: Google Drive client (if installed)
 try:
@@ -110,50 +135,45 @@ def _pick_col(df: pd.DataFrame, candidates: List[str]) -> str:
     return ""
 
 
+# ============================================================
+# PATHS
 
 # ============================================================
 # OWNER FROM FILENAME (🧠)
 # ============================================================
 def infer_owner_from_filename(filename: str, owners_choices: List[str]) -> str:
     """
-    - Match substring (case-insensitive) d'un owner dans le nom de fichier
-    - Sinon: utilise le basename (ex: Whalers.csv -> Whalers)
-    - Sinon: patterns equipes_joueurs_<OWNER>.csv
+    Heuristique simple:
+    - match substring (case-insensitive) d'un owner dans le nom de fichier
+    - sinon: support formats genre equipes_joueurs_<OWNER>.csv
     """
     fn = str(filename or "").strip()
     if not fn:
         return ""
-
-    base = os.path.splitext(os.path.basename(fn))[0]
     low = fn.lower()
-    base_low = base.lower()
 
-    # direct substring match on known owners
+    # direct substring match
     for o in owners_choices or []:
         if not o:
             continue
-        if o.lower() in low or o.lower() in base_low:
+        if o.lower() in low:
             return o
 
-    # token match
-    tokens = re.split(r'[^a-z0-9]+', base_low)
-    token_set = {t for t in tokens if t}
+    # token match (split)
+    tokens = re.split(r'[^a-z0-9]+', low)
+    token_set = set([t for t in tokens if t])
     for o in owners_choices or []:
         ol = o.lower()
         if ol in token_set:
             return o
 
-    # equipes_joueurs_owner
-    m = re.search(r"equipes[_-]joueurs[_-]([a-z0-9]+)", base_low)
+    # pattern equipes_joueurs_owner.csv
+    m = re.search(r"equipes[_-]joueurs[_-]([a-z0-9]+)", low)
     if m:
         cand = m.group(1)
         for o in owners_choices or []:
             if o.lower() == cand:
                 return o
-
-    # fallback: title case of basename (Whalers)
-    if base and len(base) <= 40:
-        return base.strip()
 
     return ""
 
@@ -189,6 +209,7 @@ def backup_team_rows(df_all: pd.DataFrame, data_dir: str, season_lbl: str, owner
         return None
     sub = ensure_equipes_df(sub)
     sub.to_csv(path, index=False)
+    # keep last backup pointer (session)
     st.session_state[f"admin_last_backup__{season_lbl}__{owner_key}"] = path
     if note:
         st.session_state[f"admin_last_backup_note__{season_lbl}__{owner_key}"] = note
@@ -205,12 +226,11 @@ def restore_team_from_backup(df_all: pd.DataFrame, backup_path: str, owner: str)
     except Exception:
         return df_all
 
+    # remove existing owner rows, then append backup rows
     df_all = df_all[~df_all["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
     df_all = pd.concat([df_all, sub], ignore_index=True)
     return ensure_equipes_df(df_all)
 
-# ============================================================
-# PATHS
 # ============================================================
 def equipes_path(data_dir: str, season_lbl: str) -> str:
     return os.path.join(data_dir, f"equipes_joueurs_{season_lbl}.csv")
@@ -677,12 +697,8 @@ def render(ctx: dict) -> None:
     #   - Sinon: tu choisis l’équipe dans un dropdown (et on force la colonne)
     #   - Merge: append dans equipes_joueurs_{season}.csv (option replace par équipe)
     # =====================================================
-
-    # =====================================================
-    # 📥 IMPORT LOCAL (fallback) — multi-upload CSV équipes (+ ZIP fallback)
-    # =====================================================
     with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=True):
-        st.caption("Upload **plusieurs CSV** (1 fichier par équipe). Auto-assign via **Propriétaire** (si unique) ou via **nom du fichier** (ex: `Whalers.csv`).")
+        st.caption("Upload **plusieurs CSV** (1 fichier par équipe). Chaque fichier sera attribué à la bonne équipe automatiquement (ou manuellement si ambigu).")
         st.code(f"Destination locale (fusion): {e_path}", language="text")
 
         mode = st.radio(
@@ -699,48 +715,42 @@ def render(ctx: dict) -> None:
             key="adm_multi_uploads",
         )
 
+        # Si ton Streamlit n’affiche PAS l’option multi, tu peux aussi uploader un .zip de CSV.
         zip_up = st.file_uploader("Ou uploader un ZIP contenant plusieurs CSV", type=["zip"], key="adm_multi_zip")
-        zip_items = []
-        if zip_up is not None:
+        if zip_up is not None and not uploads:
             try:
                 z = zipfile.ZipFile(zip_up)
+                uploads = []
                 for name in z.namelist():
                     if name.lower().endswith(".csv") and not name.endswith("/"):
-                        zip_items.append((name, z.read(name)))
+                        uploads.append((name, z.read(name)))
             except Exception as e:
                 st.error(f"ZIP invalide: {e}")
+                uploads = []
 
-        if (not uploads) and (not zip_items):
-            st.info("Ajoute 1+ fichiers (multi) ou un ZIP de CSV.")
+
+        if not uploads:
+            st.info("Ajoute 1+ fichiers pour commencer.")
         else:
             parsed = []
             errors = []
-
-            # normalize inputs as list of (file_name, bytes|UploadedFile)
-            items = []
-            if uploads:
-                for f in uploads:
-                    items.append((getattr(f, "name", "upload.csv"), f))
-            for name, b in zip_items:
-                items.append((name, b))
-
-            # read each file
-            for file_name, payload in items:
+            for f in uploads:
+                file_name = getattr(f, 'name', None) or (f[0] if isinstance(f, tuple) else str(f))
                 try:
-                    if isinstance(payload, (bytes, bytearray)):
-                        df_up = pd.read_csv(io.BytesIO(payload))
+                    if isinstance(f, tuple):
+                        df_up = pd.read_csv(io.BytesIO(f[1]))
                     else:
-                        df_up = pd.read_csv(payload)
+                        df_up = pd.read_csv(f)
                 except Exception:
                     try:
-                        if isinstance(payload, (bytes, bytearray)):
-                            df_up = pd.read_csv(io.BytesIO(payload), encoding="latin-1")
+                        try:
+                            f.seek(0)
+                        except Exception:
+                            pass
+                        if isinstance(f, tuple):
+                            df_up = pd.read_csv(io.BytesIO(f[1]), encoding="latin-1")
                         else:
-                            try:
-                                payload.seek(0)
-                            except Exception:
-                                pass
-                            df_up = pd.read_csv(payload, encoding="latin-1")
+                            df_up = pd.read_csv(f, encoding="latin-1")
                     except Exception as e:
                         errors.append((file_name, f"Lecture CSV impossible: {e}"))
                         continue
@@ -752,10 +762,13 @@ def render(ctx: dict) -> None:
 
                 df_up = ensure_equipes_df(df_up)
                 owners_in_file = sorted([x for x in df_up["Propriétaire"].astype(str).str.strip().unique() if x and x.lower() != "nan"])
+                auto_owner = owners_in_file[0] if len(owners_in_file) == 1 else ""
+
                 parsed.append({
-                    "file": file_name,
+                    "file": f.name,
                     "df": df_up,
                     "owners_in_file": owners_in_file,
+                    "auto_owner": auto_owner,
                 })
 
             if errors:
@@ -767,17 +780,14 @@ def render(ctx: dict) -> None:
             else:
                 df_current = load_equipes(e_path)
                 existing_owners = sorted([x for x in df_current.get("Propriétaire", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique() if x])
-                owners_choices = sorted(set(existing_owners))
+                inferred_owners = sorted({o for p in parsed for o in (p["owners_in_file"] or []) if o})
+                owners_choices = sorted({*existing_owners, *inferred_owners})
 
                 st.markdown("### Attribution des fichiers → équipe")
                 assignments = []
                 for i, p in enumerate(parsed):
                     owners_in_file = p["owners_in_file"]
-
-                    # preferred owner: unique propriétaire in file OR inferred from filename OR basename fallback (Whalers.csv -> Whalers)
-                    preferred = owners_in_file[0] if len(owners_in_file) == 1 else ""
-                    if not preferred:
-                        preferred = infer_owner_from_filename(p["file"], owners_choices)
+                    auto_owner = p["auto_owner"]
 
                     c1, c2, c3 = st.columns([2, 2, 3])
                     with c1:
@@ -785,11 +795,16 @@ def render(ctx: dict) -> None:
                         st.caption(f"Lignes: {len(p['df'])} | Owners détectés: {', '.join(owners_in_file) if owners_in_file else '—'}")
                     with c2:
                         if owners_choices:
-                            idx = owners_choices.index(preferred) if preferred in owners_choices else 0
+                            fn_owner = infer_owner_from_filename(p['file'], owners_choices) if owners_choices else ''
+                            preferred = auto_owner or fn_owner
+                            if preferred and preferred in owners_choices:
+                                idx = owners_choices.index(preferred)
+                            else:
+                                idx = 0
                             chosen = st.selectbox("Équipe", owners_choices, index=idx, key=f"adm_multi_owner_{i}")
+                            st.caption("Auto détecté ✅" if auto_owner else "Choix requis ⚠️")
                         else:
-                            chosen = st.text_input("Équipe", value=preferred, key=f"adm_multi_owner_txt_{i}").strip()
-                            st.caption("Aucune équipe connue encore — on utilise le nom saisi / inféré.")
+                            chosen = st.text_input("Équipe", value=auto_owner, key=f"adm_multi_owner_txt_{i}").strip()
                     with c3:
                         st.caption("Preview")
                         st.dataframe(p["df"].head(10), use_container_width=True)
@@ -811,14 +826,12 @@ def render(ctx: dict) -> None:
                     replaced = {}
                     imported = 0
                     backed_up = set()
-
                     for p, chosen in assignments:
                         owner = str(chosen or "").strip()
                         if not owner:
                             continue
 
-                        # backup once per team before modifications
-                        if owner not in backed_up:
+                        if owner and owner not in backed_up:
                             backup_team_rows(merged, DATA_DIR, season_lbl, owner, note=f"pre-import {mode}")
                             backed_up.add(owner)
 
@@ -874,7 +887,7 @@ def render(ctx: dict) -> None:
             st.success("✅ Fichier équipes vide créé.")
             st.rerun()
 
-    with st.expander("🧼 Preview local + alertes", expanded=False):, expanded=False):, expanded=False):
+    with st.expander("🧼 Preview local + alertes", expanded=False):, expanded=False):
         df = load_equipes(e_path)
         if df.empty:
             st.info("Aucun fichier équipes local. Importe depuis Drive ou import local.")
