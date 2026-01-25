@@ -1514,9 +1514,12 @@ def render(ctx: dict) -> None:
     # refresh after potential import
     df = load_equipes(e_path)
     owners = sorted([x for x in df.get("Propriétaire", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique() if x])
+
+    # Si le fichier équipes est vide / pas encore importé, on permet quand même l'admin tooling.
+    DEFAULT_OWNERS = ["Canadiens","Cracheurs","Nordiques","Predateurs","Red_Wings","Whalers"]
     if not owners:
-        st.warning("Aucune équipe (Propriétaire) détectée. Importe d'abord le CSV équipes.")
-        return
+        owners = DEFAULT_OWNERS
+        st.info("Aucune équipe détectée dans le fichier local pour l’instant — fonctions admin disponibles quand même (anti-duplication sur la base des lignes existantes).")
 
     # =====================================================
     # ➕ ADD (ANTI-TRICHE)
