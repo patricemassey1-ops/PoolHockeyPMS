@@ -319,7 +319,7 @@ def load_players_db(path: str) -> pd.DataFrame:
     if not path or not os.path.exists(path):
         return pd.DataFrame()
     try:
-        return pd.read_csv(path, low_memory=False, dtype=str, engine="python", on_bad_lines="skip")
+        return pd.read_csv(path)
     except Exception:
         return pd.DataFrame()
 
