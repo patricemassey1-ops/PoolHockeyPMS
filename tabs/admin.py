@@ -562,53 +562,163 @@ def render(ctx: dict) -> None:
     # =====================================================
     # 📥 IMPORT LOCAL (fallback)
     # =====================================================
-    with st.expander("📥 Import local (fallback) — uploader un CSV équipes", expanded=True):
-        st.caption("Si Drive OAuth n’est pas prêt, uploade ici ton `equipes_joueurs_...csv` pour tester immédiatement.")
-        st.code(f"Destination locale: {e_path}", language="text")
 
-        up = st.file_uploader("Uploader un CSV (équipes)", type=["csv"], key="adm_local_upload")
-        col1, col2, col3 = st.columns([1, 1, 2])
-        do_validate_local = col1.button("🧪 Valider colonnes", use_container_width=True, key="adm_local_validate")
-        do_preview_local = col2.button("🧼 Preview", use_container_width=True, key="adm_local_preview")
-        do_import_local = col3.button("⬇️ Importer → Local + QC + Reload", use_container_width=True, key="adm_local_import")
+    # =====================================================
+    # 📥 IMPORT LOCAL (fallback) — multi-upload CSV équipes
+    #   Objectif: importer plusieurs fichiers (1 équipe par fichier)
+    #   - Auto: si colonne "Propriétaire" contient 1 valeur unique -> assign auto
+    #   - Sinon: tu choisis l’équipe dans un dropdown (et on force la colonne)
+    #   - Merge: append dans equipes_joueurs_{season}.csv (option replace par équipe)
+    # =====================================================
+    with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=True):
+        st.caption("Upload **plusieurs CSV** (1 fichier par équipe). Chaque fichier sera attribué à la bonne équipe automatiquement (ou manuellement si ambigu).")
+        st.code(f"Destination locale (fusion): {e_path}", language="text")
 
-        if up is not None and (do_validate_local or do_preview_local or do_import_local):
-            try:
-                df_up = pd.read_csv(up)
-            except Exception:
-                up.seek(0)
-                df_up = pd.read_csv(up, encoding="latin-1")
+        mode = st.radio(
+            "Mode de fusion",
+            ["Ajouter (append)", "Remplacer l’équipe (delete puis insert)"],
+            horizontal=True,
+            key="adm_multi_mode",
+        )
 
-            st.dataframe(df_up.head(80), use_container_width=True)
-            ok, missing, extras = validate_equipes_df(df_up)
+        uploads = st.file_uploader(
+            "Uploader un ou plusieurs CSV (équipes)",
+            type=["csv"],
+            accept_multiple_files=True,
+            key="adm_multi_uploads",
+        )
 
-            if do_validate_local:
-                if ok:
-                    st.success("✅ Colonnes attendues OK.")
-                    if extras:
-                        st.info(f"Colonnes additionnelles: {extras}")
-                else:
-                    st.error(f"❌ Colonnes manquantes: {missing}")
-                    if extras:
-                        st.info(f"Colonnes additionnelles: {extras}")
+        if not uploads:
+            st.info("Ajoute 1+ fichiers pour commencer.")
+        else:
+            parsed = []
+            errors = []
+            for f in uploads:
+                try:
+                    df_up = pd.read_csv(f)
+                except Exception:
+                    try:
+                        f.seek(0)
+                        df_up = pd.read_csv(f, encoding="latin-1")
+                    except Exception as e:
+                        errors.append((f.name, f"Lecture CSV impossible: {e}"))
+                        continue
 
-            if do_import_local:
+                ok, missing, extras = validate_equipes_df(df_up)
                 if not ok:
-                    st.error(f"Import refusé: colonnes manquantes {missing}")
-                else:
-                    df_imp = ensure_equipes_df(df_up)
-                    df_imp_qc, stats = apply_quality(df_imp, players_idx)
-                    save_equipes(df_imp_qc, e_path)
-                    st.session_state["equipes_df"] = df_imp_qc
-                    append_admin_log(
-                        log_path,
-                        action="IMPORT_LOCAL",
-                        owner="",
-                        player="",
-                        note=f"upload={up.name}; level_auto={stats.get('level_autofilled',0)}"
-                    )
-                    st.success(f"✅ Import local OK → {os.path.basename(e_path)} | Level auto: {stats.get('level_autofilled',0)}")
-                    st.rerun()
+                    errors.append((f.name, f"Colonnes manquantes: {missing}"))
+                    continue
+
+                df_up = ensure_equipes_df(df_up)
+                owners_in_file = sorted([x for x in df_up["Propriétaire"].astype(str).str.strip().unique() if x and x.lower() != "nan"])
+                auto_owner = owners_in_file[0] if len(owners_in_file) == 1 else ""
+
+                parsed.append({
+                    "file": f.name,
+                    "df": df_up,
+                    "owners_in_file": owners_in_file,
+                    "auto_owner": auto_owner,
+                })
+
+            if errors:
+                st.error("Certains fichiers ont des erreurs et seront ignorés:")
+                st.dataframe(pd.DataFrame(errors, columns=["Fichier", "Erreur"]), use_container_width=True)
+
+            if not parsed:
+                st.warning("Aucun fichier valide à importer.")
+            else:
+                df_current = load_equipes(e_path)
+                existing_owners = sorted([x for x in df_current.get("Propriétaire", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique() if x])
+                inferred_owners = sorted({o for p in parsed for o in (p["owners_in_file"] or []) if o})
+                owners_choices = sorted({*existing_owners, *inferred_owners})
+
+                st.markdown("### Attribution des fichiers → équipe")
+                assignments = []
+                for i, p in enumerate(parsed):
+                    owners_in_file = p["owners_in_file"]
+                    auto_owner = p["auto_owner"]
+
+                    c1, c2, c3 = st.columns([2, 2, 3])
+                    with c1:
+                        st.write(f"**{p['file']}**")
+                        st.caption(f"Lignes: {len(p['df'])} | Owners détectés: {', '.join(owners_in_file) if owners_in_file else '—'}")
+                    with c2:
+                        if owners_choices:
+                            if auto_owner and auto_owner in owners_choices:
+                                idx = owners_choices.index(auto_owner)
+                            else:
+                                idx = 0
+                            chosen = st.selectbox("Équipe", owners_choices, index=idx, key=f"adm_multi_owner_{i}")
+                            st.caption("Auto détecté ✅" if auto_owner else "Choix requis ⚠️")
+                        else:
+                            chosen = st.text_input("Équipe", value=auto_owner, key=f"adm_multi_owner_txt_{i}").strip()
+                    with c3:
+                        st.caption("Preview")
+                        st.dataframe(p["df"].head(10), use_container_width=True)
+
+                    assignments.append((p, chosen))
+
+                missing_choice = [p["file"] for p, chosen in assignments if not str(chosen or "").strip()]
+                if missing_choice:
+                    st.warning("Choisis une équipe pour: " + ", ".join(missing_choice))
+
+                colA, colB = st.columns([1, 1])
+                do_import = colA.button("⬇️ Importer tous → Local + QC + Reload", use_container_width=True, key="adm_multi_commit")
+                do_dry = colB.button("🧪 Dry-run (voir résumé)", use_container_width=True, key="adm_multi_dry")
+
+                if do_dry or do_import:
+                    merged = load_equipes(e_path)
+                    rows_before = len(merged)
+
+                    replaced = {}
+                    imported = 0
+                    for p, chosen in assignments:
+                        owner = str(chosen or "").strip()
+                        if not owner:
+                            continue
+
+                        df_up = p["df"].copy()
+                        df_up["Propriétaire"] = owner  # force owner
+                        df_up_qc, stats = apply_quality(df_up, players_idx)
+
+                        if mode.startswith("Remplacer"):
+                            before_owner = int((merged["Propriétaire"].astype(str).str.strip() == owner).sum()) if not merged.empty else 0
+                            merged = merged[~merged["Propriétaire"].astype(str).str.strip().eq(owner)].copy()
+                            replaced[owner] = before_owner
+
+                        merged = pd.concat([merged, df_up_qc], ignore_index=True)
+                        imported += len(df_up_qc)
+
+                        append_admin_log(
+                            log_path,
+                            action="IMPORT_LOCAL_TEAM",
+                            owner=owner,
+                            player="",
+                            note=f"file={p['file']}; rows={len(df_up_qc)}; level_auto={stats.get('level_autofilled',0)}; mode={mode}",
+                        )
+
+                    merged, stats_all = apply_quality(merged, players_idx)
+                    rows_after = len(merged)
+
+                    summary = {
+                        "mode": mode,
+                        "fichiers_valides": len(parsed),
+                        "lignes_avant": rows_before,
+                        "lignes_importees": imported,
+                        "lignes_apres": rows_after,
+                        "teams_replaced": replaced,
+                        "qc_level_auto": stats_all.get("level_autofilled", 0),
+                        "qc_ir_mismatch": stats_all.get("ir_mismatch", 0),
+                        "qc_salary_level_suspect": stats_all.get("salary_level_suspect", 0),
+                    }
+                    st.markdown("### Résumé import")
+                    st.json(summary)
+
+                    if do_import:
+                        save_equipes(merged, e_path)
+                        st.session_state["equipes_df"] = merged
+                        st.success("✅ Import multi terminé + QC + reload.")
+                        st.rerun()
 
         st.divider()
         if st.button("🧱 Créer un fichier équipes vide (squelette)", use_container_width=True, key="adm_local_create_empty"):
@@ -619,10 +729,7 @@ def render(ctx: dict) -> None:
             st.success("✅ Fichier équipes vide créé.")
             st.rerun()
 
-    # =====================================================
-    # 🧼 PREVIEW LOCAL + QC APPLY
-    # =====================================================
-    with st.expander("🧼 Preview local + alertes", expanded=False):
+    with st.expander("🧼 Preview local + alertes", expanded=False):, expanded=False):
         df = load_equipes(e_path)
         if df.empty:
             st.info("Aucun fichier équipes local. Importe depuis Drive ou import local.")
