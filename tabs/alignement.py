@@ -1,129 +1,85 @@
+# tabs/alignement.py
+from __future__ import annotations
+
 import streamlit as st
 import pandas as pd
-from services.storage import path_roster, safe_read_csv, path_players_db
-from services.players_db import load_players_map, norm_player_key, country_to_flag_emoji
 
-ROSTER_COLS = {
-    "owner":"Propriétaire",
-    "player":"Joueur",
-    "pos":"Pos",
-    "team":"Equipe",
-    "salary":"Salaire",
-    "level":"Level",
-    "status":"Statut",
-    "slot":"Slot",
-    "ir_date":"IR Date",
-}
+from services.roster_common import load_roster, normalize_roster_df, players_db_path, derive_scope
 
-def _fmt_money(x) -> str:
-    try:
-        if x is None or (isinstance(x, float) and pd.isna(x)):
-            return ""
-        s = str(x).strip().replace("$","").replace(" ","").replace(" ","")
-        if s == "":
-            return ""
-        v = float(s.replace(",", ""))
-        return f"{int(round(v)):,}".replace(",", " ") + " $"
-    except Exception:
-        return str(x)
-
-def _slot_bucket(slot_val: str, statut_val: str = "") -> str:
-    s = str(slot_val or "").strip().lower()
-    t = str(statut_val or "").strip().lower()
-    if "actif" in s:
-        return "ACTIFS"
-    if "banc" in s:
-        return "BANC"
-    if s == "ir" or "inj" in s or "bless" in s:
-        return "IR"
-    if "mineur" in s or "minor" in s or "ahl" in s or "farm" in s:
-        return "MINEUR"
-    if "ir" in t or "inj" in t or "bless" in t:
-        return "IR"
-    if "mineur" in t or "ahl" in t:
-        return "MINEUR"
-    if "banc" in t:
-        return "BANC"
-    return "ACTIFS"
-
-def roster_click_list(df: pd.DataFrame, title: str, *, players_map: dict) -> None:
-    st.markdown(f"### {title}")
-    if df is None or df.empty:
-        st.caption("Aucun joueur.")
-        return
-
-    h1, h2, h3 = st.columns([7, 2, 2])
-    with h1:
-        st.markdown('<div class="muted nowrap">Joueur</div>', unsafe_allow_html=True)
-    with h2:
-        st.markdown('<div class="muted nowrap">Pos</div>', unsafe_allow_html=True)
-    with h3:
-        st.markdown('<div class="muted nowrap right">Salaire</div>', unsafe_allow_html=True)
-
-    for idx, row in df.iterrows():
-        name = str(row.get(ROSTER_COLS["player"]) or "").strip()
-        k = norm_player_key(name)
-        cc = ""
-        if k and k in players_map:
-            cc = str(players_map[k].get("country") or "").strip().upper()
-        flag = country_to_flag_emoji(cc)
-
-        pos = str(row.get(ROSTER_COLS["pos"]) or "").strip()
-        sal = row.get(ROSTER_COLS["salary"])
-
-        c1, c2, c3 = st.columns([7, 2, 2])
-        with c1:
-            # For now: click just highlights (no dialog yet)
-            if st.button(f"{flag}  {name}" if flag else name, key=f"{title}__p__{idx}"):
-                st.session_state["align_selected_player"] = name
-        with c2:
-            st.markdown(f'<div class="nowrap small">{pos}</div>', unsafe_allow_html=True)
-        with c3:
-            st.markdown(f'<div class="nowrap right small">{_fmt_money(sal)}</div>', unsafe_allow_html=True)
 
 def render(ctx: dict) -> None:
-    st.header("🧾 Alignement")
+    st.subheader("🧾 Alignement")
 
-    season = ctx.get("season")
-    roster_path = path_roster(season)
+    data_dir = str(ctx.get("DATA_DIR") or "data")
+    season = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
+
+    df, roster_path = load_roster(data_dir, season)
     st.caption(f"Roster: {roster_path}")
 
-    df = safe_read_csv(roster_path)
-    if df.empty:
+    if df is None or df.empty:
         st.warning("Roster CSV manquant ou vide.")
         return
 
-    # Validate minimal columns
-    needed = [ROSTER_COLS["owner"], ROSTER_COLS["player"], ROSTER_COLS["pos"], ROSTER_COLS["salary"], ROSTER_COLS["slot"]]
-    missing = [c for c in needed if c not in df.columns]
-    if missing:
-        st.error("Colonnes manquantes dans equipes_joueurs: " + ", ".join(missing))
-        st.caption("Colonnes détectées: " + ", ".join([str(c) for c in df.columns]))
+    pdb = players_db_path(data_dir)
+    df = normalize_roster_df(df, owner=None, players_db_path=pdb)
+
+    teams = sorted([t for t in df["Propriétaire"].dropna().astype(str).str.strip().unique().tolist() if t])
+    if not teams:
+        st.warning("Aucune équipe (Propriétaire) détectée.")
         return
 
-    players_map = load_players_map(path_players_db())
+    team = st.selectbox("Équipe", teams, key="al_team")
 
-    owners = sorted([x for x in df[ROSTER_COLS["owner"]].dropna().astype(str).unique() if str(x).strip()])
-    owner = st.selectbox("Équipe", owners, index=0) if owners else ""
-    view = df[df[ROSTER_COLS["owner"]].astype(str).eq(owner)].copy() if owner else df.copy()
+    # Filtres avancés
+    col1, col2, col3 = st.columns([2, 2, 2])
+    with col1:
+        scope_filter = st.multiselect("Scope", ["GC", "CE"], default=["GC","CE"])
+    with col2:
+        level_vals = sorted([v for v in df["Level"].dropna().astype(str).str.strip().unique().tolist() if v])
+        level_filter = st.multiselect("Level", level_vals, default=level_vals if level_vals else [])
+    with col3:
+        slot_filter = st.multiselect("Slot", ["Actif","Banc","IR","Mineur"], default=["Actif","Banc","IR","Mineur"])
 
-    statut_col = ROSTER_COLS["status"] if ROSTER_COLS["status"] in view.columns else ""
-    view["_bucket"] = view.apply(lambda r: _slot_bucket(r.get(ROSTER_COLS["slot"]), r.get(statut_col, "")), axis=1)
+    d = df[df["Propriétaire"].astype(str).str.strip().eq(team)].copy()
+    d["Scope"] = d.apply(derive_scope, axis=1)
 
-    actifs = view[view["_bucket"].eq("ACTIFS")].copy()
-    banc = view[view["_bucket"].eq("BANC")].copy()
-    ir = view[view["_bucket"].eq("IR")].copy()
-    mineur = view[view["_bucket"].eq("MINEUR")].copy()
+    if scope_filter:
+        d = d[d["Scope"].isin(scope_filter)]
+    if level_filter:
+        d = d[d["Level"].astype(str).isin(level_filter)]
+    if slot_filter:
+        d = d[d["Slot"].isin(slot_filter)]
 
-    left, center, right = st.columns([1.1, 1.1, 1.1])
-    with left:
-        roster_click_list(actifs, "⭐ Actifs", players_map=players_map)
-    with center:
-        roster_click_list(banc, "🪑 Banc", players_map=players_map)
-        st.divider()
-        roster_click_list(ir, "🩹 IR", players_map=players_map)
-    with right:
-        roster_click_list(mineur, "🧊 Mineur", players_map=players_map)
+    # Grouping
+    def show_block(title: str, sub: pd.DataFrame):
+        st.markdown(f"### {title}")
+        if sub.empty:
+            st.caption("Aucun joueur.")
+            return
+        cols = [c for c in ["Joueur","Pos","Equipe","Salaire","Level","Scope","Slot","IR Date"] if c in sub.columns]
+        st.dataframe(sub[cols].sort_values(["Scope","Pos","Joueur"]), use_container_width=True, hide_index=True)
 
-    if st.session_state.get("align_selected_player"):
-        st.info(f"Sélection: {st.session_state['align_selected_player']}")
+    # split
+    actifs = d[d["Slot"].eq("Actif")].copy()
+    banc = d[d["Slot"].eq("Banc")].copy()
+    mineur = d[d["Slot"].eq("Mineur")].copy()
+    ir = d[d["Slot"].eq("IR")].copy()
+
+    cA, cB, cC = st.columns([3, 2, 2])
+    with cA:
+        show_block("⭐ Actifs", actifs)
+    with cB:
+        show_block("🪑 Banc", banc)
+        show_block("🩼 IR", ir)
+    with cC:
+        show_block("🧊 Mineur", mineur)
+
+    # KPIs
+    total = int(d["Salaire"].fillna(0).sum()) if "Salaire" in d.columns else 0
+    gc = int(d.loc[d["Scope"].eq("GC"), "Salaire"].fillna(0).sum()) if "Salaire" in d.columns else 0
+    ce = int(d.loc[d["Scope"].eq("CE"), "Salaire"].fillna(0).sum()) if "Salaire" in d.columns else 0
+    st.divider()
+    colx, coly, colz = st.columns(3)
+    colx.metric("💰 Total", f"{total:,} $".replace(",", " "))
+    coly.metric("🏒 GC", f"{gc:,} $".replace(",", " "))
+    colz.metric("🧊 CE", f"{ce:,} $".replace(",", " "))

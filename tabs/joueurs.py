@@ -5,134 +5,58 @@ import os
 import pandas as pd
 import streamlit as st
 
-
-# ============================================================
-# HELPERS
-# ============================================================
-def _safe_col(df: pd.DataFrame, col: str, default="") -> pd.Series:
-    """
-    Retourne une Series TOUJOURS safe.
-    - si colonne existe → fillna
-    - sinon → Series remplie avec default
-    """
-    if col in df.columns:
-        return df[col].fillna(default)
-    return pd.Series([default] * len(df), index=df.index)
+from services.roster_common import load_roster, normalize_roster_df, players_db_path
 
 
-def _safe_int_col(df: pd.DataFrame, col: str) -> pd.Series:
-    if col in df.columns:
-        return pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
-    return pd.Series([0] * len(df), index=df.index)
-
-
-# ============================================================
-# MAIN
-# ============================================================
 def render(ctx: dict) -> None:
     st.subheader("👤 Joueurs")
 
-    DATA_DIR = str(ctx.get("DATA_DIR") or "data")
+    data_dir = str(ctx.get("DATA_DIR") or "data")
     season = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
-    equipes_path = os.path.join(DATA_DIR, f"equipes_joueurs_{season}.csv")
 
-    if not os.path.exists(equipes_path):
-        st.info("Aucun fichier équipes trouvé. Importe d’abord les équipes.")
+    df, roster_path = load_roster(data_dir, season)
+    if df is None or df.empty:
+        st.warning("Roster CSV manquant ou vide.")
+        st.caption(f"Roster: {roster_path}")
         return
 
-    try:
-        df = pd.read_csv(equipes_path)
-    except Exception as e:
-        st.error("Impossible de lire le fichier équipes.")
-        st.exception(e)
+    # Normalise une dernière fois avec Level auto (si players DB dispo)
+    pdb = players_db_path(data_dir)
+    df = normalize_roster_df(df, owner=None, players_db_path=pdb)
+
+    teams = sorted([t for t in df["Propriétaire"].dropna().astype(str).str.strip().unique().tolist() if t])
+    if not teams:
+        st.warning("Aucune équipe détectée dans le roster.")
         return
 
-    if df.empty:
-        st.info("Aucun joueur dans le fichier équipes.")
-        return
+    team = st.selectbox("Équipe", teams, key="players_team")
 
-    # ========================================================
-    # NORMALISATION SAFE (AUCUN .fillna SUR STRING)
-    # ========================================================
-    df["Propriétaire"] = _safe_col(df, "Propriétaire")
-    df["Joueur"] = (
-        _safe_col(df, "Joueur")
-        if "Joueur" in df.columns
-        else _safe_col(df, "Player")
-    ).astype(str)
+    # Filtres avancés
+    colA, colB, colC, colD = st.columns([2, 2, 2, 2])
+    with colA:
+        slot_filter = st.multiselect("Slot", ["Actif", "Banc", "IR", "Mineur"], default=["Actif","Banc","IR","Mineur"])
+    with colB:
+        level_vals = sorted([v for v in df["Level"].dropna().astype(str).str.strip().unique().tolist() if v])
+        level_filter = st.multiselect("Level", level_vals, default=level_vals if level_vals else [])
+    with colC:
+        pos_vals = sorted([v for v in df["Pos"].dropna().astype(str).str.strip().unique().tolist() if v])
+        pos_filter = st.multiselect("Pos", pos_vals, default=pos_vals if pos_vals else [])
+    with colD:
+        q = st.text_input("Recherche joueur", value="", placeholder="ex: Marner")
 
-    df["Pos"] = _safe_col(df, "Pos")
-    df["Equipe"] = _safe_col(df, "Equipe")
-    df["Slot"] = _safe_col(df, "Slot", "Actif")
-    df["Level"] = _safe_col(df, "Level", "")
-    df["Salaire"] = _safe_int_col(df, "Salaire")
+    view = df[df["Propriétaire"].astype(str).str.strip().eq(team)].copy()
+    if slot_filter:
+        view = view[view["Slot"].isin(slot_filter)]
+    if level_filter:
+        view = view[view["Level"].astype(str).isin(level_filter)]
+    if pos_filter:
+        view = view[view["Pos"].astype(str).isin(pos_filter)]
+    if q.strip():
+        view = view[view["Joueur"].astype(str).str.contains(q.strip(), case=False, na=False)]
 
-    # Colonnes optionnelles (ne doivent JAMAIS casser)
-    df["Statut"] = _safe_col(df, "Statut")
-    df["IR Date"] = _safe_col(df, "IR Date")
+    st.caption(f"{len(view)} joueurs — {team}")
+    cols = [c for c in ["Joueur","Pos","Equipe","Salaire","Level","Slot","Statut","IR Date"] if c in view.columns]
+    st.dataframe(view[cols].sort_values(["Slot","Pos","Joueur"]), use_container_width=True, hide_index=True)
 
-    # ========================================================
-    # FILTRES UI
-    # ========================================================
-    teams = sorted(df["Propriétaire"].dropna().unique().tolist())
-    team = st.selectbox("Équipe", teams)
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        slot_filter = st.multiselect(
-            "Slot",
-            ["Actif", "Banc", "Mineur", "IR"],
-            default=["Actif", "Banc", "Mineur", "IR"],
-        )
-    with col2:
-        level_filter = st.multiselect(
-            "Level",
-            sorted(df["Level"].dropna().unique().tolist()),
-            default=sorted(df["Level"].dropna().unique().tolist()),
-        )
-    with col3:
-        pos_filter = st.multiselect(
-            "Position",
-            sorted(df["Pos"].dropna().unique().tolist()),
-            default=sorted(df["Pos"].dropna().unique().tolist()),
-        )
-
-    # ========================================================
-    # APPLY FILTERS
-    # ========================================================
-    view = df[
-        (df["Propriétaire"] == team)
-        & (df["Slot"].isin(slot_filter))
-        & (df["Level"].isin(level_filter))
-        & (df["Pos"].isin(pos_filter))
-    ].copy()
-
-    # ========================================================
-    # AFFICHAGE
-    # ========================================================
-    st.caption(f"{len(view)} joueurs")
-
-    show_cols = [
-        "Joueur",
-        "Pos",
-        "Equipe",
-        "Salaire",
-        "Level",
-        "Slot",
-        "Statut",
-        "IR Date",
-    ]
-    show_cols = [c for c in show_cols if c in view.columns]
-
-    st.dataframe(
-        view[show_cols].sort_values(["Slot", "Pos", "Joueur"]),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    # ========================================================
-    # STATS RAPIDES
-    # ========================================================
-    total_salary = int(view["Salaire"].sum())
-    st.metric("💰 Masse salariale", f"{total_salary:,} $".replace(",", " "))
-
+    total = int(view["Salaire"].fillna(0).sum()) if "Salaire" in view.columns else 0
+    st.metric("💰 Masse salariale (filtre)", f"{total:,} $".replace(",", " "))
