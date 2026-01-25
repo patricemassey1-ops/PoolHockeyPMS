@@ -11,8 +11,9 @@ from pandas.errors import ParserError
 
 # ============================================================
 # ADMIN TAB — STABLE + MULTI IMPORT + AUTO-ASSIGN + ROLLBACK
-#   ✅ Ne kick plus (tout déclenché par boutons)
-#   ✅ Lecture CSV robuste (détecte delimiter + fallback python engine)
+#   ✅ Préparer -> attribuer -> importer (pas de rerun destructeur)
+#   ✅ Lecture CSV robuste (auto delimiter + fallback python engine)
+#   ✅ NORMALISATION Fantrax/exports -> schéma PMS (Joueur/Pos/Salaire/Slot/...)
 # ============================================================
 
 # -----------------------------
@@ -35,43 +36,34 @@ def infer_team_from_filename(filename: str) -> str:
 
 
 def _guess_delimiter(sample: str) -> str:
-    # Try csv.Sniffer first; fallback to scoring common delimiters
     try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=[",",";","\t","|"])
+        dialect = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"])
         return dialect.delimiter
     except Exception:
-        candidates = [",",";","\t","|"]
+        candidates = [",", ";", "\t", "|"]
         scores = {d: sample.count(d) for d in candidates}
-        # choose highest count
         return max(scores, key=scores.get) if scores else ","
 
 
-def read_csv_robust(upload, *, force_delim: Optional[str]=None, skip_bad: bool=False) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    """Lit un CSV de façon robuste.
-    - Détecte delimiter (souvent ; si les nombres ont des virgules)
-    - Fallback python engine si C-engine plante
-    - Option skip_bad: ignore les lignes brisées (on_bad_lines='skip')
-    Retour: (df, report)
-    """
+def read_csv_robust(upload, *, force_delim: Optional[str] = None, skip_bad: bool = False) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Lecture CSV robuste (supporte , ; tab | + encodings)."""
     name = getattr(upload, "name", "upload.csv")
     raw = upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
-    # reset pointer if possible
     try:
         upload.seek(0)
     except Exception:
         pass
 
-    # decode sample
     enc_used = None
-    for enc in ("utf-8-sig","utf-8","latin-1"):
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
         try:
             text = raw.decode(enc)
             enc_used = enc
             break
         except Exception:
             continue
-    if enc_used is None:
-        # last resort
+    if text is None:
         text = raw.decode("latin-1", errors="replace")
         enc_used = "latin-1"
 
@@ -87,7 +79,7 @@ def read_csv_robust(upload, *, force_delim: Optional[str]=None, skip_bad: bool=F
         "warning": "",
     }
 
-    # Try fast C engine
+    # C engine first
     try:
         df = pd.read_csv(io.BytesIO(raw), sep=delim, engine="c")
         return df, report
@@ -96,7 +88,7 @@ def read_csv_robust(upload, *, force_delim: Optional[str]=None, skip_bad: bool=F
     except Exception as e:
         report["warning"] = f"C-engine error: {e}"
 
-    # Fallback python engine
+    # python engine fallback
     report["engine"] = "python"
     try:
         if skip_bad:
@@ -104,11 +96,12 @@ def read_csv_robust(upload, *, force_delim: Optional[str]=None, skip_bad: bool=F
         else:
             df = pd.read_csv(io.BytesIO(raw), sep=delim, engine="python")
         return df, report
-    except Exception as e:
-        # One more attempt: try alternate delimiter if we guessed wrong
-        alts = [",",";","\t","|"]
+    except Exception:
+        # Try alternate delimiters if guess was wrong
+        alts = [",", ";", "\t", "|"]
         if delim in alts:
             alts.remove(delim)
+        last_err = None
         for d in alts:
             try:
                 report["delimiter"] = d
@@ -118,12 +111,16 @@ def read_csv_robust(upload, *, force_delim: Optional[str]=None, skip_bad: bool=F
                     df = pd.read_csv(io.BytesIO(raw), sep=d, engine="python")
                 report["warning"] = (report["warning"] + f" | fallback delimiter {d} worked").strip(" |")
                 return df, report
-            except Exception:
+            except Exception as e:
+                last_err = e
                 continue
+        if last_err:
+            raise last_err
         raise
 
 
 def equipes_path(data_dir: str, season: str) -> str:
+    # IMPORTANT: ton app lit data/equipes_joueurs_2025-2026.csv (underscore)
     return os.path.join(data_dir, f"equipes_joueurs_{season}.csv")
 
 
@@ -136,9 +133,12 @@ def _backup_dir(data_dir: str, season: str) -> str:
 def backup_team(df_all: pd.DataFrame, data_dir: str, season: str, team: str) -> Optional[str]:
     if df_all is None or df_all.empty or not team:
         return None
+    if "Propriétaire" not in df_all.columns:
+        return None
     bdir = _backup_dir(data_dir, season)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(bdir, f"{team}_{ts}.csv")
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", team.strip())
+    path = os.path.join(bdir, f"{safe}_{ts}.csv")
     sub = df_all[df_all["Propriétaire"].astype(str).str.strip().eq(team)].copy()
     if sub.empty:
         return None
@@ -148,11 +148,102 @@ def backup_team(df_all: pd.DataFrame, data_dir: str, season: str, team: str) -> 
 
 def list_backups(data_dir: str, season: str, team: str) -> List[str]:
     bdir = _backup_dir(data_dir, season)
-    if not os.path.isdir(bdir):
-        return []
-    files = [os.path.join(bdir, f) for f in os.listdir(bdir) if f.startswith(team + "_") and f.lower().endswith(".csv")]
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", team.strip())
+    files = [os.path.join(bdir, f) for f in os.listdir(bdir) if f.startswith(safe + "_") and f.lower().endswith(".csv")]
     files.sort(reverse=True)
     return files
+
+
+# ============================================================
+# NORMALISATION Fantrax/Exports -> schéma PMS Pool
+# ============================================================
+def _rename_first_match(df: pd.DataFrame, candidates: List[str], target: str) -> None:
+    for c in candidates:
+        if c in df.columns and target not in df.columns:
+            df.rename(columns={c: target}, inplace=True)
+            return
+
+
+def _coerce_int_series(s: pd.Series) -> pd.Series:
+    s = s.astype(str).str.replace("$", "", regex=False)
+    s = s.str.replace(" ", "", regex=False).str.replace("\u00a0", "", regex=False)
+    # 1,000,000 or 1 000 000 -> 1000000
+    s = s.str.replace(",", "", regex=False)
+    return pd.to_numeric(s, errors="coerce").fillna(0).astype(int)
+
+
+def _derive_slot_from_status(status: str) -> str:
+    v = str(status or "").strip().upper()
+    if not v:
+        return "Actif"
+    if "IR" in v or "INJ" in v:
+        return "IR"
+    if "MIN" in v or "AHL" in v or "PROS" in v:
+        return "Mineur"
+    if "BENCH" in v or "BN" in v:
+        return "Banc"
+    if "NA" in v:
+        return "Mineur"
+    return "Actif"
+
+
+def normalize_equipes_df(df_in: pd.DataFrame, owner: str) -> pd.DataFrame:
+    """Assure que le CSV final contient au minimum:
+    Propriétaire, Joueur, Pos, Salaire, Slot
+    + conserve le reste des colonnes si présentes.
+    """
+    df = df_in.copy()
+
+    # Drop Unnamed columns
+    drop_cols = [c for c in df.columns if str(c).startswith("Unnamed")]
+    if drop_cols:
+        df.drop(columns=drop_cols, inplace=True, errors="ignore")
+
+    # Common Fantrax/export mappings
+    _rename_first_match(df, ["Skaters", "Player", "Name", "Player Name", "Full Name"], "Joueur")
+    _rename_first_match(df, ["Pos", "Position"], "Pos")
+    _rename_first_match(df, ["Team", "NHL Team", "Equipe", "Équipe"], "Equipe")
+    _rename_first_match(df, ["Salary", "Cap Hit", "CapHit", "Salaire"], "Salaire")
+    _rename_first_match(df, ["Status", "Roster Status", "Statut"], "Statut")
+    _rename_first_match(df, ["IR Date", "IRDate", "Date IR"], "IR Date")
+    _rename_first_match(df, ["Level", "Contract Level"], "Level")
+
+    # Minimum required columns
+    if "Joueur" not in df.columns:
+        df["Joueur"] = ""
+    if "Pos" not in df.columns:
+        df["Pos"] = ""
+    if "Salaire" not in df.columns:
+        df["Salaire"] = 0
+
+    # Salary normalize
+    df["Salaire"] = _coerce_int_series(df["Salaire"])
+
+    # Slot logic: prefer explicit Slot column; else derive from Statut; else default Actif
+    if "Slot" not in df.columns:
+        if "Statut" in df.columns:
+            df["Slot"] = df["Statut"].apply(_derive_slot_from_status)
+        else:
+            df["Slot"] = "Actif"
+    else:
+        # sanitize existing slot
+        df["Slot"] = df["Slot"].astype(str).str.strip().replace({"": "Actif"})
+
+    # Owner
+    df["Propriétaire"] = str(owner).strip()
+
+    # Nice ordering (keep extras at end)
+    preferred = ["Propriétaire", "Joueur", "Pos", "Equipe", "Salaire", "Level", "Statut", "Slot", "IR Date"]
+    cols = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
+    df = df[cols].copy()
+
+    return df
+
+
+def validate_min_schema(df: pd.DataFrame) -> Tuple[bool, List[str]]:
+    required = ["Propriétaire", "Joueur", "Pos", "Salaire", "Slot"]
+    missing = [c for c in required if c not in df.columns]
+    return (len(missing) == 0), missing
 
 
 # -----------------------------
@@ -174,10 +265,11 @@ def render(ctx: dict) -> None:
     st.subheader("🛠️ Gestion Admin")
 
     # =====================================================
-    # 📥 Import multi CSV
+    # 📥 Import multi CSV (NORMALISE)
     # =====================================================
-    with st.expander("📥 Import multi CSV équipes", expanded=True):
-        st.caption("Astuce: si tes nombres contiennent des virgules (1,000,000), le fichier est souvent séparé par ';'.")
+    with st.expander("📥 Import multi CSV équipes (normalisé)", expanded=True):
+        st.caption("Supporte Fantrax/exports. On normalise automatiquement vers: Propriétaire, Joueur, Pos, Salaire, Slot.")
+
         delim_choice = st.selectbox("Delimiter (auto par défaut)", ["AUTO", ";", ",", "\t", "|"], index=0, key="adm_delim_choice")
         skip_bad = st.checkbox("Ignorer les lignes brisées (on_bad_lines='skip')", value=True, key="adm_skip_bad")
 
@@ -188,7 +280,7 @@ def render(ctx: dict) -> None:
             key="adm_multi_upload",
         )
 
-        prep = st.button("🧼 Préparer (analyse + attribution)", use_container_width=True, key="adm_prepare_btn")
+        prep = st.button("🧼 Préparer (lecture + normalisation + attribution)", use_container_width=True, key="adm_prepare_btn")
 
         if prep:
             st.session_state["admin_prepared"] = []
@@ -202,14 +294,21 @@ def render(ctx: dict) -> None:
                 fname = getattr(f, "name", "upload.csv")
                 try:
                     force = None if delim_choice == "AUTO" else (delim_choice if delim_choice != "\t" else "\t")
-                    df, rep = read_csv_robust(f, force_delim=force, skip_bad=skip_bad)
+                    df_raw, rep = read_csv_robust(f, force_delim=force, skip_bad=skip_bad)
 
                     team = infer_team_from_filename(fname)
-                    # force owner column at import time; here only keep in prepared
+                    df_norm = normalize_equipes_df(df_raw, team)
+
+                    ok, missing = validate_min_schema(df_norm)
+                    if not ok:
+                        st.error(f"❌ {fname}: colonnes manquantes après normalisation: {', '.join(missing)}")
+                        st.write("Colonnes détectées:", list(df_norm.columns))
+                        st.stop()
+
                     st.session_state["admin_prepared"].append({
                         "filename": fname,
                         "team": team,
-                        "df": df,
+                        "df": df_norm,
                     })
 
                     warn = rep.get("warning") or ""
@@ -228,30 +327,41 @@ def render(ctx: dict) -> None:
                     st.write("•", line)
 
             if st.session_state["admin_prepared"]:
-                st.success("✅ Fichiers préparés. Ajuste l’équipe si besoin puis importe plus bas.")
+                st.success("✅ Fichiers préparés + normalisés. Ajuste l’équipe si besoin puis importe plus bas.")
 
         # Attribution + preview + import
         if st.session_state["admin_prepared"]:
-            st.markdown("### Attribution des équipes")
+            st.markdown("### Attribution des équipes (et preview normalisé)")
             for i, item in enumerate(st.session_state["admin_prepared"]):
                 c1, c2 = st.columns([2, 3])
                 with c1:
-                    item["team"] = st.text_input(
+                    new_team = st.text_input(
                         f"Équipe pour {item['filename']}",
-                        value=item.get("team",""),
+                        value=item.get("team", ""),
                         key=f"adm_team_{i}",
                     ).strip()
+                    if new_team and new_team != item.get("team"):
+                        item["team"] = new_team
+                        # re-apply owner column
+                        item["df"]["Propriétaire"] = new_team
                     st.caption(f"Lignes: {len(item['df'])}")
                 with c2:
-                    st.dataframe(item["df"].head(15), use_container_width=True)
+                    st.dataframe(item["df"].head(20), use_container_width=True)
 
             do_import = st.button("⬇️ Importer (remplacer équipe + backup)", use_container_width=True, key="adm_do_import")
             if do_import:
                 # load existing
                 if os.path.exists(data_path):
-                    df_all = pd.read_csv(data_path)
+                    try:
+                        df_all = pd.read_csv(data_path)
+                    except Exception:
+                        df_all = pd.DataFrame()
                 else:
-                    df_all = pd.DataFrame(columns=["Propriétaire"])
+                    df_all = pd.DataFrame()
+
+                # ensure schema columns exist
+                if df_all.empty:
+                    df_all = pd.DataFrame(columns=["Propriétaire", "Joueur", "Pos", "Equipe", "Salaire", "Level", "Statut", "Slot", "IR Date"])
 
                 for item in st.session_state["admin_prepared"]:
                     team = str(item.get("team") or "").strip()
@@ -272,7 +382,7 @@ def render(ctx: dict) -> None:
 
                 df_all.to_csv(data_path, index=False)
                 st.session_state["admin_prepared"] = []
-                st.success(f"✅ Import terminé → {data_path}")
+                st.success(f"✅ Import terminé (normalisé) → {data_path}")
                 st.rerun()
 
     # =====================================================
@@ -286,7 +396,7 @@ def render(ctx: dict) -> None:
         try:
             df_all = pd.read_csv(data_path)
         except Exception:
-            st.error("Impossible de lire le fichier équipes local (corrup?)")
+            st.error("Impossible de lire le fichier équipes local (corrup?).")
             st.stop()
 
         if "Propriétaire" not in df_all.columns:
