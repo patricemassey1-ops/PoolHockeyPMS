@@ -5,198 +5,134 @@ import os
 import pandas as pd
 import streamlit as st
 
-# -------------------------------------------------
-# Helpers
-# -------------------------------------------------
-def _norm_name(x: str) -> str:
-    return (
-        str(x or "")
-        .lower()
-        .replace(".", "")
-        .replace("-", " ")
-        .replace("_", " ")
-        .strip()
-    )
 
-def _safe(v, default="—"):
-    if v is None:
-        return default
-    if isinstance(v, float) and pd.isna(v):
-        return default
-    if str(v).strip() == "":
-        return default
-    return v
-
-def _photo_url(player_id: str | None) -> str | None:
-    if not player_id:
-        return None
-    # NHL headshot standard
-    return f"https://assets.nhle.com/mugs/nhl/20242025/{player_id}.png"
+# ============================================================
+# HELPERS
+# ============================================================
+def _safe_col(df: pd.DataFrame, col: str, default="") -> pd.Series:
+    """
+    Retourne une Series TOUJOURS safe.
+    - si colonne existe → fillna
+    - sinon → Series remplie avec default
+    """
+    if col in df.columns:
+        return df[col].fillna(default)
+    return pd.Series([default] * len(df), index=df.index)
 
 
-# -------------------------------------------------
-# Main render
-# -------------------------------------------------
+def _safe_int_col(df: pd.DataFrame, col: str) -> pd.Series:
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+    return pd.Series([0] * len(df), index=df.index)
+
+
+# ============================================================
+# MAIN
+# ============================================================
 def render(ctx: dict) -> None:
-    st.header("👤 Joueurs")
+    st.subheader("👤 Joueurs")
 
-    DATA_DIR = ctx.get("DATA_DIR", "data")
-    season = ctx.get("season", "2025-2026")
+    DATA_DIR = str(ctx.get("DATA_DIR") or "data")
+    season = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
+    equipes_path = os.path.join(DATA_DIR, f"equipes_joueurs_{season}.csv")
 
-    players_path = os.path.join(DATA_DIR, "hockey.players.csv")
-    if not os.path.exists(players_path):
-        st.error(f"Fichier introuvable: {players_path}")
+    if not os.path.exists(equipes_path):
+        st.info("Aucun fichier équipes trouvé. Importe d’abord les équipes.")
         return
 
-    # -------------------------------------------------
-    # Load players DB
-    # -------------------------------------------------
     try:
-        df = pd.read_csv(players_path)
+        df = pd.read_csv(equipes_path)
     except Exception as e:
-        st.error(f"Erreur lecture hockey.players.csv: {e}")
+        st.error("Impossible de lire le fichier équipes.")
+        st.exception(e)
         return
 
     if df.empty:
-        st.warning("Base joueurs vide.")
+        st.info("Aucun joueur dans le fichier équipes.")
         return
 
-    # Normalisation minimale
-    df["Joueur"] = df.get("Joueur", df.get("Player", "")).astype(str)
-    df["Level"] = df.get("Level", "").fillna("")
-    df["Pos"] = df.get("Pos", "").fillna("")
-    df["Equipe"] = df.get("Equipe", "").fillna("")
-    df["Cap Hit"] = df.get("Cap Hit", df.get("Salary", "")).fillna("")
-    df["Contrat"] = df.get("Contract", "").fillna("")
-    df["NHL GP"] = df.get("NHL GP", "").fillna("")
-    df["Points"] = df.get("Points", "").fillna("")
-    df["playerId"] = df.get("playerId", "").fillna("")
+    # ========================================================
+    # NORMALISATION SAFE (AUCUN .fillna SUR STRING)
+    # ========================================================
+    df["Propriétaire"] = _safe_col(df, "Propriétaire")
+    df["Joueur"] = (
+        _safe_col(df, "Joueur")
+        if "Joueur" in df.columns
+        else _safe_col(df, "Player")
+    ).astype(str)
 
-    df["_display_name"] = df["Joueur"].astype(str)
-    df["_name_key"] = df["_display_name"].apply(_norm_name)
+    df["Pos"] = _safe_col(df, "Pos")
+    df["Equipe"] = _safe_col(df, "Equipe")
+    df["Slot"] = _safe_col(df, "Slot", "Actif")
+    df["Level"] = _safe_col(df, "Level", "")
+    df["Salaire"] = _safe_int_col(df, "Salaire")
 
-    # -------------------------------------------------
-    # Filtres
-    # -------------------------------------------------
-    st.markdown("### 🎛️ Filtres")
+    # Colonnes optionnelles (ne doivent JAMAIS casser)
+    df["Statut"] = _safe_col(df, "Statut")
+    df["IR Date"] = _safe_col(df, "IR Date")
 
-    colf1, colf2 = st.columns(2)
+    # ========================================================
+    # FILTRES UI
+    # ========================================================
+    teams = sorted(df["Propriétaire"].dropna().unique().tolist())
+    team = st.selectbox("Équipe", teams)
 
-    with colf1:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        slot_filter = st.multiselect(
+            "Slot",
+            ["Actif", "Banc", "Mineur", "IR"],
+            default=["Actif", "Banc", "Mineur", "IR"],
+        )
+    with col2:
         level_filter = st.multiselect(
             "Level",
-            options=sorted([x for x in df["Level"].unique() if x]),
-            default=sorted([x for x in df["Level"].unique() if x]),
+            sorted(df["Level"].dropna().unique().tolist()),
+            default=sorted(df["Level"].dropna().unique().tolist()),
         )
-
-    with colf2:
+    with col3:
         pos_filter = st.multiselect(
             "Position",
-            options=sorted([x for x in df["Pos"].unique() if x]),
-            default=sorted([x for x in df["Pos"].unique() if x]),
+            sorted(df["Pos"].dropna().unique().tolist()),
+            default=sorted(df["Pos"].dropna().unique().tolist()),
         )
 
-    df_opts = df.copy()
-    if level_filter:
-        df_opts = df_opts[df_opts["Level"].isin(level_filter)]
-    if pos_filter:
-        df_opts = df_opts[df_opts["Pos"].isin(pos_filter)]
+    # ========================================================
+    # APPLY FILTERS
+    # ========================================================
+    view = df[
+        (df["Propriétaire"] == team)
+        & (df["Slot"].isin(slot_filter))
+        & (df["Level"].isin(level_filter))
+        & (df["Pos"].isin(pos_filter))
+    ].copy()
 
-    # -------------------------------------------------
-    # Recherche (autocomplete performant)
-    # -------------------------------------------------
-    st.markdown("### 🔎 Recherche joueur")
+    # ========================================================
+    # AFFICHAGE
+    # ========================================================
+    st.caption(f"{len(view)} joueurs")
 
-    q = st.text_input("Tape un nom (ex: marner, draisaitl, savoie)")
+    show_cols = [
+        "Joueur",
+        "Pos",
+        "Equipe",
+        "Salaire",
+        "Level",
+        "Slot",
+        "Statut",
+        "IR Date",
+    ]
+    show_cols = [c for c in show_cols if c in view.columns]
 
-    base = df_opts[["_display_name", "_name_key"]].dropna().copy()
-
-    if q.strip():
-        q_raw = q.strip()
-        q_low = q_raw.lower()
-        q_key = _norm_name(q_raw)
-
-        sw = base[base["_display_name"].str.lower().str.startswith(q_low, na=False)]
-        sw2 = base[base["_name_key"].str.startswith(q_key, na=False)]
-        sw = pd.concat([sw, sw2], ignore_index=True).drop_duplicates()
-
-        ct = base[base["_display_name"].str.lower().str.contains(q_low, na=False)]
-        ct2 = base[base["_name_key"].str.contains(q_key, na=False)]
-        ct = pd.concat([ct, ct2], ignore_index=True).drop_duplicates()
-
-        res = pd.concat([sw, ct], ignore_index=True).drop_duplicates()
-    else:
-        res = base
-
-    res = res.head(200)
-    opts = res["_display_name"].tolist()
-
-    if not opts:
-        st.info("Aucun joueur trouvé.")
-        return
-
-    sel = st.selectbox("Choisir un joueur", opts)
-    key = _norm_name(sel)
-
-    p = df[df["_name_key"] == key].iloc[0]
-
-    # -------------------------------------------------
-    # Fiche joueur
-    # -------------------------------------------------
-    st.divider()
-    st.markdown("### 🧾 Fiche joueur")
-
-    colA, colB = st.columns([1, 2])
-
-    with colA:
-        photo = _photo_url(p.get("playerId"))
-        if photo:
-            st.image(photo, width=160)
-
-    with colB:
-        st.markdown(f"**{p['Joueur']}**")
-        st.write(f"🏒 Équipe: {_safe(p['Equipe'])}")
-        st.write(f"📌 Position: {_safe(p['Pos'])}")
-        st.write(f"📄 Level: {_safe(p['Level'])}")
-        st.write(f"💰 Salaire: {_safe(p['Cap Hit'])}")
-        st.write(f"📃 Contrat: {_safe(p['Contrat'])}")
-        st.write(f"🎯 Points: {_safe(p['Points'])}")
-        st.write(f"🎮 NHL GP: {_safe(p['NHL GP'])}")
-
-    # -------------------------------------------------
-    # Comparatif
-    # -------------------------------------------------
-    st.divider()
-    st.markdown("### ⚖️ Comparatif joueurs")
-
-    sel2 = st.selectbox(
-        "Comparer avec",
-        [x for x in opts if x != sel],
-        index=0,
-        key="players_compare",
+    st.dataframe(
+        view[show_cols].sort_values(["Slot", "Pos", "Joueur"]),
+        use_container_width=True,
+        hide_index=True,
     )
 
-    p2 = df[df["_name_key"] == _norm_name(sel2)].iloc[0]
+    # ========================================================
+    # STATS RAPIDES
+    # ========================================================
+    total_salary = int(view["Salaire"].sum())
+    st.metric("💰 Masse salariale", f"{total_salary:,} $".replace(",", " "))
 
-    comp = pd.DataFrame(
-        {
-            sel: {
-                "Équipe": p["Equipe"],
-                "Pos": p["Pos"],
-                "Level": p["Level"],
-                "Salaire": p["Cap Hit"],
-                "Points": p["Points"],
-                "NHL GP": p["NHL GP"],
-            },
-            sel2: {
-                "Équipe": p2["Equipe"],
-                "Pos": p2["Pos"],
-                "Level": p2["Level"],
-                "Salaire": p2["Cap Hit"],
-                "Points": p2["Points"],
-                "NHL GP": p2["NHL GP"],
-            },
-        }
-    )
-
-    st.dataframe(comp, use_container_width=True)
