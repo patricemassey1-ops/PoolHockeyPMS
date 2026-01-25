@@ -605,8 +605,23 @@ def _read_csv_bytes(b: bytes) -> pd.DataFrame:
 # ============================================================
 # MAIN RENDER
 # ============================================================
+
+# ============================================================
+# SAFE RENDER WRAPPER — évite "kick" vers Home en cas d'erreur
+# ============================================================
 def render(ctx: dict) -> None:
-    if not ctx.get("is_admin"):
+    try:
+        _render_inner(ctx)
+    except Exception as e:
+        st.error("❌ Erreur dans Admin (traceback ci-dessous).")
+        st.exception(e)
+        # garde l'onglet en place
+        st.session_state["active_tab"] = st.session_state.get("active_tab", "🛠️ Gestion Admin")
+        st.stop()
+
+
+def _render_inner(ctx: dict) -> None:
+if not ctx.get("is_admin"):
         st.warning("Accès admin requis.")
         return
 
@@ -794,9 +809,10 @@ def render(ctx: dict) -> None:
             st.info("Ajoute 1+ fichiers (multi) ou un ZIP de CSV.")
         else:
             prep = st.button("🧼 Préparer les fichiers (analyse + attribution)", use_container_width=True, key="adm_multi_prepare")
-            st.caption("Astuce: l'analyse démarre seulement quand tu cliques, pour éviter les reruns qui cassent à la sélection.")
+            st.caption("Astuce: on prépare seulement quand tu cliques, pour éviter les reruns qui plantent à la sélection.")
             if not prep:
                 st.stop()
+            try:
             parsed: List[Dict[str, Any]] = []
             errors: List[Tuple[str, str]] = []
 
@@ -949,7 +965,13 @@ def render(ctx: dict) -> None:
             st.rerun()
 
 
-    with st.expander("🧼 Preview local + alertes", expanded=False):
+    
+            except Exception as e:
+                st.error("❌ Erreur pendant la préparation/import multi. Copie le traceback ci-dessous.")
+                st.exception(e)
+                st.stop()
+
+with st.expander("🧼 Preview local + alertes", expanded=False):
         df = load_equipes(e_path)
         if df.empty:
             st.info("Aucun fichier équipes local. Importe depuis Drive ou import local.")

@@ -121,7 +121,13 @@ elif active_tab == "🕘 Historique":
 elif active_tab == "🏆 Classement":
     classement.render(ctx)
 elif active_tab == "🛠️ Gestion Admin":
-    admin.render(ctx)
+    try:
+        admin.render(ctx)
+    except Exception as e:
+        # Ne pas "kicker" l'utilisateur vers Home si l'Admin plante
+        st.session_state['active_tab'] = '🛠️ Gestion Admin' if '🛠️ Gestion Admin' in (globals().get('NAV_TABS') or []) else st.session_state.get('active_tab')
+        st.error('❌ Erreur dans l’onglet Admin (voir détails ci-dessous)')
+        st.exception(e)
 else:
     # Fallback safe: avoid st.error in case of older/partial streamlit builds
     st.warning(f"Onglet inconnu: {active_tab!r}. Retour à l’accueil.")
