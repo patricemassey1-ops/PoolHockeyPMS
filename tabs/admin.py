@@ -27,14 +27,139 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-def _first_existing_path(paths):
-    for p in paths:
+# ---- Optional: Google Drive client (if installed)
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload
+    from google.oauth2.credentials import Credentials
+except Exception:
+    build = None
+    MediaIoBaseDownload = None
+    Credentials = None
+
+# ---- Optional: project-specific OAuth helpers (si ton projet les a déjà)
+# On essaie plusieurs noms possibles, sans casser si absent.
+_oauth_ui = None
+_oauth_enabled = None
+_oauth_get_service = None
+
+for _mod, _fn_ui, _fn_enabled, _fn_service in [
+    ("services.gdrive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
+    ("services.gdrive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
+    ("services.drive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
+    ("services.drive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
+]:
+    try:
+        m = __import__(_mod, fromlist=[_fn_ui, _fn_enabled, _fn_service])
+        _oauth_ui = getattr(m, _fn_ui, None) or _oauth_ui
+        _oauth_enabled = getattr(m, _fn_enabled, None) or _oauth_enabled
+        _oauth_get_service = getattr(m, _fn_service, None) or _oauth_get_service
+    except Exception:
+        pass
+
+
+
+# ---- Optional: OAuth Flow fallback (self-contained) — nécessite google-auth-oauthlib
+try:
+    from google_auth_oauthlib.flow import Flow  # type: ignore
+except Exception:
+    Flow = None
+
+
+def render_drive_oauth_connect_ui() -> None:
+    """
+    UI OAuth Google Drive autonome (fallback).
+    Utilise st.secrets["gdrive_oauth"] (client_id / client_secret / redirect_uri).
+    Stocke les creds dans st.session_state["drive_creds"].
+    """
+    if Flow is None:
+        st.info("OAuth Drive: google-auth-oauthlib indisponible (fallback désactivé).")
+        return
+
+    cfg = st.secrets.get("gdrive_oauth", {})
+    client_id = str(cfg.get("client_id", "") or "")
+    client_secret = str(cfg.get("client_secret", "") or "")
+    redirect_uri = str(cfg.get("redirect_uri", "") or "")
+    if not (client_id and client_secret and redirect_uri):
+        st.info("OAuth Drive: Secrets [gdrive_oauth] incomplets (client_id / client_secret / redirect_uri).")
+        return
+
+    # already connected?
+    if st.session_state.get("drive_creds"):
+        st.success("✅ Drive OAuth connecté.")
+        if st.button("🔌 Déconnecter Drive OAuth", use_container_width=True, key="adm_drive_disconnect"):
+            st.session_state.pop("drive_creds", None)
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            st.rerun()
+        return
+
+    client_config = {
+        "web": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uris": [redirect_uri],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
+    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+    flow = Flow.from_client_config(client_config, scopes=scopes, redirect_uri=redirect_uri)
+
+    # handle return ?code=
+    code_param = ""
+    try:
+        qp = st.query_params if hasattr(st, "query_params") else {}
+        c = qp.get("code", "")
+        if isinstance(c, list):
+            code_param = c[0] if c else ""
+        else:
+            code_param = str(c or "")
+    except Exception:
+        code_param = ""
+
+    if code_param:
         try:
-            if p and os.path.exists(p):
-                return p
-        except Exception:
-            pass
-    return ""
+            flow.fetch_token(code=code_param)
+            creds = flow.credentials
+            st.session_state["drive_creds"] = {
+                "token": creds.token,
+                "refresh_token": creds.refresh_token,
+                "token_uri": creds.token_uri,
+                "client_id": creds.client_id,
+                "client_secret": creds.client_secret,
+                "scopes": creds.scopes,
+            }
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            st.success("✅ Drive OAuth connecté.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Échec OAuth: {e}")
+            return
+
+    auth_url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
+    st.link_button("🔐 Connecter Google Drive (OAuth)", auth_url, use_container_width=True)
+
+# ============================================================
+# CONFIG
+# ============================================================
+PLAYERS_DB_FILENAME = "hockey.players.csv"
+EQUIPES_COLUMNS = [
+    "Propriétaire", "Joueur", "Pos", "Equipe", "Salaire", "Level", "Statut", "Slot", "IR Date"
+]
+DEFAULT_CAP_GC = 88_000_000
+DEFAULT_CAP_CE = 12_000_000
+
+
+# ============================================================
+# SETTINGS (CAPS) — local + Drive
+# ============================================================
+SETTINGS_FILENAME = "settings.csv"
 
 def _fmt_money(n: int) -> str:
     try:
@@ -51,132 +176,237 @@ def _parse_money(s: str) -> int:
     except Exception:
         return 0
 
+def settings_path(data_dir: str) -> str:
+    return os.path.join(str(data_dir), SETTINGS_FILENAME)
 
+def _settings_df(cap_gc: int, cap_ce: int) -> pd.DataFrame:
+    return pd.DataFrame([{
+        "key": "caps",
+        "cap_gc": int(cap_gc or 0),
+        "cap_ce": int(cap_ce or 0),
+        "updated_ts": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }])
 
-# =====================================================
-# Drive helper — SAFE fallback (do not remove)
-# =====================================================
-def _get_drive_service_any(ctx):
-    """Return Drive service from session if available, else None (safe fallback)."""
+def load_settings_local(data_dir: str) -> dict:
+    path = settings_path(data_dir)
+    if not os.path.exists(path):
+        return {}
     try:
-        return st.session_state.get("drive_service")
+        df = pd.read_csv(path)
+        if df.empty:
+            return {}
+        row = df.iloc[0].to_dict()
+        return {
+            "cap_gc": _safe_int(row.get("cap_gc"), 0),
+            "cap_ce": _safe_int(row.get("cap_ce"), 0),
+            "updated_ts": str(row.get("updated_ts") or ""),
+        }
     except Exception:
+        return {}
+
+def save_settings_local(data_dir: str, cap_gc: int, cap_ce: int) -> bool:
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        path = settings_path(data_dir)
+        _settings_df(cap_gc, cap_ce).to_csv(path, index=False, encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+def _drive_find_file_id_by_name(svc: Any, folder_id: str, name: str) -> str:
+    try:
+        q = f"'{folder_id}' in parents and name = '{name}' and trashed=false"
+        res = svc.files().list(
+            q=q,
+            fields="files(id,name,modifiedTime,createdTime)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            pageSize=10,
+        ).execute()
+        files = (res or {}).get("files") or []
+        return str(files[0].get("id") or "") if files else ""
+    except Exception:
+        return ""
+
+def _drive_upload_bytes(svc: Any, folder_id: str, name: str, data: bytes, mime: str = "text/csv") -> str:
+    """Create or update a file in Drive. Returns file_id or ''.
+    Requires OAuth scopes that allow write. If not, it will fail silently (caller handles).
+    """
+    try:
+        from googleapiclient.http import MediaIoBaseUpload  # type: ignore
+    except Exception:
+        MediaIoBaseUpload = None
+
+    if not MediaIoBaseUpload:
+        return ""
+
+    file_id = _drive_find_file_id_by_name(svc, folder_id, name)
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
+
+    try:
+        if file_id:
+            svc.files().update(
+                fileId=file_id,
+                media_body=media,
+                supportsAllDrives=True,
+            ).execute()
+            return file_id
+        meta = {"name": name, "parents": [folder_id]}
+        created = svc.files().create(
+            body=meta,
+            media_body=media,
+            fields="id",
+            supportsAllDrives=True,
+        ).execute()
+        return str((created or {}).get("id") or "")
+    except Exception:
+        return ""
+
+def load_settings_drive_if_needed(data_dir: str, svc: Any, folder_id: str) -> dict:
+    """If local settings missing, try download from Drive and cache locally."""
+    try:
+        local = load_settings_local(data_dir)
+        if local:
+            return local
+        if not svc or not folder_id:
+            return {}
+        file_id = _drive_find_file_id_by_name(svc, folder_id, SETTINGS_FILENAME)
+        if not file_id:
+            return {}
+        b = _drive_download_bytes(svc, file_id)
+        if b:
+            try:
+                Path(settings_path(data_dir)).write_bytes(b)
+            except Exception:
+                pass
+        return load_settings_local(data_dir)
+    except Exception:
+        return {}
+
+
+# ============================================================
+# UTILS
+# ============================================================
+def _now_ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def _norm(x: Any) -> str:
+    return str(x or "").strip()
+
+def _norm_player(x: Any) -> str:
+    return _norm(x).lower()
+
+def _norm_level(v: Any) -> str:
+    s = _norm(v).upper()
+    return s if s in {"ELC", "STD"} else "0"
+
+def _safe_int(v: Any, default: int = 0) -> int:
+    try:
+        n = pd.to_numeric(v, errors="coerce")
+        if pd.isna(n):
+            return default
+        return int(n)
+    except Exception:
+        return default
+
+def _pick_col(df: pd.DataFrame, candidates: List[str]) -> str:
+    if df is None or df.empty:
+        return ""
+    low = {str(c).strip().lower(): c for c in df.columns}
+    for cand in candidates:
+        key = str(cand).strip().lower()
+        if key in low:
+            return low[key]
+    return ""
+
+
+
+# ============================================================
+# OWNER FROM FILENAME (🧠)
+# ============================================================
+def infer_owner_from_filename(filename: str, owners_choices: List[str]) -> str:
+    """
+    Auto-assign depuis nom de fichier.
+    Ex: "Whalers.csv" -> "Whalers"
+    Priorité: match d'un owner existant (owners_choices), sinon basename.
+    """
+    fn = str(filename or "").strip()
+    if not fn:
+        return ""
+    base = os.path.splitext(os.path.basename(fn))[0].strip()
+    low = fn.lower()
+    base_low = base.lower()
+
+    for o in owners_choices or []:
+        ol = str(o or "").strip().lower()
+        if not ol:
+            continue
+        if ol in low or ol in base_low:
+            return str(o).strip()
+
+    # token match
+    tokens = re.split(r"[^a-z0-9]+", base_low)
+    token_set = {t for t in tokens if t}
+    for o in owners_choices or []:
+        ol = str(o or "").strip().lower()
+        if ol and ol in token_set:
+            return str(o).strip()
+
+    return base or ""
+
+
+# ============================================================
+# ROLLBACK (local) — par équipe
+# ============================================================
+def _backup_dir(data_dir: str, season_lbl: str) -> str:
+    d = os.path.join(str(data_dir or "Data"), "backups_admin", str(season_lbl or "season"))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def list_team_backups(data_dir: str, season_lbl: str, owner: str) -> List[str]:
+    d = _backup_dir(data_dir, season_lbl)
+    owner_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(owner or "").strip())
+    files: List[str] = []
+    if os.path.isdir(d):
+        for fn in os.listdir(d):
+            if fn.lower().endswith(".csv") and owner_key.lower() in fn.lower():
+                files.append(os.path.join(d, fn))
+    files.sort(reverse=True)
+    return files
+
+def backup_team_rows(df_all: pd.DataFrame, data_dir: str, season_lbl: str, owner: str, note: str = "") -> Optional[str]:
+    if df_all is None or df_all.empty or not owner:
         return None
-
-
-def _resolve_data_dir(ctx: dict) -> str:
-    """Resolve /data vs /Data robustly and anchor to project root."""
-    cand = str((ctx or {}).get("DATA_DIR") or "").strip()
-    if cand:
-        return str(Path(cand))
-    try:
-        root = Path(__file__).resolve().parents[1]
-    except Exception:
-        root = Path.cwd()
-    for name in ("data", "Data", "DATA"):
-        p = root / name
-        if p.exists() and p.is_dir():
-            return str(p)
-    p = root / "data"
-    p.mkdir(parents=True, exist_ok=True)
-    return str(p)
-
-def _get_drive_service_any(ctx: dict = None):
-    """Try ctx/session/service helper to get Drive API service."""
-    try:
-        if ctx and ctx.get("drive_service"):
-            return ctx.get("drive_service")
-    except Exception:
-        pass
-    for key in ("drive_service", "drive_svc", "gdrive_service"):
-        try:
-            svc = st.session_state.get(key)
-            if svc:
-                return svc
-        except Exception:
-            pass
-    try:
-        if callable(_oauth_get_service):
-            return _oauth_get_service()
-    except Exception:
-        pass
-    return None
-
-# ---- Optional: Google Drive client (if installed)
-try:
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload
-    from google.oauth2.credentials import Credentials
-except Exception:
-    build = None
-    MediaIoBaseDownload = None
-    Credentials = None
-
-# ---- Optional: project-specific OAuth helpers (si ton projet les a déjà)
-# Objectif: ne jamais crasher si le module OAuth n'existe pas, et supporter
-# - services/ qui n'est pas un package (pas de __init__.py)
-# - plusieurs noms de fonctions possibles
-import importlib
-import importlib.util
-
-_oauth_ui = None
-_oauth_enabled = None
-_oauth_get_service = None
-
-def _try_bind_from_module(m):
-    global _oauth_ui, _oauth_enabled, _oauth_get_service
-    if not m:
-        return
-    for cand in ("render_oauth_connect_ui", "render_oauth_ui", "oauth_ui", "render_ui"):
-        fn = getattr(m, cand, None)
-        if callable(fn):
-            _oauth_ui = _oauth_ui or fn
-            break
-    for cand in ("oauth_drive_enabled", "drive_oauth_enabled", "oauth_enabled"):
-        fn = getattr(m, cand, None)
-        if callable(fn):
-            _oauth_enabled = _oauth_enabled or fn
-            break
-    for cand in ("get_drive_service", "drive_get_service", "get_service", "drive_service"):
-        fn = getattr(m, cand, None)
-        if callable(fn):
-            _oauth_get_service = _oauth_get_service or fn
-            break
-
-def _load_module_from_path(mod_name: str, path: Path):
-    try:
-        spec = importlib.util.spec_from_file_location(mod_name, str(path))
-        if spec and spec.loader:
-            m = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(m)
-            return m
-    except Exception:
+    d = _backup_dir(data_dir, season_lbl)
+    owner_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(owner or "").strip())
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(d, f"equipes_{season_lbl}__{owner_key}__{ts}.csv")
+    sub = df_all[df_all["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
+    if sub.empty:
         return None
-    return None
+    sub = ensure_equipes_df(sub)
+    sub.to_csv(path, index=False)
+    if note:
+        st.session_state[f"admin_last_backup_note__{season_lbl}__{owner_key}"] = note
+    return path
 
-# 1) Tentatives d'import "classiques"
-for _mod in ("services.gdrive_oauth", "services.drive_oauth", "gdrive_oauth", "drive_oauth"):
+def restore_team_from_backup(df_all: pd.DataFrame, backup_path: str, owner: str) -> pd.DataFrame:
+    df_all = ensure_equipes_df(df_all)
+    if not backup_path or not os.path.exists(backup_path) or not owner:
+        return df_all
     try:
-        m = importlib.import_module(_mod)
-        _try_bind_from_module(m)
+        sub = pd.read_csv(backup_path)
+        sub = ensure_equipes_df(sub)
+        sub["Propriétaire"] = str(owner).strip()
     except Exception:
-        pass
+        return df_all
 
-# 2) Tentative via fichiers: /services/*.py même si ce n'est pas un package
-def _discover_oauth_modules(ROOT_DIR: Path):
-    svc_dir = (ROOT_DIR / "services")
-    if not svc_dir.exists():
-        return []
-    out = []
-    for p in sorted(svc_dir.glob("*.py")):
-        name = p.name.lower()
-        if "oauth" in name and "drive" in name:
-            out.append(p)
-    return out
+    df_all = df_all[~df_all["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
+    df_all = pd.concat([df_all, sub], ignore_index=True)
+    return ensure_equipes_df(df_all)
 
 # ============================================================
 # PATHS
-# ============================================================
 # ============================================================
 def equipes_path(data_dir: str, season_lbl: str) -> str:
     return os.path.join(data_dir, f"equipes_joueurs_{season_lbl}.csv")
@@ -800,7 +1030,21 @@ def render(ctx: dict) -> None:
         st.warning("Accès admin requis.")
         return
 
-    DATA_DIR = _resolve_data_dir(ctx)
+    DATA_DIR = str(ctx.get("DATA_DIR") or "Data")
+    # Resolve /data vs /Data robustly
+    try:
+        root = Path(__file__).resolve().parents[1]
+        if not os.path.isabs(DATA_DIR):
+            # if ctx gives relative, anchor to root
+            DATA_DIR = str((root / DATA_DIR).resolve())
+        if not os.path.isdir(DATA_DIR):
+            for name in ("data","Data","DATA"):
+                p = root / name
+                if p.exists() and p.is_dir():
+                    DATA_DIR = str(p.resolve())
+                    break
+    except Exception:
+        pass
     os.makedirs(DATA_DIR, exist_ok=True)
 
     season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
@@ -813,59 +1057,94 @@ def render(ctx: dict) -> None:
 
     # ---- OAuth UI (si ton projet l'avait déjà)
     with st.expander("🔐 Connexion Google Drive (OAuth)", expanded=False):
-        used_path = ""
-        try:
-            used_path = _discover_services_oauth_module()
-        except Exception:
-            used_path = ""
-
         if callable(_oauth_ui):
             try:
                 _oauth_ui()
-            except Exception as e:
-                st.info("UI OAuth détectée mais a échoué — vérifie tes secrets OAuth.")
-                st.caption(str(e))
+            except Exception:
+                st.info("UI OAuth présente mais a échoué — vérifie tes secrets OAuth.")
         else:
-            st.caption("Aucune UI OAuth détectée. Tu peux quand même importer en local (fallback).")
-            if used_path:
-                st.caption(f"services OAuth trouvé mais fonctions manquantes: `{used_path}`")
-
-        svc = _get_drive_service_any(ctx)
-        if svc:
-            st.success("✅ Drive OAuth connecté (service disponible).")
-        else:
-            st.warning("Drive OAuth non disponible (creds manquants ou service indisponible).")
-
-        dbg = st.checkbox("🧩 Debug OAuth (facultatif)", value=False, key="adm_oauth_dbg")
-        if dbg:
-            st.write("services_oauth_file:", used_path or "(aucun)")
-            st.write("has_ui:", bool(callable(_oauth_ui)))
-            st.write("has_get_service:", bool(callable(_oauth_get_service)))
+            st.caption("Aucune UI OAuth détectée dans services/*. Tu peux quand même importer en local (fallback).")
             if callable(_oauth_enabled):
                 try:
-                    st.write("oauth_enabled():", bool(_oauth_enabled()))
+                    st.write("oauth_drive_enabled():", bool(_oauth_enabled()))
                 except Exception:
                     pass
 
+    # ---- caps inputs
+    st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
+    st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
+
     with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
         st.caption("Définis ici les plafonds utilisés partout (affichage + alertes). Format: `1 000 000 $`.")
+        # ---- load settings at first display (Drive -> local cache -> session)
+        svc_for_settings = _drive_service_from_existing_oauth()
+        settings = load_settings_drive_if_needed(DATA_DIR, svc_for_settings, folder_id) if folder_id else load_settings_local(DATA_DIR)
+
+        if "CAP_GC" not in st.session_state:
+            st.session_state["CAP_GC"] = int(settings.get("cap_gc") or DEFAULT_CAP_GC)
+        if "CAP_CE" not in st.session_state:
+            st.session_state["CAP_CE"] = int(settings.get("cap_ce") or DEFAULT_CAP_CE)
+
         col1, col2 = st.columns(2)
         with col1:
             cap_gc_str = st.text_input("Cap GC", value=_fmt_money(st.session_state.get("CAP_GC", DEFAULT_CAP_GC)), key="cap_gc_txt")
         with col2:
             cap_ce_str = st.text_input("Cap CE", value=_fmt_money(st.session_state.get("CAP_CE", DEFAULT_CAP_CE)), key="cap_ce_txt")
 
+        # validation anti-absurde
         cap_gc_val = _parse_money(cap_gc_str)
         cap_ce_val = _parse_money(cap_ce_str)
 
-        # applique (et normalise l'affichage)
-        st.session_state["CAP_GC"] = int(cap_gc_val or 0)
-        st.session_state["CAP_CE"] = int(cap_ce_val or 0)
+        MIN_CAP = 1_000_000
+        MAX_CAP = 200_000_000
+        errs = []
+        if cap_gc_val and (cap_gc_val < MIN_CAP or cap_gc_val > MAX_CAP):
+            errs.append(f"Cap GC invalide ({_fmt_money(cap_gc_val)}) — doit être entre {_fmt_money(MIN_CAP)} et {_fmt_money(MAX_CAP)}.")
+        if cap_ce_val and (cap_ce_val < MIN_CAP or cap_ce_val > MAX_CAP):
+            errs.append(f"Cap CE invalide ({_fmt_money(cap_ce_val)}) — doit être entre {_fmt_money(MIN_CAP)} et {_fmt_money(MAX_CAP)}.")
 
-        st.caption(f"Valeurs enregistrées: **GC** {_fmt_money(st.session_state['CAP_GC'])} • **CE** {_fmt_money(st.session_state['CAP_CE'])}")
+        if errs:
+            for e in errs:
+                st.error(e)
+            st.info("Corrige la valeur avant de sauvegarder.")
+        else:
+            st.session_state["CAP_GC"] = int(cap_gc_val or 0)
+            st.session_state["CAP_CE"] = int(cap_ce_val or 0)
 
-    # ---- Players DB index
-
+        b1, b2, b3 = st.columns([1,1,2])
+        with b1:
+            if st.button("💾 Sauvegarder (local + Drive)", use_container_width=True, key="adm_caps_save"):
+                if errs:
+                    st.warning("Impossible de sauvegarder — valeurs invalides.")
+                else:
+                    ok_local = save_settings_local(DATA_DIR, st.session_state["CAP_GC"], st.session_state["CAP_CE"])
+                    ok_drive = False
+                    if svc_for_settings and folder_id:
+                        try:
+                            payload = Path(settings_path(DATA_DIR)).read_bytes()
+                            ok_drive = bool(_drive_upload_bytes(svc_for_settings, folder_id, SETTINGS_FILENAME, payload))
+                        except Exception:
+                            ok_drive = False
+                    if ok_local:
+                        st.success("✅ Settings sauvegardés en local.")
+                    else:
+                        st.error("❌ Échec sauvegarde locale.")
+                    if folder_id:
+                        if ok_drive:
+                            st.success("✅ Settings uploadés sur Drive.")
+                        else:
+                            st.warning("⚠️ Drive: upload non effectué (OAuth write scopes manquants ou Drive indisponible).")
+                    st.cache_data.clear()
+        with b2:
+            if st.button("🔄 Recharger (local/Drive)", use_container_width=True, key="adm_caps_reload"):
+                st.cache_data.clear()
+                settings = load_settings_drive_if_needed(DATA_DIR, svc_for_settings, folder_id) if folder_id else load_settings_local(DATA_DIR)
+                st.session_state["CAP_GC"] = int(settings.get("cap_gc") or DEFAULT_CAP_GC)
+                st.session_state["CAP_CE"] = int(settings.get("cap_ce") or DEFAULT_CAP_CE)
+                st.success("✅ Rechargé.")
+        with b3:
+            st.caption(f"Actuel: **GC** {_fmt_money(int(st.session_state.get('CAP_GC',0)))} • **CE** {_fmt_money(int(st.session_state.get('CAP_CE',0)))}")
+# ---- Players DB index
     players_db = load_players_db(_first_existing_path([
         os.path.join(DATA_DIR, "hockey.players.csv"),
         os.path.join(DATA_DIR, "Hockey.Players.csv"),
@@ -1237,11 +1516,27 @@ def render(ctx: dict) -> None:
         allow_override = st.checkbox("🛑 Autoriser override admin si joueur appartient déjà à une autre équipe", value=False, key="adm_add_override")
 
         if players_idx:
-            all_names = sorted({v["Joueur"] for v in players_idx.values() if v.get("Joueur")})
-            selected = st.multiselect("Joueurs", all_names, key="adm_add_players")
+            all_names = sorted({v.get("Joueur","") for v in players_idx.values() if v.get("Joueur")})
+            q = st.text_input("🔎 Recherche joueur (fuzzy)", value="", key="adm_add_search").strip()
+            suggestions = all_names
+            if q:
+                # fuzzy léger sans dépendances
+                import difflib
+                suggestions = difflib.get_close_matches(q, all_names, n=25, cutoff=0.4)
+                if not suggestions:
+                    # fallback: contient
+                    ql = q.lower()
+                    suggestions = [n for n in all_names if ql in n.lower()][:25]
+
+            st.caption("Sélection max: 5 joueurs.")
+            selected = st.multiselect("Joueurs (suggestions)", suggestions, default=[], key="adm_add_players")
         else:
             raw = st.text_area("Saisir joueurs (1 par ligne)", height=120, key="adm_add_manual")
             selected = [x.strip() for x in raw.splitlines() if x.strip()]
+
+        if len(selected) > 5:
+            st.warning("Sélection limitée à 5 joueurs (les premiers ont été gardés).")
+            selected = selected[:5]
 
         preview: List[Dict[str, Any]] = []
         blocked: List[Tuple[str, str]] = []
