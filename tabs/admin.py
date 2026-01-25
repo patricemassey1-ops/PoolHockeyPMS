@@ -3,15 +3,14 @@
 # PMS Pool Hockey — Admin Tab (Streamlit)
 # Compatible avec: admin.render(ctx) depuis app.py
 # ============================================================
-# Features:
-# ✅ Import équipes depuis Drive (OAuth creds dans st.session_state["drive_creds"])
-# ✅ Preview + validation colonnes
-# ✅ ➕ Ajouter joueur(s) (anti-triche cross-team) + override admin option
-# ✅ 🗑️ Retirer joueur(s) (UI + confirmation)
+# ✅ Import équipes depuis Drive (OAuth) + Import local fallback
+# ✅ Preview + validation colonnes attendues
+# ✅ ➕ Ajouter joueurs (anti-triche cross-team)
+# ✅ 🗑️ Retirer joueurs (UI + confirmation)
 # ✅ 🔁 Déplacer GC ↔ CE (auto-slot / keep / force)
-# ✅ 🧪 Caps live: barres visuelles GC/CE par équipe + dépassements
-# ✅ 📋 Historique admin (ADD/REMOVE/MOVE/IMPORT) filtrable (CSV par saison)
-# ✅ Auto-mapping Level via hockey.players.csv + heuristique salaire
+# ✅ 🧪 Barres visuelles cap GC/CE + dépassements
+# ✅ 📋 Historique admin complet (ADD/REMOVE/MOVE/IMPORT)
+# ✅ Auto-mapping Level via hockey.players.csv (+ heuristique salaire)
 # ✅ Alertes IR mismatch + Salary/Level suspect + preview colorée
 # ============================================================
 
@@ -25,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
-# ---- Google Drive OAuth deps (optional)
+# ---- Optional: Google Drive client (if installed)
 try:
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
@@ -34,6 +33,26 @@ except Exception:
     build = None
     MediaIoBaseDownload = None
     Credentials = None
+
+# ---- Optional: project-specific OAuth helpers (si ton projet les a déjà)
+# On essaie plusieurs noms possibles, sans casser si absent.
+_oauth_ui = None
+_oauth_enabled = None
+_oauth_get_service = None
+
+for _mod, _fn_ui, _fn_enabled, _fn_service in [
+    ("services.gdrive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
+    ("services.gdrive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
+    ("services.drive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
+    ("services.drive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
+]:
+    try:
+        m = __import__(_mod, fromlist=[_fn_ui, _fn_enabled, _fn_service])
+        _oauth_ui = getattr(m, _fn_ui, None) or _oauth_ui
+        _oauth_enabled = getattr(m, _fn_enabled, None) or _oauth_enabled
+        _oauth_get_service = getattr(m, _fn_service, None) or _oauth_get_service
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -107,7 +126,6 @@ def ensure_equipes_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         out[c] = out[c].astype(str).fillna("").str.strip()
     out["Salaire"] = pd.to_numeric(out.get("Salaire", 0), errors="coerce").fillna(0).astype(int)
     out["Level"] = out["Level"].apply(_norm_level)
-    # keep expected first
     return out[EQUIPES_COLUMNS + [c for c in out.columns if c not in EQUIPES_COLUMNS]]
 
 def load_equipes(path: str) -> pd.DataFrame:
@@ -160,10 +178,9 @@ def build_players_index(players: pd.DataFrame) -> dict:
 # VALIDATION
 # ============================================================
 def validate_equipes_df(df: pd.DataFrame) -> Tuple[bool, List[str], List[str]]:
-    expected = EQUIPES_COLUMNS
     cols = list(df.columns)
-    missing = [c for c in expected if c not in cols]
-    extras = [c for c in cols if c not in expected]
+    missing = [c for c in EQUIPES_COLUMNS if c not in cols]
+    extras = [c for c in cols if c not in EQUIPES_COLUMNS]
     return (len(missing) == 0), missing, extras
 
 
@@ -236,18 +253,17 @@ def _preview_style_row(row: pd.Series) -> List[str]:
 
 
 # ============================================================
-# AUTO SLOT (🧠)
+# AUTO SLOT
 # ============================================================
 def auto_slot_for_statut(dest_statut: str, *, current_slot: str = "", keep_ir: bool = True) -> str:
     cur = str(current_slot or "").strip().upper()
     if keep_ir and cur == "IR":
         return "IR"
-    # simple: Actif par défaut
     return "Actif"
 
 
 # ============================================================
-# CAPS (🧪)
+# CAPS
 # ============================================================
 def compute_caps(df: pd.DataFrame) -> pd.DataFrame:
     d = ensure_equipes_df(df)
@@ -275,9 +291,43 @@ def compute_caps(df: pd.DataFrame) -> pd.DataFrame:
     out["Propriétaire"] = out["Propriétaire"].astype(str).str.strip()
     return out.sort_values("Propriétaire")
 
+def _render_caps_bars(df_eq: pd.DataFrame, cap_gc: int, cap_ce: int) -> None:
+    caps = compute_caps(df_eq)
+    if caps.empty:
+        st.info("Aucune donnée équipes.")
+        return
+
+    for _, r in caps.iterrows():
+        owner = str(r.get("Propriétaire", "")).strip()
+        gc = int(r.get("GC $", 0))
+        ce = int(r.get("CE $", 0))
+
+        st.markdown(f"**{owner}**")
+        c1, c2, c3 = st.columns([2, 2, 1])
+
+        with c1:
+            ratio = 0.0 if cap_gc <= 0 else min(1.0, gc / cap_gc)
+            st.caption(f"GC: {gc:,} / {cap_gc:,}")
+            st.progress(ratio)
+
+        with c2:
+            ratio = 0.0 if cap_ce <= 0 else min(1.0, ce / cap_ce)
+            st.caption(f"CE: {ce:,} / {cap_ce:,}")
+            st.progress(ratio)
+
+        with c3:
+            over = []
+            if cap_gc > 0 and gc > cap_gc:
+                over.append(f"⚠️ GC +{gc-cap_gc:,}")
+            if cap_ce > 0 and ce > cap_ce:
+                over.append(f"⚠️ CE +{ce-cap_ce:,}")
+            st.write("\n".join(over) if over else "✅ OK")
+
+        st.divider()
+
 
 # ============================================================
-# ADMIN LOG (📋)
+# ADMIN LOG
 # ============================================================
 def append_admin_log(
     path: str,
@@ -315,9 +365,27 @@ def append_admin_log(
 
 
 # ============================================================
-# DRIVE IMPORT (🔄)
+# DRIVE (OAuth) — get service
 # ============================================================
-def _get_drive_service_from_session() -> Optional[Any]:
+def _drive_service_from_existing_oauth() -> Optional[Any]:
+    """
+    Essaie d'obtenir un service Drive "comme avant" :
+    1) si ton projet a déjà un helper (services.*drive_oauth*), on l'utilise
+    2) sinon, on tente st.session_state['drive_creds'] (dict OAuth) -> google.oauth2.credentials
+    """
+    # 1) helper projet
+    if callable(_oauth_get_service):
+        try:
+            return _oauth_get_service()
+        except TypeError:
+            try:
+                return _oauth_get_service(st.session_state)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # 2) session_state creds dict
     if build is None or Credentials is None:
         return None
     creds_dict = st.session_state.get("drive_creds")
@@ -354,7 +422,6 @@ def _drive_download_bytes(svc: Any, file_id: str) -> bytes:
     return fh.getvalue()
 
 def _read_csv_bytes(b: bytes) -> pd.DataFrame:
-    # utf-8 puis latin-1 fallback
     try:
         return pd.read_csv(io.BytesIO(b))
     except Exception:
@@ -362,54 +429,16 @@ def _read_csv_bytes(b: bytes) -> pd.DataFrame:
 
 
 # ============================================================
-# UI BLOCKS
-# ============================================================
-def _render_caps_bars(df_eq: pd.DataFrame, cap_gc: int, cap_ce: int) -> None:
-    st.markdown("### 🧪 Caps — barres visuelles (GC / CE)")
-    caps = compute_caps(df_eq)
-    if caps.empty:
-        st.info("Aucune donnée équipes.")
-        return
-
-    # display summary table + bars per owner
-    for _, r in caps.iterrows():
-        owner = str(r.get("Propriétaire", "")).strip()
-        gc = int(r.get("GC $", 0))
-        ce = int(r.get("CE $", 0))
-
-        st.markdown(f"**{owner}**")
-        c1, c2, c3 = st.columns([2, 2, 1])
-
-        with c1:
-            ratio = 0.0 if cap_gc <= 0 else min(1.0, gc / cap_gc)
-            st.caption(f"GC: {gc:,} / {cap_gc:,}")
-            st.progress(ratio)
-
-        with c2:
-            ratio = 0.0 if cap_ce <= 0 else min(1.0, ce / cap_ce)
-            st.caption(f"CE: {ce:,} / {cap_ce:,}")
-            st.progress(ratio)
-
-        with c3:
-            over = []
-            if cap_gc > 0 and gc > cap_gc:
-                over.append(f"⚠️ GC +{gc-cap_gc:,}")
-            if cap_ce > 0 and ce > cap_ce:
-                over.append(f"⚠️ CE +{ce-cap_ce:,}")
-            st.write("\n".join(over) if over else "✅ OK")
-
-        st.divider()
-
-
-# ============================================================
 # MAIN RENDER
 # ============================================================
-def render(ctx: dict):
+def render(ctx: dict) -> None:
     if not ctx.get("is_admin"):
         st.warning("Accès admin requis.")
         return
 
     DATA_DIR = str(ctx.get("DATA_DIR") or "Data")
+    os.makedirs(DATA_DIR, exist_ok=True)
+
     season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
     folder_id = str(ctx.get("drive_folder_id") or "").strip()
 
@@ -418,7 +447,22 @@ def render(ctx: dict):
 
     st.subheader("🛠️ Gestion Admin")
 
-    # ---- caps inputs (live)
+    # ---- OAuth UI (si ton projet l'avait déjà)
+    with st.expander("🔐 Connexion Google Drive (OAuth)", expanded=False):
+        if callable(_oauth_ui):
+            try:
+                _oauth_ui()
+            except Exception:
+                st.info("UI OAuth présente mais a échoué — vérifie tes secrets OAuth.")
+        else:
+            st.caption("Aucune UI OAuth détectée dans services/*. Tu peux quand même importer en local (fallback).")
+            if callable(_oauth_enabled):
+                try:
+                    st.write("oauth_drive_enabled():", bool(_oauth_enabled()))
+                except Exception:
+                    pass
+
+    # ---- caps inputs
     st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
     st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
@@ -440,28 +484,26 @@ def render(ctx: dict):
     players_db = load_players_db(os.path.join(DATA_DIR, PLAYERS_DB_FILENAME))
     players_idx = build_players_index(players_db)
     if players_idx:
-        st.info(f"✅ Players DB détectée: `{PLAYERS_DB_FILENAME}` (Level auto + infos).")
+        st.success(f"Players DB détectée: {PLAYERS_DB_FILENAME} (Level auto + infos).")
     else:
-        st.warning(f"ℹ️ `{PLAYERS_DB_FILENAME}` indisponible — fallback Level par Salaire; sélection joueurs limitée.")
+        st.warning(f"{PLAYERS_DB_FILENAME} indisponible — fallback Level par Salaire.")
 
-    # ---- Load équipes (local)
+    # ---- Load équipes
     df = load_equipes(e_path)
 
-    # Owners list
-    owners = sorted([x for x in df.get("Propriétaire", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique() if x])
-
     # =====================================================
-    # 🔄 IMPORT ÉQUIPES (Drive) + preview + validate
+    # 🔄 IMPORT ÉQUIPES (Drive)
     # =====================================================
     with st.expander("🔄 Import équipes depuis Drive (OAuth)", expanded=False):
-        st.caption("Nécessite OAuth: st.session_state['drive_creds'] et un folder_id valide.")
+        st.caption("Lister/télécharger les CSV dans ton folder_id. Si ça ne marche pas, utilise Import local (fallback).")
+        st.write(f"folder_id (ctx): `{folder_id or ''}`")
 
-        svc = _get_drive_service_from_session()
+        svc = _drive_service_from_existing_oauth()
         drive_ok = bool(svc) and bool(folder_id)
 
         if not drive_ok:
-            st.warning("Drive OAuth non disponible (creds ou folder_id manquant).")
-            st.write(f"folder_id (ctx): `{folder_id or ''}`")
+            st.warning("Drive OAuth non disponible (creds manquants ou service indisponible).")
+            st.caption("Conseil: ouvre l’expander 'Connexion Google Drive (OAuth)' et connecte-toi.")
         else:
             files = _drive_list_csv_files(svc, folder_id)
             equipes_files = [f for f in files if "equipes_joueurs" in f["name"].lower()]
@@ -500,14 +542,13 @@ def render(ctx: dict):
                                 st.info(f"Colonnes additionnelles: {extras}")
 
                     if do_import:
-                        ok, missing, extras = validate_equipes_df(df_drive)
                         if not ok:
                             st.error(f"Import refusé: colonnes manquantes {missing}")
                         else:
                             df_imp = ensure_equipes_df(df_drive)
                             df_imp_qc, stats = apply_quality(df_imp, players_idx)
                             save_equipes(df_imp_qc, e_path)
-                            st.session_state["equipes_df"] = df_imp_qc  # reload in memory
+                            st.session_state["equipes_df"] = df_imp_qc
                             append_admin_log(
                                 log_path,
                                 action="IMPORT",
@@ -519,22 +560,19 @@ def render(ctx: dict):
                             st.rerun()
 
     # =====================================================
-    # 🧼 PREVIEW LOCAL + QC APPLY
-    # =====================================================
-    
-    # =====================================================
-    # 📥 IMPORT LOCAL (fallback) — upload CSV vers equipes_joueurs_{season}.csv
+    # 📥 IMPORT LOCAL (fallback)
     # =====================================================
     with st.expander("📥 Import local (fallback) — uploader un CSV équipes", expanded=True):
         st.caption("Si Drive OAuth n’est pas prêt, uploade ici ton `equipes_joueurs_...csv` pour tester immédiatement.")
         st.code(f"Destination locale: {e_path}", language="text")
+
         up = st.file_uploader("Uploader un CSV (équipes)", type=["csv"], key="adm_local_upload")
-        col1, col2, col3 = st.columns([1,1,2])
+        col1, col2, col3 = st.columns([1, 1, 2])
         do_validate_local = col1.button("🧪 Valider colonnes", use_container_width=True, key="adm_local_validate")
         do_preview_local = col2.button("🧼 Preview", use_container_width=True, key="adm_local_preview")
-        col3.caption("Le fichier est lu, validé, puis sauvegardé dans /Data et chargé en mémoire.")
+        do_import_local = col3.button("⬇️ Importer → Local + QC + Reload", use_container_width=True, key="adm_local_import")
 
-        if up is not None and (do_validate_local or do_preview_local or st.button("⬇️ Importer → Local + QC + Reload", use_container_width=True, key="adm_local_import")):
+        if up is not None and (do_validate_local or do_preview_local or do_import_local):
             try:
                 df_up = pd.read_csv(up)
             except Exception:
@@ -542,8 +580,8 @@ def render(ctx: dict):
                 df_up = pd.read_csv(up, encoding="latin-1")
 
             st.dataframe(df_up.head(80), use_container_width=True)
-
             ok, missing, extras = validate_equipes_df(df_up)
+
             if do_validate_local:
                 if ok:
                     st.success("✅ Colonnes attendues OK.")
@@ -554,20 +592,23 @@ def render(ctx: dict):
                     if extras:
                         st.info(f"Colonnes additionnelles: {extras}")
 
-            if ok:
-                df_imp = ensure_equipes_df(df_up)
-                df_imp_qc, stats = apply_quality(df_imp, players_idx)
-                save_equipes(df_imp_qc, e_path)
-                st.session_state["equipes_df"] = df_imp_qc
-                append_admin_log(
-                    log_path,
-                    action="IMPORT_LOCAL",
-                    owner="",
-                    player="",
-                    note=f"upload={up.name}; level_auto={stats.get('level_autofilled',0)}"
-                )
-                st.success(f"✅ Import local OK → {os.path.basename(e_path)} | Level auto: {stats.get('level_autofilled',0)}")
-                st.rerun()
+            if do_import_local:
+                if not ok:
+                    st.error(f"Import refusé: colonnes manquantes {missing}")
+                else:
+                    df_imp = ensure_equipes_df(df_up)
+                    df_imp_qc, stats = apply_quality(df_imp, players_idx)
+                    save_equipes(df_imp_qc, e_path)
+                    st.session_state["equipes_df"] = df_imp_qc
+                    append_admin_log(
+                        log_path,
+                        action="IMPORT_LOCAL",
+                        owner="",
+                        player="",
+                        note=f"upload={up.name}; level_auto={stats.get('level_autofilled',0)}"
+                    )
+                    st.success(f"✅ Import local OK → {os.path.basename(e_path)} | Level auto: {stats.get('level_autofilled',0)}")
+                    st.rerun()
 
         st.divider()
         if st.button("🧱 Créer un fichier équipes vide (squelette)", use_container_width=True, key="adm_local_create_empty"):
@@ -578,10 +619,13 @@ def render(ctx: dict):
             st.success("✅ Fichier équipes vide créé.")
             st.rerun()
 
-
-with st.expander("🧼 Preview local + alertes", expanded=False):
+    # =====================================================
+    # 🧼 PREVIEW LOCAL + QC APPLY
+    # =====================================================
+    with st.expander("🧼 Preview local + alertes", expanded=False):
+        df = load_equipes(e_path)
         if df.empty:
-            st.info("Aucun fichier équipes local. Importe depuis Drive ou upload local via l'app.")
+            st.info("Aucun fichier équipes local. Importe depuis Drive ou import local.")
         else:
             df_qc, stats = apply_quality(df, players_idx)
             c1, c2, c3, c4 = st.columns(4)
@@ -589,7 +633,6 @@ with st.expander("🧼 Preview local + alertes", expanded=False):
             c2.metric("Level auto", stats["level_autofilled"])
             c3.metric("⚠️ IR mismatch", stats["ir_mismatch"])
             c4.metric("⚠️ Salaire/Level", stats["salary_level_suspect"])
-
             try:
                 st.dataframe(df_qc.head(140).style.apply(_preview_style_row, axis=1), use_container_width=True)
             except Exception:
@@ -601,10 +644,9 @@ with st.expander("🧼 Preview local + alertes", expanded=False):
                 st.success("✅ QC appliqué + sauvegarde + reload.")
                 st.rerun()
 
-    # refresh from disk after potential import/qc
+    # refresh after potential import
     df = load_equipes(e_path)
     owners = sorted([x for x in df.get("Propriétaire", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique() if x])
-
     if not owners:
         st.warning("Aucune équipe (Propriétaire) détectée. Importe d'abord le CSV équipes.")
         return
@@ -612,9 +654,9 @@ with st.expander("🧼 Preview local + alertes", expanded=False):
     # =====================================================
     # ➕ ADD (ANTI-TRICHE)
     # =====================================================
-    with st.expander("➕ Ajouter joueur(s) (anti-triche)", expanded=True):
+    with st.expander("➕ Ajouter joueur(s) (anti-triche)", expanded=False):
         owner = st.selectbox("Équipe", owners, key="adm_add_owner")
-        assign = st.radio("Assignation", ["GC - Actif","GC - Banc","CE - Actif","CE - Banc"], horizontal=True, key="adm_add_assign")
+        assign = st.radio("Assignation", ["GC - Actif", "GC - Banc", "CE - Actif", "CE - Banc"], horizontal=True, key="adm_add_assign")
         statut = "Grand Club" if assign.startswith("GC") else "Club École"
         slot = "Actif" if assign.endswith("Actif") else "Banc"
 
@@ -627,8 +669,9 @@ with st.expander("🧼 Preview local + alertes", expanded=False):
             raw = st.text_area("Saisir joueurs (1 par ligne)", height=120, key="adm_add_manual")
             selected = [x.strip() for x in raw.splitlines() if x.strip()]
 
-        preview = []
-        blocked = []
+        preview: List[Dict[str, Any]] = []
+        blocked: List[Tuple[str, str]] = []
+
         for p in selected:
             info = players_idx.get(_norm_player(p), {}) if players_idx else {}
             name = info.get("Joueur", p)
@@ -636,13 +679,14 @@ with st.expander("🧼 Preview local + alertes", expanded=False):
             if cur_owner and cur_owner != owner and not allow_override:
                 blocked.append((name, cur_owner))
                 continue
+
             preview.append({
                 "Propriétaire": owner,
                 "Joueur": name,
-                "Pos": info.get("Pos",""),
-                "Equipe": info.get("Equipe",""),
+                "Pos": info.get("Pos", ""),
+                "Equipe": info.get("Equipe", ""),
                 "Salaire": int(info.get("Salaire", 0) or 0),
-                "Level": info.get("Level","0"),
+                "Level": info.get("Level", "0"),
                 "Statut": statut,
                 "Slot": slot,
                 "IR Date": "",
@@ -660,7 +704,6 @@ with st.expander("🧼 Preview local + alertes", expanded=False):
                 st.warning("Rien à ajouter.")
                 st.stop()
 
-            # évite doublons same owner+player
             existing = set(zip(df["Propriétaire"].astype(str).str.strip(), df["Joueur"].astype(str).str.strip()))
             new_rows = []
             skipped_dupe = 0
@@ -701,7 +744,7 @@ with st.expander("🧼 Preview local + alertes", expanded=False):
             st.rerun()
 
     # =====================================================
-    # 🗑️ REMOVE (UI + confirmation)
+    # 🗑️ REMOVE
     # =====================================================
     with st.expander("🗑️ Retirer joueur(s) (avec confirmation)", expanded=False):
         owner = st.selectbox("Équipe", owners, key="adm_rem_owner")
@@ -754,8 +797,8 @@ with st.expander("🧼 Preview local + alertes", expanded=False):
                         action="REMOVE",
                         owner=r["Propriétaire"],
                         player=r["Joueur"],
-                        from_statut=r.get("Statut",""),
-                        from_slot=r.get("Slot",""),
+                        from_statut=r.get("Statut", ""),
+                        from_slot=r.get("Slot", ""),
                         note="removed by admin"
                     )
 
@@ -763,7 +806,7 @@ with st.expander("🧼 Preview local + alertes", expanded=False):
                 st.rerun()
 
     # =====================================================
-    # 🔁 MOVE GC ↔ CE (auto-slot)
+    # 🔁 MOVE GC ↔ CE
     # =====================================================
     with st.expander("🔁 Déplacer GC ↔ CE (auto-slot)", expanded=False):
         owner = st.selectbox("Équipe", owners, key="adm_move_owner")
@@ -871,4 +914,4 @@ with st.expander("🧼 Preview local + alertes", expanded=False):
             except Exception as e:
                 st.error(f"Erreur log: {e}")
 
-    st.caption("✅ Admin: Import Drive • Add/Remove/Move • Caps bars • Log • QC/Level auto")
+    st.caption("✅ Admin: OAuth Drive / Import local • Add/Remove/Move • Caps bars • Log • QC/Level auto")
