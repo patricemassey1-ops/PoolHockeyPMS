@@ -188,70 +188,112 @@ def _derive_slot_from_status(status: str) -> str:
 
 
 def normalize_equipes_df(df_in: pd.DataFrame, owner: str) -> pd.DataFrame:
-    """Assure que le CSV final contient au minimum:
-    Propriétaire, Joueur, Pos, Salaire, Slot
-    + conserve le reste des colonnes si présentes.
+    """
+    Normalise un CSV Fantrax/export vers le schéma PMS Pool.
+    Garantit: Propriétaire, Joueur, Pos, Salaire, Slot
     """
     df = df_in.copy()
 
-    # Drop Unnamed columns
-    drop_cols = [c for c in df.columns if str(c).startswith("Unnamed")]
-    if drop_cols:
-        df.drop(columns=drop_cols, inplace=True, errors="ignore")
+    # ── Nettoyage colonnes parasites
+    df = df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed")]
 
     # =====================================================
-    # Common Fantrax/export mappings
-    #   ⚠️ PRIORITÉ AU NOM COMPLET:
-    #   Player/Name > Skaters (qui peut être un ID/rang/numéro)
+    # DÉTECTION ROBUSTE DE LA COLONNE JOUEUR (PAR CONTENU)
     # =====================================================
-    if "Player" in df.columns and "Joueur" not in df.columns:
-        df.rename(columns={"Player": "Joueur"}, inplace=True)
-    elif "Name" in df.columns and "Joueur" not in df.columns:
-        df.rename(columns={"Name": "Joueur"}, inplace=True)
-    elif "Player Name" in df.columns and "Joueur" not in df.columns:
-        df.rename(columns={"Player Name": "Joueur"}, inplace=True)
-    elif "Full Name" in df.columns and "Joueur" not in df.columns:
-        df.rename(columns={"Full Name": "Joueur"}, inplace=True)
-    elif "Skaters" in df.columns and "Joueur" not in df.columns:
-        df.rename(columns={"Skaters": "Joueur"}, inplace=True)
+    def _is_name_col(s: pd.Series) -> bool:
+        if s.dtype == object:
+            sample = s.dropna().astype(str).head(20)
+            if sample.empty:
+                return False
+            # contient des espaces et peu de chiffres purs
+            space_ratio = sample.str.contains(" ").mean()
+            numeric_ratio = sample.str.fullmatch(r"\d+").mean()
+            return space_ratio >= 0.5 and numeric_ratio <= 0.2
+        return False
 
-    _rename_first_match(df, ["Pos", "Position"], "Pos")
-    _rename_first_match(df, ["Team", "NHL Team", "Equipe", "Équipe"], "Equipe")
-    _rename_first_match(df, ["Salary", "Cap Hit", "CapHit", "Salaire"], "Salaire")
-    _rename_first_match(df, ["Status", "Roster Status", "Statut"], "Statut")
-    _rename_first_match(df, ["IR Date", "IRDate", "Date IR"], "IR Date")
-    _rename_first_match(df, ["Level", "Contract Level"], "Level")
+    joueur_col = None
 
-    # Minimum required columns
-    if "Joueur" not in df.columns:
+    # 1️⃣ Priorité aux noms connus
+    for c in ["Player", "Name", "Player Name", "Full Name", "Nom"]:
+        if c in df.columns:
+            joueur_col = c
+            break
+
+    # 2️⃣ Sinon, détection par contenu
+    if joueur_col is None:
+        for c in df.columns:
+            if _is_name_col(df[c]):
+                joueur_col = c
+                break
+
+    # 3️⃣ Fallback ultime (Skaters)
+    if joueur_col is None and "Skaters" in df.columns:
+        joueur_col = "Skaters"
+
+    if joueur_col:
+        df.rename(columns={joueur_col: "Joueur"}, inplace=True)
+    else:
         df["Joueur"] = ""
+
+    # =====================================================
+    # AUTRES MAPPINGS
+    # =====================================================
+    for src, dst in [
+        (["Pos", "Position"], "Pos"),
+        (["Team", "NHL Team", "Equipe", "Équipe"], "Equipe"),
+        (["Salary", "Cap Hit", "CapHit", "Salaire"], "Salaire"),
+        (["Status", "Roster Status", "Statut"], "Statut"),
+        (["IR Date", "IRDate", "Date IR"], "IR Date"),
+        (["Level", "Contract Level"], "Level"),
+    ]:
+        for c in src:
+            if c in df.columns and dst not in df.columns:
+                df.rename(columns={c: dst}, inplace=True)
+                break
+
+    # ── Colonnes minimales
     if "Pos" not in df.columns:
         df["Pos"] = ""
+
     if "Salaire" not in df.columns:
         df["Salaire"] = 0
 
-    # Salary normalize
-    df["Salaire"] = _coerce_int_series(df["Salaire"])
+    # ── Normalisation salaire
+    df["Salaire"] = (
+        df["Salaire"]
+        .astype(str)
+        .str.replace("$", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.strip()
+    )
+    df["Salaire"] = pd.to_numeric(df["Salaire"], errors="coerce").fillna(0).astype(int)
 
-    # Slot logic: prefer explicit Slot column; else derive from Statut; else default Actif
+    # ── Slot
     if "Slot" not in df.columns:
         if "Statut" in df.columns:
-            df["Slot"] = df["Statut"].apply(_derive_slot_from_status)
+            def _slot(v):
+                v = str(v).upper()
+                if "IR" in v:
+                    return "IR"
+                if "MIN" in v or "AHL" in v:
+                    return "Mineur"
+                if "BN" in v or "BENCH" in v:
+                    return "Banc"
+                return "Actif"
+            df["Slot"] = df["Statut"].apply(_slot)
         else:
             df["Slot"] = "Actif"
-    else:
-        # sanitize existing slot
-        df["Slot"] = df["Slot"].astype(str).str.strip().replace({"": "Actif"})
 
-    # Owner
-    df["Propriétaire"] = str(owner).strip()
+    # ── Propriétaire
+    df["Propriétaire"] = owner
 
-    # Nice ordering (keep extras at end)
+    # ── Ordre final
     preferred = ["Propriétaire", "Joueur", "Pos", "Equipe", "Salaire", "Level", "Statut", "Slot", "IR Date"]
     cols = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
-    df = df[cols].copy()
+    df = df[cols]
 
     return df
+
 
 
 
