@@ -199,8 +199,22 @@ def normalize_equipes_df(df_in: pd.DataFrame, owner: str) -> pd.DataFrame:
     if drop_cols:
         df.drop(columns=drop_cols, inplace=True, errors="ignore")
 
+    # =====================================================
     # Common Fantrax/export mappings
-    _rename_first_match(df, ["Skaters", "Player", "Name", "Player Name", "Full Name"], "Joueur")
+    #   ⚠️ PRIORITÉ AU NOM COMPLET:
+    #   Player/Name > Skaters (qui peut être un ID/rang/numéro)
+    # =====================================================
+    if "Player" in df.columns and "Joueur" not in df.columns:
+        df.rename(columns={"Player": "Joueur"}, inplace=True)
+    elif "Name" in df.columns and "Joueur" not in df.columns:
+        df.rename(columns={"Name": "Joueur"}, inplace=True)
+    elif "Player Name" in df.columns and "Joueur" not in df.columns:
+        df.rename(columns={"Player Name": "Joueur"}, inplace=True)
+    elif "Full Name" in df.columns and "Joueur" not in df.columns:
+        df.rename(columns={"Full Name": "Joueur"}, inplace=True)
+    elif "Skaters" in df.columns and "Joueur" not in df.columns:
+        df.rename(columns={"Skaters": "Joueur"}, inplace=True)
+
     _rename_first_match(df, ["Pos", "Position"], "Pos")
     _rename_first_match(df, ["Team", "NHL Team", "Equipe", "Équipe"], "Equipe")
     _rename_first_match(df, ["Salary", "Cap Hit", "CapHit", "Salaire"], "Salaire")
@@ -238,6 +252,7 @@ def normalize_equipes_df(df_in: pd.DataFrame, owner: str) -> pd.DataFrame:
     df = df[cols].copy()
 
     return df
+
 
 
 def validate_min_schema(df: pd.DataFrame) -> Tuple[bool, List[str]]:
