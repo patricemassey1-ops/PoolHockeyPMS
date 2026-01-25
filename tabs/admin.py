@@ -847,7 +847,7 @@ def render(ctx: dict) -> None:
                 except Exception:
                     pass
 
-with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
+    with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
         st.caption("Définis ici les plafonds utilisés partout (affichage + alertes). Format: `1 000 000 $`.")
         col1, col2 = st.columns(2)
         with col1:
