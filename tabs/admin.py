@@ -874,7 +874,7 @@ def render(ctx: dict) -> None:
             st.success("✅ Fichier équipes vide créé.")
             st.rerun()
 
-    with st.expander("🧼 Preview local + alertes", expanded=False):, expanded=False):, expanded=False):
+    with st.expander("🧼 Preview local + alertes", expanded=False):
         df = load_equipes(e_path)
         if df.empty:
             st.info("Aucun fichier équipes local. Importe depuis Drive ou import local.")
