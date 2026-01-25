@@ -20,6 +20,7 @@ import io
 import os
 import re
 import zipfile
+from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -595,15 +596,306 @@ def _drive_download_bytes(svc: Any, file_id: str) -> bytes:
         _, done = downloader.next_chunk()
     return fh.getvalue()
 
-def _read_csv_bytes(b: bytes) -> pd.DataFrame:
+def _read_csv_bytes(b: bytes, *, sep: str = "AUTO", on_bad_lines: str = "skip") -> pd.DataFrame:
+    """Lecture CSV robuste (Fantrax / exports):
+    - encodings: utf-8-sig -> utf-8 -> latin-1
+    - sep: AUTO (sniff , ; 	 |) ou valeur explicite
+    - fallback engine=python si le C-engine plante
+    """
+    import csv
+
+    if not isinstance(b, (bytes, bytearray)) or not b:
+        return pd.DataFrame()
+
+    sample = b[:8192]
+
+    # --- encoding detection
+    encodings = ["utf-8-sig", "utf-8", "latin-1"]
+    decoded = None
+    used_enc = "utf-8-sig"
+    for enc in encodings:
+        try:
+            decoded = sample.decode(enc)
+            used_enc = enc
+            break
+        except Exception:
+            continue
+    if decoded is None:
+        used_enc = "latin-1"
+
+    # --- delimiter sniff
+    used_sep = None
+    if str(sep or "").upper() != "AUTO":
+        used_sep = sep
+    else:
+        try:
+            sniffer = csv.Sniffer()
+            dialect = sniffer.sniff(sample.decode(used_enc, errors="ignore"), delimiters=[",", ";", "	", "|"])
+            used_sep = dialect.delimiter
+        except Exception:
+            used_sep = None  # pandas will infer best effort
+
+    # Try combos: (engine, sep)
+    attempts = []
+    if used_sep is None:
+        attempts = [
+            ("python", None),
+            ("c", None),
+        ]
+    else:
+        attempts = [
+            ("c", used_sep),
+            ("python", used_sep),
+            ("python", None),
+        ]
+
+    last_err = None
+    for engine, sep_try in attempts:
+        try:
+            return pd.read_csv(
+                io.BytesIO(b),
+                encoding=used_enc,
+                sep=sep_try,
+                engine=engine,
+                on_bad_lines=on_bad_lines,
+            )
+        except TypeError:
+            # pandas plus vieux: pas de on_bad_lines
+            try:
+                return pd.read_csv(
+                    io.BytesIO(b),
+                    encoding=used_enc,
+                    sep=sep_try,
+                    engine=engine,
+                )
+            except Exception as e:
+                last_err = e
+        except Exception as e:
+            last_err = e
+
+    # dernier recours: latin-1 python engine, sans sniff
     try:
-        return pd.read_csv(io.BytesIO(b))
+        return pd.read_csv(io.BytesIO(b), encoding="latin-1", engine="python")
     except Exception:
-        return pd.read_csv(io.BytesIO(b), encoding="latin-1")
+        if last_err:
+            raise last_err
+        return pd.DataFrame()
+
+
+def _payload_to_bytes(payload: Any) -> Optional[bytes]:
+    """Convertit un payload (bytes, UploadedFile, filepath) -> bytes."""
+    try:
+        if payload is None:
+            return None
+        if isinstance(payload, (bytes, bytearray)):
+            return bytes(payload)
+        if isinstance(payload, str) and os.path.exists(payload):
+            return Path(payload).read_bytes()
+        if hasattr(payload, "getvalue"):
+            return payload.getvalue()
+        if hasattr(payload, "read"):
+            return payload.read()
+    except Exception:
+        return None
+    return None
+
+
+def _drop_unnamed_and_dupes(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+
+    # Drop "Unnamed"
+    drop_cols = [c for c in out.columns if str(c).startswith("Unnamed")]
+    if drop_cols:
+        out.drop(columns=drop_cols, inplace=True, errors="ignore")
+
+    # Drop duplicated columns like "X.1"
+    keep = []
+    seen = set()
+    for c in list(out.columns):
+        base = str(c).split(".")[0]
+        if base in seen:
+            continue
+        seen.add(base)
+        keep.append(c)
+    return out[keep].copy()
+
+
+def normalize_team_import_df(df_raw: pd.DataFrame, owner_default: str, players_idx: dict) -> pd.DataFrame:
+    """Normalise un export (Fantrax ou autre) vers le schéma EQUIPES_COLUMNS.
+    Priorité absolue: colonne Player (nom complet) -> Joueur.
+    """
+    if df_raw is None or not isinstance(df_raw, pd.DataFrame) or df_raw.empty:
+        return pd.DataFrame(columns=EQUIPES_COLUMNS)
+
+    df = _drop_unnamed_and_dupes(df_raw)
+
+    # --- capture ID si présent (optionnel)
+    id_col = _pick_col(df, ["ID", "Id", "PlayerId", "playerId", "FantraxID", "Fantrax Id"])
+    if id_col and id_col != "FantraxID":
+        df.rename(columns={id_col: "FantraxID"}, inplace=True)
+
+    # --- Propriétaire
+    owner_col = _pick_col(df, ["Propriétaire", "Proprietaire", "Owner", "Team Owner"])
+    if owner_col and owner_col != "Propriétaire":
+        df.rename(columns={owner_col: "Propriétaire"}, inplace=True)
+    if "Propriétaire" not in df.columns:
+        df["Propriétaire"] = str(owner_default or "").strip()
+
+    # --- Joueur (PRIORITÉ: Player -> Joueur)
+    if "Player" in df.columns:
+        df.rename(columns={"Player": "Joueur"}, inplace=True)
+    else:
+        jcol = _pick_col(df, ["Joueur", "Skaters", "Name", "Player Name", "Full Name"])
+        if jcol and jcol != "Joueur":
+            df.rename(columns={jcol: "Joueur"}, inplace=True)
+
+    if "Joueur" not in df.columns:
+        df["Joueur"] = ""
+
+    # Si Joueur ressemble à un ID (A/7/24...), on tente un autre champ nom
+    j = df["Joueur"].astype(str).str.strip()
+    try:
+        looks_like_id = (j.str.len().fillna(0) <= 3).mean() > 0.6
+    except Exception:
+        looks_like_id = False
+    if looks_like_id:
+        for alt in ["Player", "Skaters", "Player Name", "Full Name", "Name"]:
+            if alt in df.columns:
+                df["Joueur"] = df[alt].astype(str).str.strip()
+                break
+
+    # --- Pos / Equipe / Salaire / Statut / IR Date / Level / Slot
+    mappings = [
+        (["Pos", "Position"], "Pos"),
+        (["Team", "NHL Team", "Equipe", "Équipe"], "Equipe"),
+        (["Salary", "Cap Hit", "CapHit", "Salaire"], "Salaire"),
+        (["Status", "Roster Status", "Statut"], "Statut"),
+        (["IR Date", "IRDate", "Date IR"], "IR Date"),
+        (["Level", "Contract Level"], "Level"),
+        (["Slot"], "Slot"),
+    ]
+    for src_list, dst in mappings:
+        if dst in df.columns:
+            continue
+        scol = _pick_col(df, src_list)
+        if scol and scol != dst:
+            df.rename(columns={scol: dst}, inplace=True)
+
+    if "Pos" not in df.columns:
+        df["Pos"] = ""
+    if "Equipe" not in df.columns:
+        df["Equipe"] = ""
+    if "Salaire" not in df.columns:
+        df["Salaire"] = 0
+    if "Level" not in df.columns:
+        df["Level"] = ""
+    if "Statut" not in df.columns:
+        df["Statut"] = ""
+    if "IR Date" not in df.columns:
+        df["IR Date"] = ""
+    if "Slot" not in df.columns:
+        df["Slot"] = df["Statut"].apply(auto_slot_for_statut) if "Statut" in df.columns else "Actif"
+
+    # Normalize salary int
+    df["Salaire"] = pd.to_numeric(df["Salaire"], errors="coerce").fillna(0).astype(int)
+
+    # Force owner if empty
+    if owner_default:
+        df["Propriétaire"] = df["Propriétaire"].astype(str).str.strip().replace({"": owner_default})
+        df.loc[df["Propriétaire"].isna(), "Propriétaire"] = owner_default
+
+    # Keep only expected columns (+ FantraxID if present)
+    keep = [c for c in (EQUIPES_COLUMNS + ["FantraxID"]) if c in df.columns]
+    df = df[keep].copy()
+    return df
+
+
+# ---- Optional NHL API enrichment (Pos/Equipe only; no salary from NHL)
+try:
+    import requests  # type: ignore
+except Exception:
+    requests = None
+
+
+@st.cache_data(show_spinner=False)
+def nhl_find_player_id(full_name: str) -> Optional[int]:
+    if not requests:
+        return None
+    name = str(full_name or "").strip()
+    if not name:
+        return None
+    try:
+        url = "https://search.d3.nhle.com/api/v1/search/player"
+        params = {"culture": "en-us", "limit": 5, "q": name}
+        r = requests.get(url, params=params, timeout=8)
+        if r.status_code != 200:
+            return None
+        data = r.json() or []
+        if not data:
+            return None
+        pid = data[0].get("playerId") or data[0].get("id")
+        return int(pid) if pid is not None else None
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def nhl_player_landing(player_id: int) -> dict:
+    if not requests:
+        return {}
+    try:
+        url = f"https://api-web.nhle.com/v1/player/{int(player_id)}/landing"
+        r = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return {}
+        return r.json() or {}
+    except Exception:
+        return {}
+
+
+def enrich_df_from_nhl(df: pd.DataFrame) -> pd.DataFrame:
+    """Complète Pos/Equipe si manquant. (Ne touche pas Salaire.)"""
+    if df is None or df.empty or "Joueur" not in df.columns:
+        return df
+
+    out = df.copy()
+    if "Pos" not in out.columns:
+        out["Pos"] = ""
+    if "Equipe" not in out.columns:
+        out["Equipe"] = ""
+
+    for idx, row in out.iterrows():
+        name = str(row.get("Joueur") or "").strip()
+        if not name:
+            continue
+        need_pos = str(row.get("Pos") or "").strip().lower() in ("", "nan", "none")
+        need_team = str(row.get("Equipe") or "").strip().lower() in ("", "nan", "none")
+        if not (need_pos or need_team):
+            continue
+
+        pid = nhl_find_player_id(name)
+        if not pid:
+            continue
+        info = nhl_player_landing(pid)
+        if not info:
+            continue
+
+        if need_pos:
+            pos = info.get("position") or info.get("positionCode") or ""
+            out.at[idx, "Pos"] = str(pos).strip()
+        if need_team:
+            team = info.get("currentTeamAbbrev") or (info.get("currentTeam") or {}).get("abbrev") or ""
+            out.at[idx, "Equipe"] = str(team).strip()
+
+    return out
 
 
 # ============================================================
 # MAIN RENDER
+# ============================================================
+
 # ============================================================
 def render(ctx: dict) -> None:
     if not ctx.get("is_admin"):
@@ -755,6 +1047,14 @@ def render(ctx: dict) -> None:
     with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=True):
         st.caption("Upload plusieurs CSV (1 par équipe). Auto-assign via `Propriétaire` (si unique) ou via le nom du fichier (ex: `Whalers.csv`).")
         st.code(f"Destination locale (fusion): {e_path}", language="text")
+        # Options lecture/normalisation
+        colA, colB, colC = st.columns([1, 1, 1])
+        with colA:
+            sep_choice = st.selectbox("Delimiter (AUTO par défaut)", ["AUTO", ",", ";", "\t", "|"], index=0, key="adm_sep_choice")
+        with colB:
+            ignore_bad = st.checkbox("Ignorer lignes brisées (on_bad_lines='skip')", value=True, key="adm_ignore_bad_lines")
+        with colC:
+            st.session_state["adm_nhl_enrich"] = st.checkbox("Compléter Pos/Equipe via NHL API (si manquant)", value=False, key="adm_nhl_enrich")
 
         mode = st.radio(
             "Mode de fusion",
@@ -763,20 +1063,53 @@ def render(ctx: dict) -> None:
             key="adm_multi_mode",
         )
 
-        uploads = st.file_uploader(
-            "Uploader un ou plusieurs CSV (équipes)",
-            type=["csv"],
-            accept_multiple_files=True,
-            key="adm_multi_uploads",
+        use_from_data = st.checkbox(
+            "📂 Utiliser les fichiers déjà présents dans /data (sans upload)",
+            value=True,
+            key="adm_use_data_files",
         )
-        zip_up = st.file_uploader(
-            "Ou uploader un ZIP contenant plusieurs CSV",
-            type=["zip"],
-            key="adm_multi_zip",
-            help="Fallback si ton navigateur ne permet pas de multi-sélectionner.",
+        data_csvs = []
+        try:
+            data_csvs = sorted([
+                f for f in os.listdir(DATA_DIR)
+                if f.lower().endswith(".csv")
+                and f.lower() not in {PLAYERS_DB_FILENAME.lower()}
+                and not f.lower().startswith("equipes_joueurs_")
+                and not f.lower().startswith("backup_")
+                and not f.lower().startswith("admin_log_")
+            ])
+        except Exception:
+            data_csvs = []
+
+        selected_data_csvs = st.multiselect(
+            "Fichiers CSV dans /data à importer (un fichier par équipe)",
+            options=data_csvs,
+            default=data_csvs,
+            disabled=not use_from_data,
+            key="adm_data_csvs_sel",
         )
 
+        uploads = []
+        zip_up = None
+        if not use_from_data:
+            uploads = st.file_uploader(
+                "Uploader un ou plusieurs CSV (équipes)",
+                type=["csv"],
+                accept_multiple_files=True,
+                key="adm_multi_uploads",
+            )
+            zip_up = st.file_uploader(
+                "Ou uploader un ZIP contenant plusieurs CSV",
+                type=["zip"],
+                key="adm_multi_zip",
+                help="Fallback: si tu préfères déposer un seul fichier .zip.",
+            )
+        else:
+            st.caption("Les équipes sont auto-déduites du nom du fichier (ex: Whalers.csv → Whalers).")
         items: List[Tuple[str, Any]] = []
+        if use_from_data and selected_data_csvs:
+            for fn in selected_data_csvs:
+                items.append((fn, os.path.join(DATA_DIR, fn)))
         if uploads:
             for f in uploads:
                 items.append((getattr(f, "name", "upload.csv"), f))
@@ -801,34 +1134,20 @@ def render(ctx: dict) -> None:
             errors: List[Tuple[str, str]] = []
 
             for file_name, payload in items:
-                # read csv
+                # read + normalize (robuste)
                 try:
-                    if isinstance(payload, (bytes, bytearray)):
-                        df_up = pd.read_csv(io.BytesIO(payload))
-                    else:
-                        df_up = pd.read_csv(payload)
-                except Exception:
-                    try:
-                        if isinstance(payload, (bytes, bytearray)):
-                            df_up = pd.read_csv(io.BytesIO(payload), encoding="latin-1")
-                        else:
-                            try:
-                                payload.seek(0)
-                            except Exception:
-                                pass
-                            df_up = pd.read_csv(payload, encoding="latin-1")
-                    except Exception as e:
-                        errors.append((file_name, f"Lecture CSV impossible: {e}"))
-                        continue
-
-                ok, missing, _extras = validate_equipes_df(df_up)
-                if not ok:
-                    errors.append((file_name, f"Colonnes manquantes: {missing}"))
+                    b = _payload_to_bytes(payload)
+                    if b is None:
+                        raise ValueError("payload vide / non supporté")
+                    df_raw = _read_csv_bytes(b, sep=sep_choice, on_bad_lines=('skip' if ignore_bad else 'error'))
+                except Exception as e:
+                    errors.append((file_name, f"{type(e).__name__}: {e}"))
                     continue
 
-                df_up = ensure_equipes_df(df_up)
+                df_up = normalize_team_import_df(df_raw, owner_default="", players_idx=players_idx)
+
                 owners_in_file = sorted([
-                    x for x in df_up["Propriétaire"].astype(str).str.strip().unique()
+                    x for x in df_up.get("Propriétaire", pd.Series(dtype=str)).astype(str).str.strip().unique()
                     if x and x.lower() != "nan"
                 ])
 
@@ -898,6 +1217,8 @@ def render(ctx: dict) -> None:
 
                         df_up = p["df"].copy()
                         df_up["Propriétaire"] = owner
+                        if st.session_state.get("adm_nhl_enrich"):
+                            df_up = enrich_df_from_nhl(df_up)
                         df_up_qc, stats = apply_quality(df_up, players_idx)
 
                         if mode.startswith("Remplacer"):
