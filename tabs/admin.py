@@ -1,49 +1,53 @@
-
 import os
-import io
-import re
-from datetime import datetime
 import pandas as pd
 import streamlit as st
+from datetime import datetime
 
 # ============================================================
-# ADMIN TAB — STABLE + MULTI IMPORT + AUTO-ASSIGN + ROLLBACK
+# STATE INIT
 # ============================================================
+def _init_admin_state():
+    if "admin_prepared" not in st.session_state:
+        st.session_state["admin_prepared"] = []
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def infer_owner_from_filename(filename: str) -> str:
+# ============================================================
+# HELPERS
+# ============================================================
+def infer_team_from_filename(filename: str) -> str:
     if not filename:
         return ""
-    base = os.path.splitext(os.path.basename(filename))[0]
-    return base.strip()
+    return os.path.splitext(os.path.basename(filename))[0].strip()
 
 
-def backup_team(df_all: pd.DataFrame, data_dir: str, season: str, owner: str) -> None:
-    if df_all is None or df_all.empty or not owner:
+def equipes_path(data_dir: str, season: str) -> str:
+    return os.path.join(data_dir, f"equipes_joueurs_{season}.csv")
+
+
+def backup_team(df_all: pd.DataFrame, data_dir: str, season: str, team: str):
+    if df_all is None or df_all.empty or not team:
         return
-    bdir = os.path.join(data_dir, "backups_admin", season)
+    bdir = os.path.join(data_dir, "admin_backups", season)
     os.makedirs(bdir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(bdir, f"{owner}_{ts}.csv")
-    df_all[df_all["Propriétaire"] == owner].to_csv(path, index=False)
+    path = os.path.join(bdir, f"{team}_{ts}.csv")
+    df_all[df_all["Propriétaire"] == team].to_csv(path, index=False)
 
 
-def list_backups(data_dir: str, season: str, owner: str):
-    bdir = os.path.join(data_dir, "backups_admin", season)
+def list_backups(data_dir: str, season: str, team: str):
+    bdir = os.path.join(data_dir, "admin_backups", season)
     if not os.path.isdir(bdir):
         return []
     return sorted(
-        [os.path.join(bdir, f) for f in os.listdir(bdir) if f.startswith(owner + "_")],
+        [os.path.join(bdir, f) for f in os.listdir(bdir) if f.startswith(team + "_")],
         reverse=True,
     )
 
-
-# -----------------------------
+# ============================================================
 # MAIN RENDER
-# -----------------------------
+# ============================================================
 def render(ctx: dict) -> None:
+    _init_admin_state()
+
     if not ctx.get("is_admin"):
         st.warning("Accès admin requis.")
         return
@@ -52,81 +56,119 @@ def render(ctx: dict) -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
 
     season = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
-    data_path = os.path.join(DATA_DIR, f"equipes_joueurs_{season}.csv")
+    data_path = equipes_path(DATA_DIR, season)
 
     st.subheader("🛠️ Gestion Admin")
 
     # =====================================================
-    # 📥 Import multi CSV
+    # 📥 IMPORT MULTI CSV
     # =====================================================
     with st.expander("📥 Import multi CSV équipes", expanded=True):
+
         files = st.file_uploader(
             "Uploader un ou plusieurs CSV (ex: Whalers.csv, Nordiques.csv)",
             type=["csv"],
             accept_multiple_files=True,
         )
 
-        if files:
-            if st.button("🧼 Préparer"):
-                prepared = []
-                for f in files:
+        # ── ÉTAPE 1 : PRÉPARATION
+        if files and st.button("🧼 Préparer les fichiers", use_container_width=True):
+            prepared = []
+
+            for f in files:
+                try:
                     try:
-                        try:
-                            df = pd.read_csv(f)
-                        except Exception:
-                            f.seek(0)
-                            df = pd.read_csv(f, encoding="latin-1")
+                        df = pd.read_csv(f)
+                    except Exception:
+                        f.seek(0)
+                        df = pd.read_csv(f, encoding="latin-1")
 
-                        owner = infer_owner_from_filename(f.name)
-                        df["Propriétaire"] = owner
-                        prepared.append((owner, df))
+                    team = infer_team_from_filename(f.name)
 
-                        st.success(f"{f.name} → équipe '{owner}' ({len(df)} lignes)")
-                        st.dataframe(df.head(10), use_container_width=True)
+                    prepared.append({
+                        "filename": f.name,
+                        "team": team,
+                        "df": df,
+                    })
 
-                    except Exception as e:
-                        st.error(f"Erreur lecture {f.name}")
-                        st.exception(e)
+                except Exception as e:
+                    st.error(f"Erreur lecture {f.name}")
+                    st.exception(e)
 
-                if prepared and st.button("⬇️ Importer"):
-                    if os.path.exists(data_path):
-                        df_all = pd.read_csv(data_path)
-                    else:
-                        df_all = pd.DataFrame()
+            if prepared:
+                st.session_state["admin_prepared"] = prepared
+                st.success("Fichiers préparés. Vérifie les équipes puis importe.")
 
-                    for owner, df in prepared:
-                        backup_team(df_all, DATA_DIR, season, owner)
-                        df_all = df_all[df_all.get("Propriétaire") != owner]
-                        df_all = pd.concat([df_all, df], ignore_index=True)
+        # ── ÉTAPE 2 : ATTRIBUTION + IMPORT
+        if st.session_state["admin_prepared"]:
+            st.markdown("### Attribution des équipes")
 
-                    df_all.to_csv(data_path, index=False)
-                    st.success("Import terminé + backups créés")
-                    st.rerun()
+            for i, item in enumerate(st.session_state["admin_prepared"]):
+                item["team"] = st.text_input(
+                    f"Équipe pour {item['filename']}",
+                    value=item["team"],
+                    key=f"admin_team_{i}",
+                )
+                st.caption(f"{len(item['df'])} lignes détectées")
+
+            if st.button("⬇️ Importer les équipes", use_container_width=True):
+                if os.path.exists(data_path):
+                    df_all = pd.read_csv(data_path)
+                else:
+                    df_all = pd.DataFrame()
+
+                for item in st.session_state["admin_prepared"]:
+                    team = item["team"]
+                    df = item["df"].copy()
+                    df["Propriétaire"] = team
+
+                    # backup avant écrasement
+                    backup_team(df_all, DATA_DIR, season, team)
+
+                    # remove ancienne équipe
+                    if "Propriétaire" in df_all.columns:
+                        df_all = df_all[df_all["Propriétaire"] != team]
+
+                    df_all = pd.concat([df_all, df], ignore_index=True)
+
+                df_all.to_csv(data_path, index=False)
+                st.session_state["admin_prepared"] = []
+                st.success("Import terminé avec succès")
+                st.rerun()
 
     # =====================================================
-    # ↩️ Rollback
+    # ↩️ ROLLBACK PAR ÉQUIPE
     # =====================================================
     with st.expander("↩️ Rollback par équipe", expanded=False):
-        if os.path.exists(data_path):
-            df_all = pd.read_csv(data_path)
-            owners = sorted(df_all["Propriétaire"].dropna().unique().tolist())
-        else:
-            owners = []
 
-        if owners:
-            owner = st.selectbox("Équipe", owners)
-            backups = list_backups(DATA_DIR, season, owner)
-
-            if backups:
-                pick = st.selectbox("Backup", backups)
-                if st.button("↩️ Restaurer"):
-                    df_all = df_all[df_all["Propriétaire"] != owner]
-                    df_restore = pd.read_csv(pick)
-                    df_all = pd.concat([df_all, df_restore], ignore_index=True)
-                    df_all.to_csv(data_path, index=False)
-                    st.success("Rollback effectué")
-                    st.rerun()
-            else:
-                st.info("Aucun backup pour cette équipe.")
-        else:
+        if not os.path.exists(data_path):
             st.info("Aucune équipe détectée.")
+            return
+
+        df_all = pd.read_csv(data_path)
+        if "Propriétaire" not in df_all.columns:
+            st.info("Colonne Propriétaire absente.")
+            return
+
+        teams = sorted(df_all["Propriétaire"].dropna().unique().tolist())
+
+        if not teams:
+            st.info("Aucune équipe détectée.")
+            return
+
+        team = st.selectbox("Équipe", teams)
+        backups = list_backups(DATA_DIR, season, team)
+
+        if not backups:
+            st.info("Aucun backup pour cette équipe.")
+            return
+
+        backup = st.selectbox("Backup disponible", backups)
+
+        if st.button("↩️ Restaurer ce backup", use_container_width=True):
+            df_restore = pd.read_csv(backup)
+            df_all = df_all[df_all["Propriétaire"] != team]
+            df_all = pd.concat([df_all, df_restore], ignore_index=True)
+            df_all.to_csv(data_path, index=False)
+            st.success("Rollback effectué")
+            st.rerun()
