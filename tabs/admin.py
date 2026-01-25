@@ -1054,8 +1054,7 @@ def render(ctx: dict) -> None:
         with colB:
             ignore_bad = st.checkbox("Ignorer lignes brisées (on_bad_lines='skip')", value=True, key="adm_ignore_bad_lines")
         with colC:
-            adm_nhl_enrich = st.checkbox("Compléter Pos/Equipe via NHL API (si manquant)", value=False, key="adm_nhl_enrich")
-        adm_nhl_enrich = bool(st.session_state.get("adm_nhl_enrich", adm_nhl_enrich))
+            st.session_state["adm_nhl_enrich"] = st.checkbox("Compléter Pos/Equipe via NHL API (si manquant)", value=False, key="adm_nhl_enrich")
 
         mode = st.radio(
             "Mode de fusion",
