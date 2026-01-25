@@ -11,37 +11,39 @@ require_password()
 
 from pms_enrich import update_players_db
 from services.event_log import append_event
-from services.storage import DATA_DIR, ensure_data_dir, season_default
+from services.storage import DATA_DIR as STORAGE_DATA_DIR, ensure_data_dir, season_default
 from services.ui import apply_theme
 
 from services.enrich import resolve_update_players_db
 from tabs import home, joueurs, alignement, transactions, gm, historique, classement, admin
 
 
+# =========================================================
+# DATA DIR (single source of truth)
+# =========================================================
 ensure_data_dir()
-# -------------------------------------------------
+DATA_DIR = str(STORAGE_DATA_DIR or "Data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# =========================================================
 # Event Log: "App started" (1x par session)
-# -------------------------------------------------
-DATA_DIR = str(globals().get("DATA_DIR") or "data")
-os.makedirs(DATA_DIR, exist_ok=True)  # au lieu de ensure_data_dir(), ou en plus
-
+# =========================================================
 season = str(st.session_state.get("season") or "2025-2026").strip() or "2025-2026"
-
 boot_key = f"boot_logged__{season}"
+
 if not st.session_state.get(boot_key, False):
     st.session_state[boot_key] = True
     try:
         append_event(
             data_dir=DATA_DIR,
             season=season,
-            owner=str(st.session_state.get("selected_owner") or ""),
+            owner=str(st.session_state.get("selected_owner") or st.session_state.get("owner") or ""),
             event_type="system",
             summary="App started",
             payload={"page": "app.py"},
         )
     except Exception:
         pass
-
 
 # =========================================================
 # SINGLE CSS/THEME INJECTION (one time)
@@ -54,17 +56,15 @@ apply_theme()
 season_lbl = st.session_state.get("season_lbl") or season_default()
 season_lbl = st.sidebar.text_input("Saison", value=season_lbl, key="season_lbl")
 
-# Admin gate (replace with your real logic)
+# Admin gate (Whalers only)
 def is_admin_user() -> bool:
-    # Example: only Whalers
-    return str(st.session_state.get("owner") or "").strip().lower() in {"whalers"}
+    owner = str(st.session_state.get("selected_owner") or st.session_state.get("owner") or "").strip().lower()
+    return owner in {"whalers"}
 
-is_admin = True
-
+is_admin = is_admin_user()
 
 # Drive folder id (OAuth)
-folder_id = st.secrets.get("gdrive_folder_id", "1hIJovsHid2L1cY_wKM_sY-wVZKXAwrh1")
-
+drive_folder_id = str(st.secrets.get("gdrive_folder_id", "") or "").strip() or "1hIJovsHid2L1cY_wKM_sY-wVZKXAwrh1"
 
 # =========================================================
 # NAV (pure logic, no CSS)
@@ -87,15 +87,14 @@ if st.session_state["active_tab"] not in NAV_TABS:
     st.session_state["active_tab"] = NAV_TABS[0]
 
 active_tab = st.sidebar.radio("Navigation", NAV_TABS, key="active_tab")
+
+# Debug sidebar
 from services.storage import ASSETS_PREVIEWS_DIR
 st.sidebar.caption(f"DATA_DIR: {DATA_DIR} | ASSETS: {ASSETS_PREVIEWS_DIR}")
 
 # =========================================================
 # CONTEXT (passed to every tab)
 # =========================================================
-
-drive_folder_id = str(st.secrets.get("gdrive_folder_id", "") or "").strip()
-
 ctx = {
     "DATA_DIR": DATA_DIR,
     "season": season_lbl,
@@ -103,7 +102,6 @@ ctx = {
     "drive_folder_id": drive_folder_id,
     "update_players_db": update_players_db,   # ✅ IMPORTANT
 }
-
 
 # =========================================================
 # ROUTING (one single chain)
