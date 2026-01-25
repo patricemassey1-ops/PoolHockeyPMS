@@ -27,6 +27,23 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
+def _fmt_money(n: int) -> str:
+    try:
+        n = int(n or 0)
+    except Exception:
+        n = 0
+    return f"{n:,.0f}".replace(",", " ") + " $"
+
+def _parse_money(s: str) -> int:
+    s = str(s or "")
+    digits = "".join(ch for ch in s if ch.isdigit())
+    try:
+        return int(digits) if digits else 0
+    except Exception:
+        return 0
+
+
+
 # =====================================================
 # Drive helper — SAFE fallback (do not remove)
 # =====================================================
@@ -943,21 +960,25 @@ def render(ctx: dict) -> None:
     st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
     st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
-    with st.expander("🧪 Vérification cap (live) + barres", expanded=True):
-        c1, c2, c3 = st.columns([1, 1, 2])
-        with c1:
-            st.session_state["CAP_GC"] = st.number_input("Cap GC", min_value=0, value=int(st.session_state["CAP_GC"]), step=500000)
-        with c2:
-            st.session_state["CAP_CE"] = st.number_input("Cap CE", min_value=0, value=int(st.session_state["CAP_CE"]), step=250000)
-        with c3:
-            st.caption("Caps utilisés ici pour affichage & alertes.")
-        df_eq = load_equipes(e_path)
-        if df_eq.empty:
-            st.info("Aucun fichier équipes local trouvé (importe depuis Drive ou local).")
-        else:
-            _render_caps_bars(df_eq, int(st.session_state["CAP_GC"]), int(st.session_state["CAP_CE"]))
+    with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
+        st.caption("Définis ici les plafonds utilisés partout (affichage + alertes). Format: `1 000 000 $`.")
+        col1, col2 = st.columns(2)
+        with col1:
+            cap_gc_str = st.text_input("Cap GC", value=_fmt_money(st.session_state.get("CAP_GC", DEFAULT_CAP_GC)), key="cap_gc_txt")
+        with col2:
+            cap_ce_str = st.text_input("Cap CE", value=_fmt_money(st.session_state.get("CAP_CE", DEFAULT_CAP_CE)), key="cap_ce_txt")
+
+        cap_gc_val = _parse_money(cap_gc_str)
+        cap_ce_val = _parse_money(cap_ce_str)
+
+        # applique (et normalise l'affichage)
+        st.session_state["CAP_GC"] = int(cap_gc_val or 0)
+        st.session_state["CAP_CE"] = int(cap_ce_val or 0)
+
+        st.caption(f"Valeurs enregistrées: **GC** {_fmt_money(st.session_state['CAP_GC'])} • **CE** {_fmt_money(st.session_state['CAP_CE'])}")
 
     # ---- Players DB index
+
     players_db = load_players_db(os.path.join(DATA_DIR, PLAYERS_DB_FILENAME))
     players_idx = build_players_index(players_db)
     if players_idx:
@@ -1055,7 +1076,7 @@ def render(ctx: dict) -> None:
     #   - Mode: append ou remplacer l’équipe
     #   - Backup local par équipe avant modification
     # =====================================================
-    with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=True):
+    with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=False):
         st.caption("Upload plusieurs CSV (1 par équipe). Auto-assign via `Propriétaire` (si unique) ou via le nom du fichier (ex: `Whalers.csv`).")
         st.code(f"Destination locale (fusion): {e_path}", language="text")
         # Options lecture/normalisation
