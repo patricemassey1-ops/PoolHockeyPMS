@@ -30,7 +30,7 @@ import streamlit as st
 # ---- Optional: Google Drive client (if installed)
 try:
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload
+    from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
     from google.oauth2.credentials import Credentials
 except Exception:
     build = None
@@ -105,7 +105,7 @@ def render_drive_oauth_connect_ui() -> None:
             "token_uri": "https://oauth2.googleapis.com/token",
         }
     }
-    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+    scopes = ["https://www.googleapis.com/auth/drive"]
     flow = Flow.from_client_config(client_config, scopes=scopes, redirect_uri=redirect_uri)
 
     # handle return ?code=
@@ -154,6 +154,107 @@ EQUIPES_COLUMNS = [
 ]
 DEFAULT_CAP_GC = 88_000_000
 DEFAULT_CAP_CE = 12_000_000
+
+
+# ============================================================
+# PATHS ROBUSTES (Linux/Streamlit Cloud)
+# ============================================================
+_THIS_FILE = Path(__file__).resolve()
+_ROOT_DIR = _THIS_FILE.parents[1]
+_DATA_DIR_FALLBACK = (_ROOT_DIR / "data").resolve()
+
+def _resolve_data_dir(ctx: dict) -> Path:
+    """Résout un DATA_DIR fiable.
+    - Priorité à ctx['DATA_DIR'] si fourni et existant
+    - Sinon /data du repo (minuscule), puis 'Data' (majuscule) si présent
+    """
+    cand = str(ctx.get("DATA_DIR") or ctx.get("data_dir") or "").strip()
+    if cand:
+        p = Path(cand)
+        # chemin relatif -> ancré au ROOT_DIR
+        if not p.is_absolute():
+            p = (_ROOT_DIR / cand).resolve()
+        if p.exists():
+            return p
+        # fallback si l'utilisateur passe "Data" mais que repo est "data"
+        if p.name.lower() == "data":
+            p2 = (_ROOT_DIR / "data").resolve()
+            if p2.exists():
+                return p2
+    # fallback repo /data, sinon crée /Data
+    if _DATA_DIR_FALLBACK.exists():
+        return _DATA_DIR_FALLBACK
+    return (_ROOT_DIR / "Data").resolve()
+
+def _first_existing(paths: List[Path]) -> Optional[Path]:
+    for p in paths:
+        try:
+            if p and Path(p).exists():
+                return Path(p)
+        except Exception:
+            continue
+    return None
+
+def _players_db_path(data_dir: Path) -> Optional[Path]:
+    cands = [
+        data_dir / "hockey.players.csv",
+        data_dir / "Hockey.Players.csv",
+        data_dir / "hockey.players.CSV",
+        data_dir / "Hockey.players.csv",
+    ]
+    return _first_existing(cands)
+
+def _puckpedia_path(data_dir: Path) -> Optional[Path]:
+    cands = [
+        data_dir / "puckpedia2025_26.csv",
+        data_dir / "PuckPedia2025_26.csv",
+        data_dir / "puckpedia2025-26.csv",
+        data_dir / "puckpedia.contracts.csv",
+        data_dir / "PuckPedia2025_26.csv",
+    ]
+    return _first_existing(cands)
+
+@st.cache_data(show_spinner=False)
+def _load_level_map_puckpedia(path: str) -> Dict[str, str]:
+    """Retourne dict {player_norm: 'ELC'|'STD'} depuis un CSV PuckPedia-like.
+    Tolérant aux noms de colonnes.
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        df = pd.read_csv(path, low_memory=False, dtype=str, engine="python", on_bad_lines="skip")
+    except Exception:
+        try:
+            df = pd.read_csv(path, sep=None, engine="python", low_memory=False, dtype=str, on_bad_lines="skip")
+        except Exception:
+            return {}
+    if df is None or df.empty:
+        return {}
+    low = {str(c).strip().lower(): c for c in df.columns}
+
+    # colonnes possibles
+    player_col = low.get("player") or low.get("joueur") or low.get("name") or low.get("nom")
+    if not player_col:
+        # essai: première colonne qui ressemble à un nom
+        for k, c in low.items():
+            if "player" in k or "joueur" in k or "name" in k or "nom" in k:
+                player_col = c
+                break
+    level_col = low.get("level") or low.get("niveau") or low.get("contract type") or low.get("type")
+    if not player_col:
+        return {}
+
+    out: Dict[str, str] = {}
+    for _, r in df.iterrows():
+        nm = _norm_player(r.get(player_col, ""))
+        if not nm:
+            continue
+        raw = str(r.get(level_col, "") or "").upper() if level_col else ""
+        lv = "ELC" if "ELC" in raw else ("STD" if "STD" in raw else "")
+        if lv:
+            out[nm] = lv
+    return out
+
 
 
 # ============================================================
@@ -596,6 +697,56 @@ def _drive_download_bytes(svc: Any, file_id: str) -> bytes:
         _, done = downloader.next_chunk()
     return fh.getvalue()
 
+
+def _drive_find_file_id_by_name(svc: Any, folder_id: str, filename: str) -> str:
+    """Retourne le file_id du fichier exact (name match) dans le folder, sinon ''."""
+    if not svc or not folder_id or not filename:
+        return ""
+    try:
+        q = f"'{folder_id}' in parents and trashed=false and name='{filename}'"
+        res = svc.files().list(
+            q=q,
+            fields="files(id,name,modifiedTime)",
+            pageSize=10,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        files = res.get("files", []) or []
+        if not files:
+            return ""
+        files.sort(key=lambda x: x.get("modifiedTime",""), reverse=True)
+        return str(files[0].get("id") or "")
+    except Exception:
+        return ""
+
+def _drive_upload_bytes(svc: Any, folder_id: str, filename: str, content: bytes, mime: str = "text/csv") -> Optional[str]:
+    """Crée ou remplace un fichier CSV dans Drive (même nom). Retourne file_id ou None."""
+    if not svc or not folder_id or not filename:
+        return None
+    if "MediaIoBaseUpload" not in globals() or MediaIoBaseUpload is None:
+        return None
+    try:
+        existing_id = _drive_find_file_id_by_name(svc, folder_id, filename)
+        media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime, resumable=True)
+        if existing_id:
+            res = svc.files().update(
+                fileId=existing_id,
+                media_body=media,
+                fields="id,name,modifiedTime",
+                supportsAllDrives=True,
+            ).execute()
+            return str(res.get("id") or existing_id)
+        meta = {"name": filename, "parents": [folder_id]}
+        res = svc.files().create(
+            body=meta,
+            media_body=media,
+            fields="id,name,modifiedTime",
+            supportsAllDrives=True,
+        ).execute()
+        return str(res.get("id") or "")
+    except Exception:
+        return None
+
 def _read_csv_bytes(b: bytes, *, sep: str = "AUTO", on_bad_lines: str = "skip") -> pd.DataFrame:
     """Lecture CSV robuste (Fantrax / exports):
     - encodings: utf-8-sig -> utf-8 -> latin-1
@@ -902,14 +1053,56 @@ def render(ctx: dict) -> None:
         st.warning("Accès admin requis.")
         return
 
-    DATA_DIR = str(ctx.get("DATA_DIR") or "Data")
-    os.makedirs(DATA_DIR, exist_ok=True)
+    data_dir_path = _resolve_data_dir(ctx)
+    data_dir_path.mkdir(parents=True, exist_ok=True)
+    DATA_DIR = str(data_dir_path)
 
     season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
     folder_id = str(ctx.get("drive_folder_id") or "").strip()
 
     e_path = equipes_path(DATA_DIR, season_lbl)
     log_path = admin_log_path(DATA_DIR, season_lbl)
+
+    # =====================================================
+    # Sync équipes_joueurs depuis Drive -> local cache (si nécessaire)
+    #   - Objectif: l'app reste fonctionnelle même si Drive OAuth est down
+    # =====================================================
+    drive_svc = None
+    drive_ok = False
+    # 1) service via helpers du projet
+    if callable(_oauth_get_service):
+        try:
+            drive_svc = _oauth_get_service()
+        except Exception:
+            drive_svc = None
+    # 2) fallback via creds en session (render_drive_oauth_connect_ui)
+    if drive_svc is None:
+        drive_svc = _get_drive_service_from_session()
+    drive_ok = bool(drive_svc) and bool(folder_id)
+
+    # si pas de fichier local, mais Drive OK: télécharge le master de la saison
+    if (not os.path.exists(e_path)) and drive_ok:
+        try:
+            fname = os.path.basename(e_path)
+            fid = _drive_find_file_id_by_name(drive_svc, folder_id, fname)
+            if fid:
+                b = _drive_download_bytes(drive_svc, fid)
+                os.makedirs(os.path.dirname(e_path), exist_ok=True)
+                with open(e_path, "wb") as f:
+                    f.write(b)
+        except Exception:
+            pass
+    def _save_equipes_with_sync(df_to_save: pd.DataFrame) -> None:
+        """Sauvegarde local + push Drive (si disponible)."""
+        save_equipes(df_to_save, e_path)
+        if drive_ok:
+            try:
+                csv_b = ensure_equipes_df(df_to_save).to_csv(index=False).encode("utf-8")
+                _drive_upload_bytes(drive_svc, folder_id, os.path.basename(e_path), csv_b)
+            except Exception:
+                pass
+
+
 
     st.subheader("🛠️ Gestion Admin")
 
@@ -947,8 +1140,23 @@ def render(ctx: dict) -> None:
             _render_caps_bars(df_eq, int(st.session_state["CAP_GC"]), int(st.session_state["CAP_CE"]))
 
     # ---- Players DB index
-    players_db = load_players_db(os.path.join(DATA_DIR, PLAYERS_DB_FILENAME))
+    # ---- Players DB (Level STD/ELC) + fallback via PuckPedia
+    _pdb = _players_db_path(data_dir_path)
+    players_db = load_players_db(str(_pdb)) if _pdb else pd.DataFrame()
+    # ---- PuckPedia Level map (optionnel)
+    _pp = _puckpedia_path(data_dir_path)
+    pp_map = _load_level_map_puckpedia(str(_pp)) if _pp else {}
+    
     players_idx = build_players_index(players_db)
+    if pp_map:
+        # complète Level depuis PuckPedia si absent
+        for k, v in pp_map.items():
+            if k not in players_idx:
+                players_idx[k] = {'Level': v}
+            else:
+                cur = str(players_idx.get(k, {}).get('Level','') or '').strip().upper()
+                if cur not in {'ELC','STD'} and v in {'ELC','STD'}:
+                    players_idx[k]['Level'] = v
     if players_idx:
         st.success(f"Players DB détectée: {PLAYERS_DB_FILENAME} (Level auto + infos).")
     else:
@@ -1013,7 +1221,7 @@ def render(ctx: dict) -> None:
                         else:
                             df_imp = ensure_equipes_df(df_drive)
                             df_imp_qc, stats = apply_quality(df_imp, players_idx)
-                            save_equipes(df_imp_qc, e_path)
+                            _save_equipes_with_sync(df_imp_qc)
                             st.session_state["equipes_df"] = df_imp_qc
                             append_admin_log(
                                 log_path,
