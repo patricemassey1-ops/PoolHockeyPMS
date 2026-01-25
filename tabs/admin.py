@@ -836,7 +836,8 @@ def render(ctx: dict) -> None:
         else:
             st.warning("Drive OAuth non disponible (creds manquants ou service indisponible).")
 
-        with st.expander("🧩 Debug OAuth (facultatif)", expanded=False):
+        dbg = st.checkbox("🧩 Debug OAuth (facultatif)", value=False, key="adm_oauth_dbg")
+        if dbg:
             st.write("services_oauth_file:", used_path or "(aucun)")
             st.write("has_ui:", bool(callable(_oauth_ui)))
             st.write("has_get_service:", bool(callable(_oauth_get_service)))
@@ -846,7 +847,7 @@ def render(ctx: dict) -> None:
                 except Exception:
                     pass
 
-    with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
+with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
         st.caption("Définis ici les plafonds utilisés partout (affichage + alertes). Format: `1 000 000 $`.")
         col1, col2 = st.columns(2)
         with col1:
