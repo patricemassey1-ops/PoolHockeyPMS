@@ -55,7 +55,8 @@ for _mod, _fn_ui, _fn_enabled, _fn_service in [
         _oauth_ui = getattr(m, _fn_ui, None) or _oauth_ui
         _oauth_enabled = getattr(m, _fn_enabled, None) or _oauth_enabled
         _oauth_get_service = getattr(m, _fn_service, None) or _oauth_get_service
-    except Excep
+    except Exception:
+        pass
 
 # ---- Fallback: si "services" n'est pas un package (pas de __init__.py), charger par PATH
 def _load_module_from_path(mod_name: str, path: Path):
@@ -119,8 +120,6 @@ if _oauth_ui is None and _oauth_get_service is None:
 if _oauth_ui is None:
     _oauth_ui = render_drive_oauth_connect_ui
 
-tion:
-        pass
 
 
 
@@ -1104,389 +1103,797 @@ def _first_existing_path(candidates: List[str]) -> str:
             pass
     return ""
 
+def render(ctx: dict) -> None:
+    if not ctx.get("is_admin"):
+        st.warning("Accès admin requis.")
+        return
+
+    DATA_DIR = None  # resolved below
 
 # =====================================================
 # 📁 DATA_DIR — robuste (Linux case-sensitive)
 # =====================================================
-from pathlib import Path
-
 _THIS_FILE = Path(__file__).resolve()
 _ROOT_DIR = _THIS_FILE.parents[1]  # .../poolhockeypms
-
-def _resolve_data_dir(ctx: dict) -> str:
-    """
-    Resolve the /data directory robustly (data vs Data) and allow ctx override.
-    Never uses ctx at import-time.
-    """
+def _resolve_data_dir(_ctx) -> str:
     cands = []
     try:
-        if isinstance(ctx, dict) and ctx.get("DATA_DIR"):
-            cands.append(Path(str(ctx.get("DATA_DIR"))))
+        if isinstance(_ctx, dict) and _ctx.get("DATA_DIR"):
+            cands.append(Path(str(_ctx.get("DATA_DIR"))))
     except Exception:
         pass
-
     cands += [
         _ROOT_DIR / "data",
         _ROOT_DIR / "Data",
         _ROOT_DIR / "DATA",
         Path.cwd() / "data",
         Path.cwd() / "Data",
-        Path.cwd() / "DATA",
     ]
     for d in cands:
         try:
             if d and d.exists() and d.is_dir():
-                return str(d.resolve())
+                return str(d)
         except Exception:
             continue
-    return str((_ROOT_DIR / "data").resolve())
+    return str(_ROOT_DIR / "data")
+DATA_DIR = _resolve_data_dir(ctx)
 
-def _first_existing_path(paths):
-    for p in paths or []:
+# Resolve /data vs /Data robustly
+try:
+    root = Path(__file__).resolve().parents[1]
+    if not os.path.isabs(DATA_DIR):
+        # if ctx gives relative, anchor to root
+        DATA_DIR = str((root / DATA_DIR).resolve())
+    if not os.path.isdir(DATA_DIR):
+        for name in ("data","Data","DATA"):
+            p = root / name
+            if p.exists() and p.is_dir():
+                DATA_DIR = str(p.resolve())
+                break
+except Exception:
+    pass
+os.makedirs(DATA_DIR, exist_ok=True)
+
+season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
+folder_id = str(ctx.get("drive_folder_id") or "").strip()
+
+e_path = equipes_path(DATA_DIR, season_lbl)
+log_path = admin_log_path(DATA_DIR, season_lbl)
+
+st.subheader("🛠️ Gestion Admin")
+
+# ---- OAuth UI (si ton projet l'avait déjà)
+with st.expander("🔐 Connexion Google Drive (OAuth)", expanded=False):
+    if callable(_oauth_ui):
         try:
-            if p and os.path.exists(str(p)):
-                return str(p)
+            _oauth_ui()
         except Exception:
-            continue
-    return ""
-
-def _fmt_money(n: int) -> str:
-    try:
-        n = int(n)
-    except Exception:
-        n = 0
-    return f"{n:,}".replace(",", " ") + " $"
-
-def _parse_money(s: str) -> int:
-    s = str(s or "")
-    digits = "".join(ch for ch in s if ch.isdigit())
-    try:
-        return int(digits) if digits else 0
-    except Exception:
-        return 0
-
-def _default_owners():
-    return ["Canadiens","Cracheurs","Nordiques","Predateurs","Red_Wings","Whalers"]
-
-def _safe_read_csv(path: str) -> pd.DataFrame:
-    try:
-        if not path or not os.path.exists(path):
-            return pd.DataFrame()
-        return pd.read_csv(path, low_memory=False, on_bad_lines="skip")
-    except TypeError:
-        try:
-            return pd.read_csv(path, low_memory=False)
-        except Exception:
-            return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
-
-def _safe_write_csv(df: pd.DataFrame, path: str) -> bool:
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        df.to_csv(path, index=False, encoding="utf-8")
-        return True
-    except Exception:
-        return False
-
-def _try_import_drive_helpers():
-    """
-    Returns dict of callables from services.drive/auth if present.
-    All optional.
-    """
-    out = {
-        "oauth_enabled": None,
-        "render_oauth_ui": None,
-        "get_drive_service": None,
-        "download_file_by_name": None,
-        "upload_bytes": None,
-    }
-    try:
-        from services import drive as _drive
-        out["oauth_enabled"] = getattr(_drive, "oauth_drive_enabled", None)
-        out["render_oauth_ui"] = getattr(_drive, "render_drive_oauth_connect_ui", None) or getattr(_drive, "render_oauth_connect_ui", None)
-        out["get_drive_service"] = getattr(_drive, "get_drive_service", None) or getattr(_drive, "get_drive_service_from_session", None)
-        # optional helpers
-        out["download_file_by_name"] = getattr(_drive, "drive_download_file_by_name", None) or getattr(_drive, "download_file_by_name", None)
-        out["upload_bytes"] = getattr(_drive, "drive_upload_bytes", None) or getattr(_drive, "upload_bytes", None)
-    except Exception:
-        pass
-    return out
-
-def _drive_download_settings(svc, folder_id: str, filename: str) -> bytes | None:
-    """
-    Best-effort download: use services.drive helper if available, else None.
-    """
-    try:
-        helpers = _try_import_drive_helpers()
-        fn = helpers.get("download_file_by_name")
-        if callable(fn):
-            return fn(svc, folder_id, filename)
-    except Exception:
-        pass
-    return None
-
-def _drive_upload_settings(svc, folder_id: str, filename: str, content: bytes) -> bool:
-    try:
-        helpers = _try_import_drive_helpers()
-        fn = helpers.get("upload_bytes")
-        if callable(fn):
-            return bool(fn(svc, folder_id, filename, content))
-    except Exception:
-        pass
-    return False
-
-def _settings_local_path(data_dir: str) -> str:
-    return os.path.join(data_dir, "settings.csv")
-
-def _load_settings_from_bytes(b: bytes) -> dict:
-    try:
-        import io
-        df = pd.read_csv(io.BytesIO(b))
-        if df.empty:
-            return {}
-        row = df.iloc[0].to_dict()
-        return {k: row.get(k) for k in row.keys()}
-    except Exception:
-        return {}
-
-def _settings_to_csv_bytes(cap_gc: int, cap_ce: int) -> bytes:
-    import io
-    df = pd.DataFrame([{"CAP_GC": int(cap_gc), "CAP_CE": int(cap_ce)}])
-    bio = io.BytesIO()
-    df.to_csv(bio, index=False, encoding="utf-8")
-    return bio.getvalue()
-
-def _fuzzy_candidates(query: str, choices: list[str], limit: int = 20) -> list[str]:
-    q = (query or "").strip().lower()
-    if not q:
-        return choices[:limit]
-    # simple fuzzy: substring first, then difflib
-    sub = [c for c in choices if q in c.lower()]
-    if sub:
-        return sub[:limit]
-    try:
-        import difflib
-        return difflib.get_close_matches(query, choices, n=limit, cutoff=0.2)
-    except Exception:
-        return choices[:limit]
-
-# =====================================================
-# 🛠️ RENDER
-# =====================================================
-def render(ctx: dict) -> None:
-    # ---- Guard
-    if not ctx.get("is_admin"):
-        st.warning("Accès admin requis.")
-        return
-
-    data_dir = _resolve_data_dir(ctx)
-    os.makedirs(data_dir, exist_ok=True)
-
-    season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
-    folder_id = str(ctx.get("drive_folder_id") or "").strip()
-
-    # Paths
-    equipes_csv = os.path.join(data_dir, f"equipes_joueurs_{season_lbl}.csv")
-    if os.path.exists(os.path.join(data_dir, "equipes_joueurs_2025-2026.csv")) and season_lbl == "2025-2026":
-        equipes_csv = os.path.join(data_dir, "equipes_joueurs_2025-2026.csv")
-
-    players_db_path = _first_existing_path([
-        os.path.join(data_dir, "hockey.players.csv"),
-        os.path.join(data_dir, "Hockey.Players.csv"),
-        os.path.join(data_dir, "hockey.players.CSV"),
-    ])
-
-    st.subheader("🛠️ Gestion Admin")
-    st.caption(f"DATA_DIR: {Path(data_dir).name}")
-
-    # ---- Drive OAuth (UI only; never blocks)
-    helpers = _try_import_drive_helpers()
-    oauth_enabled = helpers.get("oauth_enabled")
-    oauth_ui = helpers.get("render_oauth_ui")
-    get_drive_service = helpers.get("get_drive_service")
-
-    with st.expander("🔐 Connexion Google Drive (OAuth)", expanded=False):
-        if callable(oauth_ui):
+            st.info("UI OAuth présente mais a échoué — vérifie tes secrets OAuth.")
+    else:
+        st.caption("Aucune UI OAuth détectée dans services/*. Tu peux quand même importer en local (fallback).")
+        if callable(_oauth_enabled):
             try:
-                oauth_ui()
-            except Exception:
-                st.warning("UI OAuth détectée mais a échoué. Vérifie secrets/scopes.")
-        else:
-            st.caption("Aucune UI OAuth détectée dans services/*. Tu peux quand même utiliser le fallback local.")
-
-        drive_svc = None
-        if callable(get_drive_service):
-            try:
-                drive_svc = get_drive_service()
-            except Exception:
-                drive_svc = None
-        if drive_svc and folder_id:
-            st.success("Drive OAuth: connecté.")
-        else:
-            st.info("Drive OAuth: non disponible (fallback local actif).")
-
-    # ---- Caps settings (NO cap-live per team)
-    DEFAULT_CAP_GC = 88_000_000
-    DEFAULT_CAP_CE = 12_000_000
-
-    # autoload settings once per session
-    if "admin_settings_loaded" not in st.session_state:
-        st.session_state["admin_settings_loaded"] = True
-        # local first
-        s_path = _settings_local_path(data_dir)
-        if os.path.exists(s_path):
-            df = _safe_read_csv(s_path)
-            if not df.empty:
-                try:
-                    st.session_state["CAP_GC"] = int(df.iloc[0].get("CAP_GC", DEFAULT_CAP_GC))
-                    st.session_state["CAP_CE"] = int(df.iloc[0].get("CAP_CE", DEFAULT_CAP_CE))
-                except Exception:
-                    pass
-        else:
-            # drive fallback
-            try:
-                if folder_id and drive_svc:
-                    b = _drive_download_settings(drive_svc, folder_id, "settings.csv")
-                    if b:
-                        row = _load_settings_from_bytes(b)
-                        if row:
-                            st.session_state["CAP_GC"] = int(row.get("CAP_GC", DEFAULT_CAP_GC))
-                            st.session_state["CAP_CE"] = int(row.get("CAP_CE", DEFAULT_CAP_CE))
-                            # cache local
-                            _safe_write_csv(pd.DataFrame([{"CAP_GC": st.session_state["CAP_GC"], "CAP_CE": st.session_state["CAP_CE"]}]), s_path)
+                st.write("oauth_drive_enabled():", bool(_oauth_enabled()))
             except Exception:
                 pass
 
-    with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
-        cap_gc_txt = st.text_input("Cap GC", value=_fmt_money(st.session_state.get("CAP_GC", DEFAULT_CAP_GC)), key="cap_gc_txt")
-        cap_ce_txt = st.text_input("Cap CE", value=_fmt_money(st.session_state.get("CAP_CE", DEFAULT_CAP_CE)), key="cap_ce_txt")
+# ---- caps inputs
+st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
+st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
-        cap_gc = _parse_money(cap_gc_txt) or int(st.session_state.get("CAP_GC", DEFAULT_CAP_GC))
-        cap_ce = _parse_money(cap_ce_txt) or int(st.session_state.get("CAP_CE", DEFAULT_CAP_CE))
+with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
+    st.caption("Définis ici les plafonds utilisés partout (affichage + alertes). Format: `1 000 000 $`.")
+    # ---- load settings at first display (Drive -> local cache -> session)
+    svc_for_settings = _drive_service_from_existing_oauth()
+    settings = load_settings_drive_if_needed(DATA_DIR, svc_for_settings, folder_id) if folder_id else load_settings_local(DATA_DIR)
 
-        # validate
-        def _cap_ok(v): return 1_000_000 <= int(v) <= 200_000_000
-        if not _cap_ok(cap_gc): st.error("Cap GC invalide (1M–200M).")
-        if not _cap_ok(cap_ce): st.error("Cap CE invalide (1M–200M).")
+    if "CAP_GC" not in st.session_state:
+        st.session_state["CAP_GC"] = int(settings.get("cap_gc") or DEFAULT_CAP_GC)
+    if "CAP_CE" not in st.session_state:
+        st.session_state["CAP_CE"] = int(settings.get("cap_ce") or DEFAULT_CAP_CE)
 
-        col1, col2, col3 = st.columns([1,1,2])
-        with col1:
-            if st.button("💾 Sauvegarder (local + Drive)", use_container_width=True):
-                if _cap_ok(cap_gc) and _cap_ok(cap_ce):
-                    st.session_state["CAP_GC"] = int(cap_gc)
-                    st.session_state["CAP_CE"] = int(cap_ce)
-                    s_path = _settings_local_path(data_dir)
-                    ok_local = _safe_write_csv(pd.DataFrame([{"CAP_GC": int(cap_gc), "CAP_CE": int(cap_ce)}]), s_path)
-                    ok_drive = False
+    col1, col2 = st.columns(2)
+    with col1:
+        cap_gc_str = st.text_input("Cap GC", value=_fmt_money(st.session_state.get("CAP_GC", DEFAULT_CAP_GC)), key="cap_gc_txt")
+    with col2:
+        cap_ce_str = st.text_input("Cap CE", value=_fmt_money(st.session_state.get("CAP_CE", DEFAULT_CAP_CE)), key="cap_ce_txt")
+
+    # validation anti-absurde
+    cap_gc_val = _parse_money(cap_gc_str)
+    cap_ce_val = _parse_money(cap_ce_str)
+
+    MIN_CAP = 1_000_000
+    MAX_CAP = 200_000_000
+    errs = []
+    if cap_gc_val and (cap_gc_val < MIN_CAP or cap_gc_val > MAX_CAP):
+        errs.append(f"Cap GC invalide ({_fmt_money(cap_gc_val)}) — doit être entre {_fmt_money(MIN_CAP)} et {_fmt_money(MAX_CAP)}.")
+    if cap_ce_val and (cap_ce_val < MIN_CAP or cap_ce_val > MAX_CAP):
+        errs.append(f"Cap CE invalide ({_fmt_money(cap_ce_val)}) — doit être entre {_fmt_money(MIN_CAP)} et {_fmt_money(MAX_CAP)}.")
+
+    if errs:
+        for e in errs:
+            st.error(e)
+        st.info("Corrige la valeur avant de sauvegarder.")
+    else:
+        st.session_state["CAP_GC"] = int(cap_gc_val or 0)
+        st.session_state["CAP_CE"] = int(cap_ce_val or 0)
+
+    b1, b2, b3 = st.columns([1,1,2])
+    with b1:
+        if st.button("💾 Sauvegarder (local + Drive)", use_container_width=True, key="adm_caps_save"):
+            if errs:
+                st.warning("Impossible de sauvegarder — valeurs invalides.")
+            else:
+                ok_local = save_settings_local(DATA_DIR, st.session_state["CAP_GC"], st.session_state["CAP_CE"])
+                ok_drive = False
+                if svc_for_settings and folder_id:
                     try:
-                        if folder_id and drive_svc:
-                            ok_drive = _drive_upload_settings(drive_svc, folder_id, "settings.csv", _settings_to_csv_bytes(cap_gc, cap_ce))
+                        payload = Path(settings_path(DATA_DIR)).read_bytes()
+                        ok_drive = bool(_drive_upload_bytes(svc_for_settings, folder_id, SETTINGS_FILENAME, payload))
                     except Exception:
                         ok_drive = False
-                    st.success(f"✅ Sauvé. Local={ok_local} Drive={ok_drive}")
-        with col2:
-            if st.button("🔄 Recharger (local/Drive)", use_container_width=True):
-                # reset and reload next run
-                st.session_state.pop("admin_settings_loaded", None)
+                if ok_local:
+                    st.success("✅ Settings sauvegardés en local.")
+                else:
+                    st.error("❌ Échec sauvegarde locale.")
+                if folder_id:
+                    if ok_drive:
+                        st.success("✅ Settings uploadés sur Drive.")
+                    else:
+                        st.warning("⚠️ Drive: upload non effectué (OAuth write scopes manquants ou Drive indisponible).")
+                st.cache_data.clear()
+    with b2:
+        if st.button("🔄 Recharger (local/Drive)", use_container_width=True, key="adm_caps_reload"):
+            st.cache_data.clear()
+            settings = load_settings_drive_if_needed(DATA_DIR, svc_for_settings, folder_id) if folder_id else load_settings_local(DATA_DIR)
+            st.session_state["CAP_GC"] = int(settings.get("cap_gc") or DEFAULT_CAP_GC)
+            st.session_state["CAP_CE"] = int(settings.get("cap_ce") or DEFAULT_CAP_CE)
+            st.success("✅ Rechargé.")
+    with b3:
+            st.caption(f"Actuel: **GC** {_fmt_money(int(st.session_state.get('CAP_GC',0)))} • **CE** {_fmt_money(int(st.session_state.get('CAP_CE',0)))}")
+# ---- Players DB index
+    players_db = load_players_db(_first_existing_path([
+        os.path.join(DATA_DIR, "hockey.players.csv"),
+        os.path.join(DATA_DIR, "Hockey.Players.csv"),
+        os.path.join(DATA_DIR, "hockey.players.CSV"),
+        os.path.join(DATA_DIR, "Hockey.Players.CSV"),
+        os.path.join(DATA_DIR, PLAYERS_DB_FILENAME),
+    ]))
+    players_idx = build_players_index(players_db)
+    if players_idx:
+        st.success(f"Players DB détectée: {PLAYERS_DB_FILENAME} (Level auto + infos).")
+    else:
+        st.warning(f"{PLAYERS_DB_FILENAME} indisponible — fallback Level par Salaire. (DATA_DIR={DATA_DIR})")
+
+    # ---- Load équipes
+    df = load_equipes(e_path)
+
+    # =====================================================
+    # 🔄 IMPORT ÉQUIPES (Drive)
+    # =====================================================
+    with st.expander("🔄 Import équipes depuis Drive (OAuth)", expanded=False):
+        st.caption("Lister/télécharger les CSV dans ton folder_id. Si ça ne marche pas, utilise Import local (fallback).")
+        st.write(f"folder_id (ctx): `{folder_id or ''}`")
+
+        svc = _drive_service_from_existing_oauth()
+        drive_ok = bool(svc) and bool(folder_id)
+
+        if not drive_ok:
+            st.warning("Drive OAuth non disponible (creds manquants ou service indisponible).")
+            st.caption("Conseil: ouvre l’expander 'Connexion Google Drive (OAuth)' et connecte-toi.")
+        else:
+            files = _drive_list_csv_files(svc, folder_id)
+            equipes_files = [f for f in files if "equipes_joueurs" in f["name"].lower()]
+
+            if not equipes_files:
+                st.info("Aucun fichier `equipes_joueurs...csv` trouvé sur Drive.")
+            else:
+                pick = st.selectbox("Choisir un CSV équipes (Drive)", equipes_files, format_func=lambda x: x["name"], key="adm_drive_pick")
+
+                colA, colB, colC = st.columns([1, 1, 1])
+                do_preview = colA.button("🧼 Preview", use_container_width=True, key="adm_drive_preview")
+                do_validate = colB.button("🧪 Valider colonnes", use_container_width=True, key="adm_drive_validate")
+                do_import = colC.button("⬇️ Importer → Local + QC + Reload", use_container_width=True, key="adm_drive_import")
+
+                df_drive = None
+                if do_preview or do_validate or do_import:
+                    try:
+                        b = _drive_download_bytes(svc, pick["id"])
+                        df_drive = _read_csv_bytes(b)
+                    except Exception as e:
+                        st.error(f"Erreur téléchargement/lecture: {e}")
+
+                if isinstance(df_drive, pd.DataFrame):
+                    st.caption(f"Source: {pick['name']}")
+                    st.dataframe(df_drive.head(80), use_container_width=True)
+
+                    ok, missing, extras = validate_equipes_df(df_drive)
+                    if do_validate:
+                        if ok:
+                            st.success("✅ Colonnes attendues OK.")
+                            if extras:
+                                st.info(f"Colonnes additionnelles: {extras}")
+                        else:
+                            st.error(f"❌ Colonnes manquantes: {missing}")
+                            if extras:
+                                st.info(f"Colonnes additionnelles: {extras}")
+
+                    if do_import:
+                        if not ok:
+                            st.error(f"Import refusé: colonnes manquantes {missing}")
+                        else:
+                            df_imp = ensure_equipes_df(df_drive)
+                            df_imp_qc, stats = apply_quality(df_imp, players_idx)
+                            save_equipes(df_imp_qc, e_path)
+                            st.session_state["equipes_df"] = df_imp_qc
+                            append_admin_log(
+                                log_path,
+                                action="IMPORT",
+                                owner="",
+                                player="",
+                                note=f"drive={pick['name']}; level_auto={stats.get('level_autofilled',0)}"
+                            )
+                            st.success(f"✅ Import OK → {os.path.basename(e_path)} | Level auto: {stats.get('level_autofilled',0)}")
+                            st.rerun()
+
+    # =====================================================
+    # 📥 IMPORT LOCAL (fallback)
+    # =====================================================
+
+    # =====================================================
+    # 📥 IMPORT LOCAL (fallback) — multi-upload CSV équipes
+    #   Objectif: importer plusieurs fichiers (1 équipe par fichier)
+    #   - Auto: si colonne "Propriétaire" contient 1 valeur unique -> assign auto
+    #   - Sinon: tu choisis l’équipe dans un dropdown (et on force la colonne)
+    #   - Merge: append dans equipes_joueurs_{season}.csv (option replace par équipe)
+    # =====================================================
+    
+    # =====================================================
+    # 📥 IMPORT LOCAL (fallback) — multi-upload CSV équipes (+ ZIP)
+    #   - 1 fichier = 1 équipe
+    #   - Auto-assign via colonne Propriétaire (si unique) ou via nom de fichier (ex: Whalers.csv)
+    #   - Mode: append ou remplacer l’équipe
+    #   - Backup local par équipe avant modification
+    # =====================================================
+    with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=False):
+        st.caption("Upload plusieurs CSV (1 par équipe). Auto-assign via `Propriétaire` (si unique) ou via le nom du fichier (ex: `Whalers.csv`).")
+        st.code(f"Destination locale (fusion): {e_path}", language="text")
+        # Options lecture/normalisation
+        colA, colB, colC = st.columns([1, 1, 1])
+        with colA:
+            sep_choice = st.selectbox("Delimiter (AUTO par défaut)", ["AUTO", ",", ";", "\t", "|"], index=0, key="adm_sep_choice")
+        with colB:
+            ignore_bad = st.checkbox("Ignorer lignes brisées (on_bad_lines='skip')", value=True, key="adm_ignore_bad_lines")
+        with colC:
+            adm_nhl_enrich = st.checkbox("Compléter Pos/Equipe via NHL API (si manquant)", value=False, key="adm_nhl_enrich")
+        adm_nhl_enrich = bool(st.session_state.get("adm_nhl_enrich", adm_nhl_enrich))
+
+        mode = st.radio(
+            "Mode de fusion",
+            ["Ajouter (append)", "Remplacer l’équipe (delete puis insert)"],
+            horizontal=True,
+            key="adm_multi_mode",
+        )
+
+        use_from_data = st.checkbox(
+            "📂 Utiliser les fichiers déjà présents dans /data (sans upload)",
+            value=True,
+            key="adm_use_data_files",
+        )
+        data_csvs = []
+        try:
+            data_csvs = sorted([
+                f for f in os.listdir(DATA_DIR)
+                if f.lower().endswith(".csv")
+                and f.lower() not in {PLAYERS_DB_FILENAME.lower()}
+                and not f.lower().startswith("equipes_joueurs_")
+                and not f.lower().startswith("backup_")
+                and not f.lower().startswith("admin_log_")
+            ])
+        except Exception:
+            data_csvs = []
+
+        selected_data_csvs = st.multiselect(
+            "Fichiers CSV dans /data à importer (un fichier par équipe)",
+            options=data_csvs,
+            default=data_csvs,
+            disabled=not use_from_data,
+            key="adm_data_csvs_sel",
+        )
+
+        uploads = []
+        zip_up = None
+        if not use_from_data:
+            uploads = st.file_uploader(
+                "Uploader un ou plusieurs CSV (équipes)",
+                type=["csv"],
+                accept_multiple_files=True,
+                key="adm_multi_uploads",
+            )
+            zip_up = st.file_uploader(
+                "Ou uploader un ZIP contenant plusieurs CSV",
+                type=["zip"],
+                key="adm_multi_zip",
+                help="Fallback: si tu préfères déposer un seul fichier .zip.",
+            )
+        else:
+            st.caption("Les équipes sont auto-déduites du nom du fichier (ex: Whalers.csv → Whalers).")
+        items: List[Tuple[str, Any]] = []
+        if use_from_data and selected_data_csvs:
+            for fn in selected_data_csvs:
+                items.append((fn, os.path.join(DATA_DIR, fn)))
+        if uploads:
+            for f in uploads:
+                items.append((getattr(f, "name", "upload.csv"), f))
+
+        if zip_up is not None:
+            try:
+                z = zipfile.ZipFile(zip_up)
+                for name in z.namelist():
+                    if name.lower().endswith(".csv") and not name.endswith("/"):
+                        items.append((name, z.read(name)))
+            except Exception as e:
+                st.error(f"ZIP invalide: {e}")
+
+        if not items:
+            st.info("Ajoute 1+ fichiers (multi) ou un ZIP de CSV.")
+        else:
+            prep = st.button("🧼 Préparer les fichiers (analyse + attribution)", use_container_width=True, key="adm_multi_prepare")
+            st.caption("Astuce: l'analyse démarre seulement quand tu cliques, pour éviter les reruns qui cassent à la sélection.")
+            if not prep:
+                st.stop()
+            parsed: List[Dict[str, Any]] = []
+            errors: List[Tuple[str, str]] = []
+
+            for file_name, payload in items:
+                # read + normalize (robuste)
+                try:
+                    b = _payload_to_bytes(payload)
+                    if b is None:
+                        raise ValueError("payload vide / non supporté")
+                    df_raw = _read_csv_bytes(b, sep=sep_choice, on_bad_lines=('skip' if ignore_bad else 'error'))
+                except Exception as e:
+                    errors.append((file_name, f"{type(e).__name__}: {e}"))
+                    continue
+
+                df_up = normalize_team_import_df(df_raw, owner_default="", players_idx=players_idx)
+
+                owners_in_file = sorted([
+                    x for x in df_up.get("Propriétaire", pd.Series(dtype=str)).astype(str).str.strip().unique()
+                    if x and x.lower() != "nan"
+                ])
+
+                parsed.append({"file": file_name, "df": df_up, "owners_in_file": owners_in_file})
+
+            if errors:
+                st.error("Certains fichiers ont des erreurs et seront ignorés :")
+                st.dataframe(pd.DataFrame(errors, columns=["Fichier", "Erreur"]), use_container_width=True)
+
+            if not parsed:
+                st.warning("Aucun fichier valide à importer.")
+            else:
+                df_current = load_equipes(e_path)
+                owners_choices = sorted([
+                    x for x in df_current.get("Propriétaire", pd.Series(dtype=str))
+                    .dropna().astype(str).str.strip().unique() if x
+                ])
+
+                st.markdown("### Attribution des fichiers → équipe")
+                assignments: List[Tuple[Dict[str, Any], str]] = []
+                for i, p in enumerate(parsed):
+                    owners_in_file = p["owners_in_file"]
+                    preferred = owners_in_file[0] if len(owners_in_file) == 1 else ""
+                    if not preferred:
+                        preferred = infer_owner_from_filename(p["file"], owners_choices)
+
+                    c1, c2, c3 = st.columns([2, 2, 3])
+                    with c1:
+                        st.write(f"**{p['file']}**")
+                        st.caption(f"Lignes: {len(p['df'])} | Owners détectés: {', '.join(owners_in_file) if owners_in_file else '—'}")
+                    with c2:
+                        if owners_choices:
+                            idx = owners_choices.index(preferred) if preferred in owners_choices else 0
+                            chosen = st.selectbox("Équipe", owners_choices, index=idx, key=f"adm_multi_owner_{i}")
+                        else:
+                            chosen = st.text_input("Équipe", value=preferred, key=f"adm_multi_owner_txt_{i}").strip()
+                    with c3:
+                        st.caption("Preview")
+                        st.dataframe(p["df"].head(10), use_container_width=True)
+
+                    assignments.append((p, chosen))
+
+                missing_choice = [p["file"] for p, chosen in assignments if not str(chosen or "").strip()]
+                if missing_choice:
+                    st.warning("Choisis une équipe pour: " + ", ".join(missing_choice))
+
+                colA, colB = st.columns([1, 1])
+                do_import = colA.button("⬇️ Importer tous → Local + QC + Reload", use_container_width=True, key="adm_multi_commit")
+                do_dry = colB.button("🧪 Dry-run (voir résumé)", use_container_width=True, key="adm_multi_dry")
+
+                if do_dry or do_import:
+                    merged = load_equipes(e_path)
+                    rows_before = len(merged)
+
+                    replaced: Dict[str, int] = {}
+                    imported = 0
+                    backed_up: set = set()
+
+                    for p, chosen in assignments:
+                        owner = str(chosen or "").strip()
+                        if not owner:
+                            continue
+
+                        if owner not in backed_up:
+                            backup_team_rows(merged, DATA_DIR, season_lbl, owner, note=f"pre-import {mode}")
+                            backed_up.add(owner)
+
+                        df_up = p["df"].copy()
+                        df_up["Propriétaire"] = owner
+                        if st.session_state.get("adm_nhl_enrich"):
+                            df_up = enrich_df_from_nhl(df_up)
+                        df_up_qc, stats = apply_quality(df_up, players_idx)
+
+                        if mode.startswith("Remplacer"):
+                            before_owner = int((merged["Propriétaire"].astype(str).str.strip() == owner).sum()) if not merged.empty else 0
+                            merged = merged[~merged["Propriétaire"].astype(str).str.strip().eq(owner)].copy()
+                            replaced[owner] = before_owner
+
+                        merged = pd.concat([merged, df_up_qc], ignore_index=True)
+                        imported += len(df_up_qc)
+
+                        append_admin_log(
+                            log_path,
+                            action="IMPORT_LOCAL_TEAM",
+                            owner=owner,
+                            player="",
+                            note=f"file={p['file']}; rows={len(df_up_qc)}; level_auto={stats.get('level_autofilled',0)}; mode={mode}",
+                        )
+
+                    merged, stats_all = apply_quality(merged, players_idx)
+                    rows_after = len(merged)
+
+                    summary = {
+                        "mode": mode,
+                        "fichiers_valides": len(parsed),
+                        "lignes_avant": rows_before,
+                        "lignes_importees": imported,
+                        "lignes_apres": rows_after,
+                        "teams_replaced": replaced,
+                        "qc_level_auto": stats_all.get("level_autofilled", 0),
+                        "qc_ir_mismatch": stats_all.get("ir_mismatch", 0),
+                        "qc_salary_level_suspect": stats_all.get("salary_level_suspect", 0),
+                    }
+                    st.markdown("### Résumé import")
+                    st.json(summary)
+
+                    if do_import:
+                        save_equipes(merged, e_path)
+                        st.session_state["equipes_df"] = merged
+                        st.success("✅ Import multi terminé + QC + reload.")
+                        st.rerun()
+
+        st.divider()
+        if st.button("🧱 Créer un fichier équipes vide (squelette)", use_container_width=True, key="adm_local_create_empty"):
+            df_empty = pd.DataFrame(columns=EQUIPES_COLUMNS)
+            save_equipes(df_empty, e_path)
+            st.session_state["equipes_df"] = df_empty
+            append_admin_log(log_path, action="INIT_EMPTY", owner="", player="", note="created empty equipes file")
+            st.success("✅ Fichier équipes vide créé.")
+            st.rerun()
+
+
+    with st.expander("🧼 Preview local + alertes", expanded=False):
+        df = load_equipes(e_path)
+        if df.empty:
+            st.info("Aucun fichier équipes local. Importe depuis Drive ou import local.")
+        else:
+            df_qc, stats = apply_quality(df, players_idx)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Lignes", stats["rows"])
+            c2.metric("Level auto", stats["level_autofilled"])
+            c3.metric("⚠️ IR mismatch", stats["ir_mismatch"])
+            c4.metric("⚠️ Salaire/Level", stats["salary_level_suspect"])
+            try:
+                st.dataframe(df_qc.head(140).style.apply(_preview_style_row, axis=1), use_container_width=True)
+            except Exception:
+                st.dataframe(df_qc.head(140), use_container_width=True)
+
+            if st.button("💾 Appliquer QC + sauvegarder + reload", use_container_width=True, key="adm_apply_qc"):
+                save_equipes(df_qc, e_path)
+                st.session_state["equipes_df"] = df_qc
+                st.success("✅ QC appliqué + sauvegarde + reload.")
                 st.rerun()
 
-        st.caption(f"Actuel: GC {_fmt_money(st.session_state.get('CAP_GC', cap_gc))} • CE {_fmt_money(st.session_state.get('CAP_CE', cap_ce))}")
+    # refresh after potential import
+    df = load_equipes(e_path)
+    owners = sorted([x for x in df.get("Propriétaire", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique() if x])
 
-    # ---- Players DB availability (should now resolve)
-    if not players_db_path:
-        st.warning("hockey.players.csv indisponible — fallback Level par Salaire.")
-        players_db = pd.DataFrame()
-    else:
-        players_db = _safe_read_csv(players_db_path)
+    # Si le fichier équipes est vide / pas encore importé, on permet quand même l'admin tooling.
+    DEFAULT_OWNERS = ["Canadiens","Cracheurs","Nordiques","Predateurs","Red_Wings","Whalers"]
+    if not owners:
+        owners = DEFAULT_OWNERS
+        st.info("Aucune équipe détectée dans le fichier local pour l’instant — fonctions admin disponibles quand même (anti-duplication sur la base des lignes existantes).")
 
-    # ---- Ensure equipes file exists
-    if not os.path.exists(equipes_csv):
-        base_cols = ["Proprietaire","Joueur","Slot","Salaire","Level","IR Date"]
-        _safe_write_csv(pd.DataFrame(columns=base_cols), equipes_csv)
+    # =====================================================
+    # ➕ ADD (ANTI-TRICHE)
+    # =====================================================
+    with st.expander("➕ Ajouter joueur(s) (anti-triche)", expanded=False):
+        owner = st.selectbox("Équipe", owners, key="adm_add_owner")
+        assign = st.radio("Assignation", ["GC - Actif", "GC - Banc", "CE - Actif", "CE - Banc"], horizontal=True, key="adm_add_assign")
+        statut = "Grand Club" if assign.startswith("GC") else "Club École"
+        slot = "Actif" if assign.endswith("Actif") else "Banc"
 
-    equipes_df = _safe_read_csv(equipes_csv)
-    if equipes_df.empty:
-        owners = _default_owners()
-    else:
-        col_owner = "Proprietaire" if "Proprietaire" in equipes_df.columns else ("Propriétaire" if "Propriétaire" in equipes_df.columns else "")
-        owners = sorted([str(x).strip() for x in equipes_df.get(col_owner, pd.Series([],dtype=str)).dropna().unique().tolist()]) if col_owner else []
-        owners = owners or _default_owners()
+        allow_override = st.checkbox("🛑 Autoriser override admin si joueur appartient déjà à une autre équipe", value=False, key="adm_add_override")
 
-    # ---- Add player block (always visible)
-    with st.expander("➕ Ajouter joueur(s) (Admin)", expanded=False):
-        if players_db.empty:
-            st.info("Players DB vide/introuvable. Ajoute data/hockey.players.csv pour activer la recherche.")
+        if players_idx:
+            all_names = sorted({v.get("Joueur","") for v in players_idx.values() if v.get("Joueur")})
+            q = st.text_input("🔎 Recherche joueur (fuzzy)", value="", key="adm_add_search").strip()
+            suggestions = all_names
+            if q:
+                # fuzzy léger sans dépendances
+                import difflib
+                suggestions = difflib.get_close_matches(q, all_names, n=25, cutoff=0.4)
+                if not suggestions:
+                    # fallback: contient
+                    ql = q.lower()
+                    suggestions = [n for n in all_names if ql in n.lower()][:25]
+
+            st.caption("Sélection max: 5 joueurs.")
+            selected = st.multiselect("Joueurs (suggestions)", suggestions, default=[], key="adm_add_players")
         else:
-            # determine player name column
-            name_col = "Joueur" if "Joueur" in players_db.columns else ("Player" if "Player" in players_db.columns else players_db.columns[0])
-            all_names = sorted([str(x).strip() for x in players_db[name_col].dropna().unique().tolist() if str(x).strip()])
-            q = st.text_input("Recherche joueur", value="", key="addp_query")
-            cand = _fuzzy_candidates(q, all_names, limit=50)
-            pick = st.multiselect("Choisir jusqu'à 5 joueurs", options=cand, default=[], max_selections=5, key="addp_pick")
+            raw = st.text_area("Saisir joueurs (1 par ligne)", height=120, key="adm_add_manual")
+            selected = [x.strip() for x in raw.splitlines() if x.strip()]
 
-            c1,c2,c3 = st.columns([1,1,1])
-            with c1:
-                team = st.selectbox("Équipe", options=owners, index=0, key="addp_team")
-            with c2:
-                scope = st.selectbox("Groupe", options=["GC","CE"], index=0, key="addp_scope")
-            with c3:
-                slot = st.selectbox("Slot", options=["Actif","Banc","IR","Mineur"], index=0, key="addp_slot")
+        if len(selected) > 5:
+            st.warning("Sélection limitée à 5 joueurs (les premiers ont été gardés).")
+            selected = selected[:5]
 
-            if st.button("✅ Ajouter à l'équipe", use_container_width=True, disabled=(len(pick)==0)):
-                # reload latest
-                dfm = _safe_read_csv(equipes_csv)
-                if dfm.empty:
-                    dfm = pd.DataFrame(columns=["Proprietaire","Joueur","Slot","Salaire","Level","IR Date"])
+        preview: List[Dict[str, Any]] = []
+        blocked: List[Tuple[str, str]] = []
 
-                # normalize owner col
-                if "Propriétaire" in dfm.columns and "Proprietaire" not in dfm.columns:
-                    dfm = dfm.rename(columns={"Propriétaire":"Proprietaire"})
+        for p in selected:
+            info = players_idx.get(_norm_player(p), {}) if players_idx else {}
+            name = info.get("Joueur", p)
+            cur_owner = find_player_owner(df, name)
+            if cur_owner and cur_owner != owner and not allow_override:
+                blocked.append((name, cur_owner))
+                continue
 
-                # existing map for anti-dup
-                existing = {}
-                if "Joueur" in dfm.columns and "Proprietaire" in dfm.columns:
-                    for _,r in dfm.iterrows():
-                        j = str(r.get("Joueur","")).strip().lower()
-                        o = str(r.get("Proprietaire","")).strip()
-                        if j:
-                            existing[j] = o
+            preview.append({
+                "Propriétaire": owner,
+                "Joueur": name,
+                "Pos": info.get("Pos", ""),
+                "Equipe": info.get("Equipe", ""),
+                "Salaire": int(info.get("Salaire", 0) or 0),
+                "Level": info.get("Level", "0"),
+                "Statut": statut,
+                "Slot": slot,
+                "IR Date": "",
+            })
 
-                added=0; blocked=[]
-                for nm in pick:
-                    key = str(nm).strip().lower()
-                    if key in existing and existing[key] and existing[key] != team:
-                        blocked.append(f"{nm} (déjà: {existing[key]})")
+        if blocked and not allow_override:
+            st.error("⛔ Anti-triche: ces joueurs appartiennent déjà à une autre équipe")
+            st.dataframe(pd.DataFrame(blocked, columns=["Joueur", "Équipe actuelle"]), use_container_width=True)
+
+        if preview:
+            st.dataframe(pd.DataFrame(preview).head(80), use_container_width=True)
+
+        if st.button("✅ Ajouter maintenant", use_container_width=True, key="adm_add_commit"):
+            if not preview:
+                st.warning("Rien à ajouter.")
+                st.stop()
+
+            existing = set(zip(df["Propriétaire"].astype(str).str.strip(), df["Joueur"].astype(str).str.strip()))
+            new_rows = []
+            skipped_dupe = 0
+            skipped_block = 0
+
+            for r in preview:
+                k = (str(r["Propriétaire"]).strip(), str(r["Joueur"]).strip())
+                if k in existing:
+                    skipped_dupe += 1
+                    continue
+                cur_owner = find_player_owner(df, r["Joueur"])
+                if cur_owner and cur_owner != owner and not allow_override:
+                    skipped_block += 1
+                    continue
+                new_rows.append(r)
+
+            if not new_rows:
+                st.warning(f"Rien à ajouter (doublons: {skipped_dupe}, bloqués: {skipped_block}).")
+                st.stop()
+
+            backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-add")
+            df2 = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+            df2_qc, stats = apply_quality(df2, players_idx)
+            save_equipes(df2_qc, e_path)
+            st.session_state["equipes_df"] = df2_qc
+
+            for r in new_rows:
+                append_admin_log(
+                    log_path,
+                    action="ADD",
+                    owner=r["Propriétaire"],
+                    player=r["Joueur"],
+                    to_statut=r["Statut"],
+                    to_slot=r["Slot"],
+                    note=f"assign={assign}; override={allow_override}"
+                )
+
+            st.success(f"✅ Ajout OK: {len(new_rows)} | doublons: {skipped_dupe} | bloqués: {skipped_block} | Level auto: {stats.get('level_autofilled',0)}")
+            st.rerun()
+
+    # =====================================================
+    # 🗑️ REMOVE
+    # =====================================================
+    with st.expander("🗑️ Retirer joueur(s) (avec confirmation)", expanded=False):
+        owner = st.selectbox("Équipe", owners, key="adm_rem_owner")
+        team = df[df["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
+
+        if team.empty:
+            st.info("Aucun joueur pour cette équipe.")
+        else:
+            team["__label__"] = team.apply(lambda r: f"{r['Joueur']}  —  {r.get('Pos','')}  —  {r.get('Statut','')} / {r.get('Slot','')}", axis=1)
+            choices = team["__label__"].tolist()
+            sel = st.multiselect("Sélectionner joueur(s) à retirer", choices, key="adm_rem_sel")
+
+            confirm = st.checkbox("Je confirme la suppression", key="adm_rem_confirm")
+
+            if st.button("🗑️ Retirer maintenant", use_container_width=True, key="adm_rem_commit"):
+                if not sel:
+                    st.warning("Sélectionne au moins 1 joueur.")
+                    st.stop()
+                if not confirm:
+                    st.warning("Coche la confirmation.")
+                    st.stop()
+
+                sel_rows = team[team["__label__"].isin(sel)].copy()
+                if sel_rows.empty:
+                    st.warning("Sélection invalide.")
+                    st.stop()
+
+                keys = set(zip(
+                    sel_rows["Propriétaire"].astype(str),
+                    sel_rows["Joueur"].astype(str),
+                    sel_rows["Statut"].astype(str),
+                    sel_rows["Slot"].astype(str),
+                ))
+
+                def _keep_row(r):
+                    k = (str(r["Propriétaire"]), str(r["Joueur"]), str(r["Statut"]), str(r["Slot"]))
+                    return k not in keys
+
+                backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-remove")
+                before = len(df)
+                df2 = df[df.apply(_keep_row, axis=1)].copy()
+                removed = before - len(df2)
+
+                df2_qc, _ = apply_quality(df2, players_idx)
+                save_equipes(df2_qc, e_path)
+                st.session_state["equipes_df"] = df2_qc
+
+                for _, r in sel_rows.iterrows():
+                    append_admin_log(
+                        log_path,
+                        action="REMOVE",
+                        owner=r["Propriétaire"],
+                        player=r["Joueur"],
+                        from_statut=r.get("Statut", ""),
+                        from_slot=r.get("Slot", ""),
+                        note="removed by admin"
+                    )
+
+                st.success(f"✅ Retrait OK: {removed} joueur(s).")
+                st.rerun()
+
+    # =====================================================
+    # 🔁 MOVE GC ↔ CE
+    # =====================================================
+    with st.expander("🔁 Déplacer GC ↔ CE (auto-slot)", expanded=False):
+        owner = st.selectbox("Équipe", owners, key="adm_move_owner")
+        team = df[df["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
+
+        if team.empty:
+            st.info("Aucun joueur pour cette équipe.")
+        else:
+            team["__label__"] = team.apply(lambda r: f"{r['Joueur']}  —  {r.get('Pos','')}  —  {r.get('Statut','')} / {r.get('Slot','')}", axis=1)
+            choices = team["__label__"].tolist()
+            sel = st.multiselect("Sélectionner joueur(s) à déplacer", choices, key="adm_move_sel")
+
+            dest_statut = st.radio("Destination", ["Grand Club", "Club École"], horizontal=True, key="adm_move_dest")
+            slot_mode = st.radio("Slot destination", ["Auto (selon Statut)", "Garder Slot actuel", "Forcer Actif", "Forcer Banc"], horizontal=True, key="adm_move_slot_mode")
+            keep_ir = st.checkbox("Conserver IR si joueur déjà IR", value=True, key="adm_move_keep_ir")
+
+            if st.button("🔁 Appliquer déplacement", use_container_width=True, key="adm_move_commit"):
+                if not sel:
+                    st.warning("Sélectionne au moins 1 joueur.")
+                    st.stop()
+
+                sel_rows = team[team["__label__"].isin(sel)].copy()
+                if sel_rows.empty:
+                    st.warning("Sélection invalide.")
+                    st.stop()
+
+                keyset = set(zip(
+                    sel_rows["Propriétaire"].astype(str),
+                    sel_rows["Joueur"].astype(str),
+                    sel_rows["Statut"].astype(str),
+                    sel_rows["Slot"].astype(str),
+                ))
+
+                backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-move")
+                df2 = df.copy()
+                moved = 0
+                for idx, r in df2.iterrows():
+                    k = (str(r["Propriétaire"]), str(r["Joueur"]), str(r["Statut"]), str(r["Slot"]))
+                    if k not in keyset:
                         continue
 
-                    # salary & level if exist
-                    row = players_db.loc[players_db[name_col]==nm].head(1)
-                    salaire = ""
-                    level = ""
-                    if not row.empty:
-                        r0 = row.iloc[0].to_dict()
-                        # try salary columns
-                        for sc in ["Salaire","Salary","Cap Hit","CapHit","AAV"]:
-                            if sc in r0 and str(r0.get(sc,"")).strip():
-                                salaire = r0.get(sc,"")
-                                break
-                        if "Level" in r0 and str(r0.get("Level","")).strip():
-                            level = str(r0.get("Level","")).strip()
+                    from_statut = str(r["Statut"])
+                    from_slot = str(r["Slot"])
 
-                    dfm = pd.concat([dfm, pd.DataFrame([{
-                        "Proprietaire": team,
-                        "Joueur": nm,
-                        "Slot": f"{scope} {slot}",
-                        "Salaire": salaire,
-                        "Level": level,
-                        "IR Date": ""
-                    }])], ignore_index=True)
-                    existing[key]=team
-                    added += 1
+                    df2.at[idx, "Statut"] = dest_statut
 
-                ok = _safe_write_csv(dfm, equipes_csv)
-                st.success(f"✅ Ajoutés: {added} • Sauvegarde: {ok}")
-                if blocked:
-                    st.warning("⛔ Bloqués (déjà dans une autre équipe):\n- " + "\n- ".join(blocked))
-                st.cache_data.clear()
+                    if slot_mode.startswith("Auto"):
+                        df2.at[idx, "Slot"] = auto_slot_for_statut(dest_statut, current_slot=from_slot, keep_ir=keep_ir)
+                    elif slot_mode.startswith("Garder"):
+                        df2.at[idx, "Slot"] = from_slot
+                    elif slot_mode.endswith("Actif"):
+                        df2.at[idx, "Slot"] = "Actif"
+                    elif slot_mode.endswith("Banc"):
+                        df2.at[idx, "Slot"] = "Banc"
+                    else:
+                        df2.at[idx, "Slot"] = auto_slot_for_statut(dest_statut, current_slot=from_slot, keep_ir=keep_ir)
+
+                    moved += 1
+
+                    append_admin_log(
+                        log_path,
+                        action="MOVE",
+                        owner=r["Propriétaire"],
+                        player=r["Joueur"],
+                        from_statut=from_statut,
+                        from_slot=from_slot,
+                        to_statut=dest_statut,
+                        to_slot=str(df2.at[idx, "Slot"]),
+                        note=f"slot_mode={slot_mode}"
+                    )
+
+                df2_qc, stats = apply_quality(df2, players_idx)
+                save_equipes(df2_qc, e_path)
+                st.session_state["equipes_df"] = df2_qc
+
+                st.success(f"✅ Move OK: {moved} joueur(s) | Level auto: {stats.get('level_autofilled',0)}")
                 st.rerun()
+
+    # =====================================================
+    # 📋 HISTORIQUE ADMIN
+    # =====================================================
+    with st.expander("📋 Historique admin (ADD/REMOVE/MOVE/IMPORT)", expanded=False):
+        if not os.path.exists(log_path):
+            st.info("Aucun historique pour l’instant.")
+        else:
+            try:
+                lg = pd.read_csv(log_path).sort_values("timestamp", ascending=False)
+
+                f1, f2, f3 = st.columns(3)
+                with f1:
+                    act = st.multiselect("Action", sorted(lg["action"].dropna().unique()), default=[], key="adm_log_act")
+                with f2:
+                    own = st.multiselect("Équipe", sorted(lg["owner"].dropna().unique()), default=[], key="adm_log_own")
+                with f3:
+                    q = st.text_input("Recherche joueur", value="", key="adm_log_q").strip().lower()
+
+                view = lg.copy()
+                if act:
+                    view = view[view["action"].isin(act)]
+                if own:
+                    view = view[view["owner"].isin(own)]
+                if q:
+                    view = view[view["player"].astype(str).str.lower().str.contains(q, na=False)]
+
+                st.dataframe(view.head(400), use_container_width=True)
+            except Exception as e:
+                st.error(f"Erreur log: {e}")
+
+    st.caption("✅ Admin: OAuth Drive / Import local • Add/Remove/Move • Caps bars • Log • QC/Level auto")
