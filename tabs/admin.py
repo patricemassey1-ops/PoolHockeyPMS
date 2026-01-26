@@ -27,6 +27,11 @@ import pandas as pd
 import time
 import streamlit as st
 
+# ---- Paths (module defaults)
+# DATA_DIR is resolved/overridden inside render(ctx); must exist at import time for helper functions.
+DATA_DIR = os.path.join(os.getcwd(), "data") if os.path.isdir(os.path.join(os.getcwd(), "data")) else "data"
+
+
 # ---- Optional: Google Drive client (if installed)
 try:
     from googleapiclient.discovery import build
@@ -789,8 +794,8 @@ def render(ctx: dict) -> None:
     if not ctx.get("is_admin"):
         st.warning("Accès admin requis.")
         return
-
-    DATA_DIR = str(ctx.get("DATA_DIR") or "Data")
+    global DATA_DIR
+    DATA_DIR = str(ctx.get("DATA_DIR") or "data")
     os.makedirs(DATA_DIR, exist_ok=True)
 
     season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
