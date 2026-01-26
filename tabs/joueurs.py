@@ -266,6 +266,31 @@ def save_players_db(df: pd.DataFrame, path: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     out.to_csv(path, index=False, na_rep="")
 
+
+def _ensure_rowid(df: pd.DataFrame) -> pd.DataFrame:
+    """Ajoute une colonne __rowid (volatile) si absente, pour pouvoir cibler la ligne sélectionnée."""
+    if df is None or df.empty:
+        return df
+    if "__rowid" not in df.columns:
+        df = df.copy()
+        df["__rowid"] = range(len(df))
+    return df
+
+
+def _set_nhl_id_by_rowid(df: pd.DataFrame, rowid: int, nhl_id_val) -> pd.DataFrame:
+    """Set nhl_id sur la ligne __rowid == rowid (en ajoutant __rowid si nécessaire)."""
+    df = _ensure_rowid(df)
+    if df is None or df.empty:
+        return df
+    try:
+        nhl_int = int(nhl_id_val) if nhl_id_val not in (None, "") else None
+    except Exception:
+        nhl_int = None
+    if nhl_int is None:
+        return df
+    df.loc[df["__rowid"] == int(rowid), "nhl_id"] = nhl_int
+    return df
+
 # ----------------------------
 # NHL Images
 # ----------------------------
@@ -826,6 +851,8 @@ def render_tab_joueurs():
     left, right = st.columns([1, 2])
     nhl_id = r.get("nhl_id")
     flag_url = str(r.get("Flag") or "").strip()
+    missing_nhl = False
+
 
     with left:
         if pd.notna(nhl_id):
@@ -833,83 +860,7 @@ def render_tab_joueurs():
             st.caption(f"NHL ID: {int(nhl_id)}")
         else:
             st.info("Photo NHL et stats live indisponibles (nhl_id manquant).")
-
-            with st.expander("🔗 Associer NHL_ID (activer photo + stats live)", expanded=True):
-                default_q = player_last_first_to_first_last(player_name)
-                q = st.text_input(
-                    "Recherche NHL (nom / prénom)",
-                    value=default_q if default_q != "—" else str(player_name or "").strip(),
-                    key=f"nhl_q__{rowid}",
-                )
-
-                # --- Auto association (best effort)
-                if st.button("🤖 Associer automatiquement", key=f"nhl_auto__{rowid}"):
-                    # Cherche large à partir du nom (et tente un match avec équipe/pos/âge)
-                    auto_results = nhl_search_players(default_q, limit=25)
-                    best_id, best_lbl, labels, id_map, confident = _auto_pick_nhl_id(
-                        player_name=default_q,
-                        team_abbrev=r.get("Team"),
-                        pos_bucket=_pos_bucket(r.get("Position")),
-                        age=r.get("Age"),
-                        results=auto_results,
-                    )
-                    if best_id and confident:
-                        df.loc[df["__rowid"] == rowid, "nhl_id"] = int(best_id)
-                        save_players_db(df, PLAYERS_PATH)
-                        load_players_db.clear()
-                        st.success(f"✅ NHL_ID auto-associé: {best_id} ({best_lbl})")
-                        st.rerun()
-                    elif labels:
-                        st.session_state[f"nhl_results__{rowid}"] = auto_results
-                        st.warning("Match automatique incertain — sélectionne le bon joueur ci-dessous 👇")
-                        # Pré-sélection du meilleur
-                        st.session_state[f"nhl_pick__{rowid}"] = best_lbl
-                    else:
-                        st.warning("Aucun match trouvé automatiquement. Essaie la recherche manuelle.")
-
-                if st.button("🔎 Chercher dans la NHL", key=f"nhl_search__{rowid}"):
-                    st.session_state[f"nhl_results__{rowid}"] = nhl_search_players(q, limit=25)
-
-                results = st.session_state.get(f"nhl_results__{rowid}", [])
-                if results:
-                    labels = []
-                    id_map = {}
-                    for it in results:
-                        pid = it.get("playerId") or it.get("player_id") or it.get("id")
-                        if not pid:
-                            continue
-                        first = it.get("firstName", "") or ""
-                        last = it.get("lastName", "") or ""
-                        full = (f"{first} {last}").strip() or safe_str(it.get("name"))
-                        team = (it.get("teamAbbrev") or it.get("team") or "").strip()
-                        pos = (it.get("position") or it.get("positionCode") or "").strip()
-                        bd = (it.get("birthDate") or it.get("birthdate") or "").strip()
-                        lbl = f"{full} — {team} {pos} — {bd} — ID {pid}".strip()
-                        labels.append(lbl)
-                        id_map[lbl] = int(pid)
-
-                    if labels:
-                        pick_lbl = st.radio(
-                            "Choisis le bon joueur:",
-                            labels,
-                            index=0,
-                            key=f"nhl_pick__{rowid}",
-                        )
-                        if st.button("✅ Enregistrer NHL_ID", key=f"nhl_save__{rowid}"):
-                            chosen_id = id_map.get(pick_lbl)
-                            if chosen_id:
-                                df.loc[df["__rowid"] == rowid, "nhl_id"] = int(chosen_id)
-                                save_players_db(df, PLAYERS_PATH)
-                                load_players_db.clear()
-                                st.success(f"✅ NHL_ID enregistré: {chosen_id} (hockey.players.csv mis à jour)")
-                                st.rerun()
-                    else:
-                        st.warning("Aucun résultat exploitable.")
-                else:
-                    st.caption("Tip: essaie « Prénom Nom » ou seulement le nom de famille.")
-
-        if flag_url.startswith("http"):
-            st.image(flag_url, caption=safe_str(r.get("Country")), width=90)
+            missing_nhl = True
 
     with right:
         info_cols = st.columns(4)
@@ -920,6 +871,65 @@ def render_tab_joueurs():
 
         st.markdown("### 📊 Stats (PRO — CSV)")
         render_local_pro_panel(row)
+
+    # ---- Associer NHL_ID (centré et plus étroit) si manquant
+    if missing_nhl:
+        cL, cM, cR = st.columns([1, 2, 1])
+        with cM:
+            with st.expander("🔗 Associer NHL_ID (activer photo + stats live)", expanded=False):
+                default_q = player_last_first_to_first_last(player_name)
+                q = st.text_input(
+                    "Recherche NHL (nom / prénom)",
+                    value=default_q if default_q != "—" else str(player_name or "").strip(),
+                    key=f"nhl_q__{rowid}",
+                )
+
+                # --- Auto association (best effort)
+                if st.button("🤖 Associer automatiquement", key=f"nhl_auto__{rowid}"):
+                    auto_results = nhl_search_players(default_q, limit=25)
+                    best_id, best_lbl, labels, id_map, confident = _auto_pick_nhl_id(
+                        player_name=default_q,
+                        team_abbrev=r.get("Team"),
+                        pos_bucket=_pos_bucket(r.get("Position")),
+                        age=r.get("Age"),
+                        results=auto_results,
+                    )
+                    if best_id and confident:
+                        df = _set_nhl_id_by_rowid(df, rowid, best_id)
+                        save_players_db(df, PLAYERS_PATH)
+                        load_players_db.clear()
+                        st.success(f"✅ NHL_ID auto-associé: {best_id} ({best_lbl})")
+                        st.rerun()
+                    elif labels:
+                        st.session_state[f"nhl_results__{rowid}"] = auto_results
+                        st.warning("Match automatique incertain — sélectionne le bon joueur ci-dessous 👇")
+                        st.session_state[f"nhl_pick__{rowid}"] = best_lbl
+                    else:
+                        st.warning("Aucun match trouvé automatiquement. Essaie la recherche manuelle.")
+
+                if st.button("🔎 Chercher dans la NHL", key=f"nhl_search__{rowid}"):
+                    st.session_state[f"nhl_results__{rowid}"] = nhl_search_players(q, limit=25)
+
+                results = st.session_state.get(f"nhl_results__{rowid}", [])
+                if results:
+                    labels, id_map = nhl_results_to_labels(results)
+                    pick = st.radio(
+                        "Résultats",
+                        options=labels,
+                        index=labels.index(st.session_state.get(f"nhl_pick__{rowid}", labels[0])) if labels else 0,
+                        key=f"nhl_pick__{rowid}",
+                    )
+                    if st.button("✅ Enregistrer NHL_ID", key=f"nhl_save__{rowid}"):
+                        chosen_id = id_map.get(pick)
+                        if chosen_id:
+                            df = _set_nhl_id_by_rowid(df, rowid, chosen_id)
+                            save_players_db(df, PLAYERS_PATH)
+                            load_players_db.clear()
+                            st.success(f"✅ NHL_ID enregistré: {chosen_id} ({pick})")
+                            st.rerun()
+                else:
+                    st.caption("Astuce: tape le nom complet (ex: 'Michael Hage') puis lance la recherche.")
+
 
     # ---- API PRO TABLE (seulement si nhl_id présent)
     if pd.notna(nhl_id):
