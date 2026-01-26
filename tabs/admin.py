@@ -24,19 +24,18 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import time
 import streamlit as st
 
 # ---- Optional: Google Drive client (if installed)
 try:
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+    from googleapiclient.http import MediaIoBaseDownload
     from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
 except Exception:
     build = None
     MediaIoBaseDownload = None
     Credentials = None
-    Request = None
 
 # ---- Optional: project-specific OAuth helpers (si ton projet les a déjà)
 # On essaie plusieurs noms possibles, sans casser si absent.
@@ -49,10 +48,6 @@ for _mod, _fn_ui, _fn_enabled, _fn_service in [
     ("services.gdrive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
     ("services.drive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
     ("services.drive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
-    ("services.drive", "render_drive_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
-    ("services.drive", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
-    ("services.auth", "render_drive_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
-
 ]:
     try:
         m = __import__(_mod, fromlist=[_fn_ui, _fn_enabled, _fn_service])
@@ -69,6 +64,179 @@ try:
     from google_auth_oauthlib.flow import Flow  # type: ignore
 except Exception:
     Flow = None
+
+
+# ============================================================
+# Drive OAuth (refresh_token) — robuste, sans UI
+# ============================================================
+
+def _drive_service_from_refresh_token_secrets() -> Optional[Any]:
+    """
+    Construit un service Google Drive via refresh_token dans st.secrets["gdrive_oauth"].
+    Nécessite: google-auth, google-api-python-client.
+    """
+    if build is None or Credentials is None:
+        return None
+    cfg = st.secrets.get("gdrive_oauth", {}) or {}
+    rt = str(cfg.get("refresh_token", "") or "")
+    cid = str(cfg.get("client_id", "") or "")
+    csec = str(cfg.get("client_secret", "") or "")
+    token_uri = str(cfg.get("token_uri", "") or "https://oauth2.googleapis.com/token")
+    if not (rt and cid and csec and token_uri):
+        return None
+    try:
+        from google.auth.transport.requests import Request  # type: ignore
+        creds = Credentials(
+            token=None,
+            refresh_token=rt,
+            token_uri=token_uri,
+            client_id=cid,
+            client_secret=csec,
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        creds.refresh(Request())
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
+    except Exception:
+        return None
+
+
+def _fmt_money(v: int) -> str:
+    try:
+        v = int(v)
+    except Exception:
+        v = 0
+    return f"{v:,}".replace(",", " ") + " $"
+
+
+def _parse_money(s: str) -> int:
+    s = str(s or "")
+    s = s.replace("$", "").replace(" ", "").replace(",", "")
+    # allow dots in input like 1.000.000
+    s = s.replace(".", "")
+    try:
+        return int(float(s))
+    except Exception:
+        return 0
+
+
+def _validate_cap(v: int) -> Tuple[bool, str]:
+    if v < 1_000_000:
+        return False, "Valeur trop basse (< 1 000 000)."
+    if v > 200_000_000:
+        return False, "Valeur trop haute (> 200 000 000)."
+    return True, ""
+
+
+def _settings_local_path() -> str:
+    return os.path.join(DATA_DIR, "settings.csv")
+
+
+def _load_settings_local() -> Dict[str, Any]:
+    p = _settings_local_path()
+    if not os.path.exists(p):
+        return {}
+    try:
+        df = pd.read_csv(p)
+        out = {}
+        for _, r in df.iterrows():
+            k = str(r.get("key", "")).strip()
+            if not k:
+                continue
+            out[k] = r.get("value")
+        return out
+    except Exception:
+        return {}
+
+
+def _save_settings_local(settings: Dict[str, Any]) -> bool:
+    try:
+        rows = [{"key": k, "value": settings[k]} for k in sorted(settings.keys())]
+        pd.DataFrame(rows).to_csv(_settings_local_path(), index=False)
+        return True
+    except Exception:
+        return False
+
+
+def _drive_upload_bytes(svc: Any, folder_id: str, name: str, data: bytes, mime: str) -> Optional[Dict[str, Any]]:
+    if not svc:
+        return None
+    try:
+        from googleapiclient.http import MediaInMemoryUpload  # type: ignore
+        media = MediaInMemoryUpload(data, mimetype=mime, resumable=False)
+        meta = {"name": name}
+        if folder_id:
+            meta["parents"] = [folder_id]
+        res = svc.files().create(
+            body=meta,
+            media_body=media,
+            fields="id,name,webViewLink",
+            supportsAllDrives=True
+        ).execute()
+        return res
+    except Exception:
+        return None
+
+
+def _drive_download_file_bytes(svc: Any, file_id: str) -> Optional[bytes]:
+    if not svc or not file_id:
+        return None
+    try:
+        request = svc.files().get_media(fileId=file_id, supportsAllDrives=True)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            _, done = downloader.next_chunk()
+        return fh.getvalue()
+    except Exception:
+        return None
+
+
+def _drive_load_settings_csv(svc: Any, folder_id: str) -> Dict[str, Any]:
+    """Cherche settings.csv dans le folder et le charge (clé/valeur)."""
+    if not svc or not folder_id:
+        return {}
+    try:
+        q = f"'{folder_id}' in parents and trashed=false and name='settings.csv'"
+        res = svc.files().list(
+            q=q,
+            fields="files(id,name,modifiedTime)",
+            pageSize=10,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        files = res.get("files", []) or []
+        if not files:
+            return {}
+        fid = files[0]["id"]
+        b = _drive_download_file_bytes(svc, fid)
+        if not b:
+            return {}
+        df = pd.read_csv(io.BytesIO(b))
+        out = {}
+        for _, r in df.iterrows():
+            k = str(r.get("key", "")).strip()
+            if not k:
+                continue
+            out[k] = r.get("value")
+        return out
+    except Exception:
+        return {}
+
+
+def _zip_data_dir_bytes() -> Optional[bytes]:
+    data_dir = DATA_DIR
+    if not os.path.isdir(data_dir):
+        return None
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for root, _, files in os.walk(data_dir):
+            for f in files:
+                p = os.path.join(root, f)
+                arc = os.path.relpath(p, data_dir)
+                z.write(p, arcname=arc)
+    return buf.getvalue()
+
 
 
 def render_drive_oauth_connect_ui() -> None:
@@ -159,94 +327,6 @@ EQUIPES_COLUMNS = [
 ]
 DEFAULT_CAP_GC = 88_000_000
 DEFAULT_CAP_CE = 12_000_000
-# ============================================================
-# SETTINGS (caps) — local + Drive
-# ============================================================
-SETTINGS_FILENAME = "settings.csv"
-
-def _fmt_money(n: int) -> str:
-    try:
-        n = int(n)
-    except Exception:
-        n = 0
-    return f"{n:,}".replace(",", " ") + " $"
-
-def _parse_money(s: str) -> int:
-    """Parse '1 000 000 $' / '1000000' / '1,000,000' → int."""
-    s = str(s or "")
-    digits = re.sub(r"[^0-9]", "", s)
-    try:
-        return int(digits) if digits else 0
-    except Exception:
-        return 0
-
-def _settings_path(data_dir: str) -> str:
-    return os.path.join(str(data_dir or ""), SETTINGS_FILENAME)
-
-def _load_settings_local(data_dir: str) -> dict:
-    path = _settings_path(data_dir)
-    if not path or not os.path.exists(path):
-        return {}
-    try:
-        df = pd.read_csv(path)
-        if df.empty:
-            return {}
-        row = df.iloc[0].to_dict()
-        return {
-            "CAP_GC": int(pd.to_numeric(row.get("CAP_GC", None), errors="coerce") or 0),
-            "CAP_CE": int(pd.to_numeric(row.get("CAP_CE", None), errors="coerce") or 0),
-        }
-    except Exception:
-        return {}
-
-def _save_settings_local(data_dir: str, cap_gc: int, cap_ce: int) -> str:
-    os.makedirs(str(data_dir or ""), exist_ok=True)
-    path = _settings_path(data_dir)
-    df = pd.DataFrame([{"CAP_GC": int(cap_gc), "CAP_CE": int(cap_ce)}])
-    df.to_csv(path, index=False)
-    return path
-
-def _drive_upsert_bytes_csv(svc, folder_id: str, filename: str, content_bytes: bytes) -> bool:
-    """Create or update a file in Drive folder. Returns True on success."""
-    if not svc or not folder_id or not filename:
-        return False
-    try:
-        from googleapiclient.http import MediaIoBaseUpload
-        import io as _io
-        q = f"'{folder_id}' in parents and name='{filename}' and trashed=false"
-        res = svc.files().list(q=q, fields="files(id,name)", pageSize=10).execute()
-        files = (res or {}).get("files", []) or []
-        media = MediaIoBaseUpload(_io.BytesIO(content_bytes), mimetype="text/csv", resumable=False)
-        if files:
-            file_id = files[0]["id"]
-            svc.files().update(fileId=file_id, media_body=media).execute()
-        else:
-            body = {"name": filename, "parents": [folder_id]}
-            svc.files().create(body=body, media_body=media, fields="id").execute()
-        return True
-    except Exception:
-        return False
-
-def _drive_download_settings(svc, folder_id: str, filename: str) -> dict:
-    if not svc or not folder_id or not filename:
-        return {}
-    try:
-        q = f"'{folder_id}' in parents and name='{filename}' and trashed=false"
-        res = svc.files().list(q=q, fields="files(id,name)", pageSize=10).execute()
-        files = (res or {}).get("files", []) or []
-        if not files:
-            return {}
-        b = _drive_download_bytes(svc, files[0]["id"])
-        df = _read_csv_bytes(b)
-        if not isinstance(df, pd.DataFrame) or df.empty:
-            return {}
-        row = df.iloc[0].to_dict()
-        return {
-            "CAP_GC": int(pd.to_numeric(row.get("CAP_GC", None), errors="coerce") or 0),
-            "CAP_CE": int(pd.to_numeric(row.get("CAP_CE", None), errors="coerce") or 0),
-        }
-    except Exception:
-        return {}
 
 
 # ============================================================
@@ -635,49 +715,12 @@ def append_admin_log(
 # ============================================================
 # DRIVE (OAuth) — get service
 # ============================================================
-
-def _drive_service_from_secrets_refresh_token() -> Optional[Any]:
-    """Crée un service Drive via refresh_token dans st.secrets['gdrive_oauth'] (connexion silencieuse).
-    Requiert: client_id, client_secret, refresh_token, token_uri.
-    """
-    try:
-        g = st.secrets.get("gdrive_oauth")  # type: ignore[attr-defined]
-    except Exception:
-        g = None
-    if not g:
-        return None
-    client_id = str(g.get("client_id") or "").strip()
-    client_secret = str(g.get("client_secret") or "").strip()
-    refresh_token = str(g.get("refresh_token") or "").strip()
-    token_uri = str(g.get("token_uri") or "https://oauth2.googleapis.com/token").strip()
-    if not (client_id and client_secret and refresh_token and token_uri):
-        return None
-    try:
-        creds = Credentials(
-            token=None,
-            refresh_token=refresh_token,
-            token_uri=token_uri,
-            client_id=client_id,
-            client_secret=client_secret,
-            scopes=["https://www.googleapis.com/auth/drive"],
-        )
-        # force refresh maintenant (valide creds.token)
-        creds.refresh(Request())
-        return build("drive", "v3", credentials=creds)
-    except Exception:
-        return None
-
 def _drive_service_from_existing_oauth() -> Optional[Any]:
     """
     Essaie d'obtenir un service Drive "comme avant" :
     1) si ton projet a déjà un helper (services.*drive_oauth*), on l'utilise
     2) sinon, on tente st.session_state['drive_creds'] (dict OAuth) -> google.oauth2.credentials
     """
-    # 0) secrets refresh_token (connexion silencieuse)
-    svc = _drive_service_from_secrets_refresh_token()
-    if svc is not None:
-        return svc
-
     # 1) helper projet
     if callable(_oauth_get_service):
         try:
@@ -690,33 +733,7 @@ def _drive_service_from_existing_oauth() -> Optional[Any]:
         except Exception:
             pass
 
-    # 2) secrets (refresh_token) — pas besoin d'UI OAuth
-    try:
-        s = st.secrets.get('gdrive_oauth', {})
-    except Exception:
-        s = {}
-    if build is not None and Credentials is not None and Request is not None and isinstance(s, dict):
-        rt = (s.get('refresh_token') or '').strip()
-        cid = (s.get('client_id') or '').strip()
-        csec = (s.get('client_secret') or '').strip()
-        turi = (s.get('token_uri') or 'https://oauth2.googleapis.com/token').strip()
-        if rt and cid and csec:
-            try:
-                creds = Credentials(
-                    token=None,
-                    refresh_token=rt,
-                    token_uri=turi,
-                    client_id=cid,
-                    client_secret=csec,
-                    scopes=['https://www.googleapis.com/auth/drive'],
-                )
-                # Force refresh token -> access token
-                creds.refresh(Request())
-                return build('drive', 'v3', credentials=creds)
-            except Exception:
-                pass
-
-    # 3) session_state creds dict
+    # 2) session_state creds dict
     if build is None or Credentials is None:
         return None
     creds_dict = st.session_state.get("drive_creds")
@@ -724,37 +741,15 @@ def _drive_service_from_existing_oauth() -> Optional[Any]:
         return None
     try:
         creds = Credentials.from_authorized_user_info(creds_dict)
-        return build("drive", "v3", credentials=creds)
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception:
-        return None
+        pass
 
-
-def _drive_upload_bytes(svc: Any, folder_id: str, filename: str, data: bytes, mimetype: str = "application/octet-stream") -> Optional[dict]:
-    """Upload bytes to Google Drive folder. Returns file metadata dict or None."""
-    if not svc or not folder_id or not filename:
-        return None
-    bio = io.BytesIO(data)
-    media = MediaIoBaseUpload(bio, mimetype=mimetype, resumable=False)
-    body = {"name": filename, "parents": [folder_id]}
-    try:
-        return svc.files().create(body=body, media_body=media, fields="id,name,webViewLink,createdTime").execute()
-    except Exception:
-        return None
-
-def _zip_folder_bytes(folder_path: str, arc_prefix: str = "") -> bytes:
-    """Zip a folder into bytes."""
-    folder_path = str(folder_path or "")
-    bio = io.BytesIO()
-    with zipfile.ZipFile(bio, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        if folder_path and os.path.isdir(folder_path):
-            for root, _, files in os.walk(folder_path):
-                for fn in files:
-                    fp = os.path.join(root, fn)
-                    rel = os.path.relpath(fp, folder_path)
-                    arc = os.path.join(arc_prefix, rel) if arc_prefix else rel
-                    zf.write(fp, arcname=arc)
-    bio.seek(0)
-    return bio.read()
+    # 3) refresh_token secrets (connexion silencieuse)
+    svc = _drive_service_from_refresh_token_secrets()
+    if svc:
+        return svc
+    return None
 
 def _drive_list_csv_files(svc: Any, folder_id: str) -> List[Dict[str, str]]:
     if not svc or not folder_id:
@@ -814,133 +809,137 @@ def render(ctx: dict) -> None:
             except Exception:
                 st.info("UI OAuth présente mais a échoué — vérifie tes secrets OAuth.")
         else:
-            st.caption("UI OAuth non détectée dans services/*. (Ce n'est pas bloquant si tes secrets contiennent un refresh_token.)")
-            try:
-                s = st.secrets.get('gdrive_oauth', {})
-            except Exception:
-                s = {}
-            if isinstance(s, dict) and (s.get('refresh_token') and s.get('client_id') and s.get('client_secret')):
-                st.success("OAuth configuré via refresh_token (connexion silencieuse).")
-
+            st.caption("UI OAuth non détectée dans services/*. OK si tu utilises un refresh_token dans Secrets (connexion silencieuse).")
             if callable(_oauth_enabled):
                 try:
                     st.write("oauth_drive_enabled():", bool(_oauth_enabled()))
                 except Exception:
                     pass
 
-    # ---- caps inputs
-    # ---- Caps (GC/CE) — settings.csv (local + Drive)
-    # Auto-load local settings once per session
-    if not st.session_state.get("_caps_loaded_once"):
-        st.session_state["_caps_loaded_once"] = True
-        _local = _load_settings_local(DATA_DIR)
-        if _local.get("CAP_GC"):
-            st.session_state["CAP_GC"] = int(_local["CAP_GC"])
-        else:
-            st.session_state.setdefault("CAP_GC", int(DEFAULT_CAP_GC))
-        if _local.get("CAP_CE"):
-            st.session_state["CAP_CE"] = int(_local["CAP_CE"])
-        else:
-            st.session_state.setdefault("CAP_CE", int(DEFAULT_CAP_CE))
-    else:
-        st.session_state.setdefault("CAP_GC", int(DEFAULT_CAP_GC))
-        st.session_state.setdefault("CAP_CE", int(DEFAULT_CAP_CE))
+    # ---- caps inputs (persistants via settings.csv)
+    # On charge d'abord local, sinon Drive (si dispo)
+    st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
+    st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
-    
-# =====================================================
-# 🧪 TEST DRIVE WRITE + BACKUP COMPLET (DATA)
-# =====================================================
-with st.expander("🧪 Test Drive write + backup complet", expanded=False):
-    folder_id = str(ctx.get("gdrive_folder_id") or ctx.get("folder_id") or st.secrets.get("gdrive_folder_id", "")).strip()
-    st.write(f"folder_id: `{folder_id}`")
-    svc_test = _drive_service_from_existing_oauth()
-    drive_ready = bool(svc_test) and bool(folder_id)
-    if not drive_ready:
-        st.warning("Drive non disponible pour l’écriture (OAuth/refresh_token manquant ou folder_id vide).")
-    else:
-        st.success("Drive prêt ✅ (connexion silencieuse via refresh_token).")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🧪 Écrire un fichier TEST dans Drive", use_container_width=True):
-                ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-                payload = f"Drive test write OK — {ts}\nfolder_id={folder_id}\n".encode("utf-8")
-                meta = _drive_upload_bytes(svc_test, folder_id, f"TEST_WRITE_{ts}.txt", payload, mimetype="text/plain")
-                if meta and meta.get("id"):
-                    st.success(f"✅ Test OK — fichier créé: {meta.get('name')}")
-                    if meta.get("webViewLink"):
-                        st.link_button("Ouvrir dans Drive", meta["webViewLink"])
-                else:
-                    st.error("❌ Échec du test d’écriture (voir logs).")
-        with col2:
-            if st.button("🗜️ Backup complet (zip /data → Drive)", use_container_width=True):
-                ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-                zip_bytes = _zip_folder_bytes(DATA_DIR, arc_prefix=os.path.basename(DATA_DIR.rstrip('/')) or "data")
-                fname = f"BACKUP_DATA_{ts}.zip"
-                meta = _drive_upload_bytes(svc_test, folder_id, fname, zip_bytes, mimetype="application/zip")
-                if meta and meta.get("id"):
-                    st.success(f"✅ Backup OK — {meta.get('name')}")
-                    if meta.get("webViewLink"):
-                        st.link_button("Ouvrir dans Drive", meta["webViewLink"])
-                else:
-                    st.error("❌ Échec du backup (voir logs).")
+    # Drive service (UI optionnelle) + refresh_token
+    drive_svc = _drive_service_from_existing_oauth()
+    folder_id = str(st.secrets.get("gdrive_folder_id", "") or "")
+    drive_ok = bool(drive_svc) and bool(folder_id)
 
-with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
-        st.caption("Format: `1 000 000 $` — valeurs utilisées partout (affichage + alertes).")
+    # Auto-load settings au démarrage (1 fois)
+    if not st.session_state.get("_admin_settings_loaded", False):
+        settings = _load_settings_local()
+        if (not settings) and drive_ok:
+            settings = _drive_load_settings_csv(drive_svc, folder_id)
+            if settings:
+                _save_settings_local(settings)
+        if settings:
+            if "CAP_GC" in settings:
+                try:
+                    st.session_state["CAP_GC"] = int(float(settings["CAP_GC"]))
+                except Exception:
+                    pass
+            if "CAP_CE" in settings:
+                try:
+                    st.session_state["CAP_CE"] = int(float(settings["CAP_CE"]))
+                except Exception:
+                    pass
+        st.session_state["_admin_settings_loaded"] = True
+
+    with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
         c1, c2 = st.columns(2)
         with c1:
             cap_gc_txt = st.text_input("Cap GC", value=_fmt_money(st.session_state.get("CAP_GC", DEFAULT_CAP_GC)), key="cap_gc_txt")
         with c2:
             cap_ce_txt = st.text_input("Cap CE", value=_fmt_money(st.session_state.get("CAP_CE", DEFAULT_CAP_CE)), key="cap_ce_txt")
 
-        cap_gc_val = _parse_money(cap_gc_txt)
-        cap_ce_val = _parse_money(cap_ce_txt)
+        cap_gc = _parse_money(cap_gc_txt)
+        cap_ce = _parse_money(cap_ce_txt)
 
-        def _cap_ok(v: int) -> bool:
-            return 1_000_000 <= int(v) <= 200_000_000
+        ok_gc, msg_gc = _validate_cap(cap_gc)
+        ok_ce, msg_ce = _validate_cap(cap_ce)
 
-        b1, b2, b3 = st.columns([1, 1, 2])
-        save_clicked = b1.button("💾 Sauvegarder (local + Drive)", use_container_width=True, key="caps_save")
-        reload_clicked = b2.button("🔄 Recharger (local/Drive)", use_container_width=True, key="caps_reload")
-        b3.caption(f"Actuel: GC {_fmt_money(int(st.session_state.get('CAP_GC', 0)))} | CE {_fmt_money(int(st.session_state.get('CAP_CE', 0)))}")
+        if not ok_gc:
+            st.warning(f"GC: {msg_gc}")
+        if not ok_ce:
+            st.warning(f"CE: {msg_ce}")
 
-        if save_clicked:
-            if not _cap_ok(cap_gc_val) or not _cap_ok(cap_ce_val):
-                st.error("Caps invalides. Chaque cap doit être entre 1 000 000 et 200 000 000.")
-            else:
-                st.session_state["CAP_GC"] = int(cap_gc_val)
-                st.session_state["CAP_CE"] = int(cap_ce_val)
-                try:
-                    _save_settings_local(DATA_DIR, int(cap_gc_val), int(cap_ce_val))
-                    st.success("✅ settings.csv sauvegardé en local.")
-                except Exception as e:
-                    st.error(f"Erreur écriture local settings.csv: {e}")
-
-                svc = _drive_service_from_existing_oauth()
-                if svc and folder_id:
-                    payload = f"CAP_GC,CAP_CE\n{int(cap_gc_val)},{int(cap_ce_val)}\n".encode("utf-8")
-                    if _drive_upsert_bytes_csv(svc, folder_id, SETTINGS_FILENAME, payload):
-                        st.success("✅ settings.csv sauvegardé sur Drive.")
+        b1, b2 = st.columns([1, 1])
+        with b1:
+            if st.button("💾 Sauvegarder (local + Drive)"):
+                if ok_gc and ok_ce:
+                    st.session_state["CAP_GC"] = cap_gc
+                    st.session_state["CAP_CE"] = cap_ce
+                    settings = {"CAP_GC": cap_gc, "CAP_CE": cap_ce}
+                    ok_local = _save_settings_local(settings)
+                    ok_drive = False
+                    if drive_ok:
+                        payload = pd.DataFrame([{"key":"CAP_CE","value":cap_ce},{"key":"CAP_GC","value":cap_gc}]).to_csv(index=False).encode("utf-8")
+                        res = _drive_upload_bytes(drive_svc, folder_id, "settings.csv", payload, "text/csv")
+                        ok_drive = bool(res)
+                    if ok_local:
+                        st.success("Sauvegarde locale OK (data/settings.csv).")
                     else:
-                        st.warning("Drive: sauvegarde non effectuée (OAuth/service indisponible).")
+                        st.error("Sauvegarde locale a échoué.")
+                    if drive_ok:
+                        st.success("Sauvegarde Drive OK." if ok_drive else "Sauvegarde Drive a échoué.")
+                else:
+                    st.error("Corrige les plafonds avant de sauvegarder.")
+        with b2:
+            if st.button("🔄 Recharger (local/Drive)"):
+                settings = _load_settings_local()
+                if (not settings) and drive_ok:
+                    settings = _drive_load_settings_csv(drive_svc, folder_id)
+                    if settings:
+                        _save_settings_local(settings)
+                if settings:
+                    if "CAP_GC" in settings:
+                        st.session_state["CAP_GC"] = int(float(settings["CAP_GC"]))
+                    if "CAP_CE" in settings:
+                        st.session_state["CAP_CE"] = int(float(settings["CAP_CE"]))
+                    st.success("Plafonds rechargés.")
+                else:
+                    st.warning("Aucun settings.csv trouvé (local ou Drive).")
 
-        if reload_clicked:
-            got = _load_settings_local(DATA_DIR)
-            svc = _drive_service_from_existing_oauth()
-            if svc and folder_id:
-                dgot = _drive_download_settings(svc, folder_id, SETTINGS_FILENAME)
-                if dgot.get("CAP_GC") and dgot.get("CAP_CE"):
-                    got = dgot
-                    try:
-                        _save_settings_local(DATA_DIR, int(got["CAP_GC"]), int(got["CAP_CE"]))
-                    except Exception:
-                        pass
+        st.caption(f"Actuel: GC { _fmt_money(st.session_state.get('CAP_GC', DEFAULT_CAP_GC)) } • CE { _fmt_money(st.session_state.get('CAP_CE', DEFAULT_CAP_CE)) }")
 
-            if got.get("CAP_GC"):
-                st.session_state["CAP_GC"] = int(got["CAP_GC"])
-            if got.get("CAP_CE"):
-                st.session_state["CAP_CE"] = int(got["CAP_CE"])
-            st.success("✅ Plafonds rechargés.")
-    # ---- Players DB index
+    with st.expander("🧪 Test Drive write + 🗜️ Backup complet", expanded=False):
+        if not drive_ok:
+            st.warning("Drive OAuth non disponible (refresh_token manquant, libs Google absentes, ou folder_id manquant).")
+            st.write("folder_id:", folder_id or "(absent)")
+        else:
+            st.success("Drive prêt (connexion silencieuse).")
+            st.write("folder_id:", folder_id)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("🧪 Écrire un fichier TEST dans Drive"):
+                    name = f"drive_test_{int(time.time())}.txt"
+                    payload = f"Drive OK — {datetime.utcnow().isoformat()} UTC".encode("utf-8")
+                    res = _drive_upload_bytes(drive_svc, folder_id, name, payload, "text/plain")
+                    if res:
+                        st.success(f"Test OK: {res.get('name')}")
+                        if res.get("webViewLink"):
+                            st.write(res["webViewLink"])
+                    else:
+                        st.error("Échec écriture Drive (vérifie scopes/token/folder).")
+
+            with c2:
+                if st.button("🗜️ Backup complet (/data → Drive)"):
+                    b = _zip_data_dir_bytes()
+                    if not b:
+                        st.error("Impossible de zipper /data (dossier manquant ?).")
+                    else:
+                        name = f"backup_data_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
+                        res = _drive_upload_bytes(drive_svc, folder_id, name, b, "application/zip")
+                        if res:
+                            st.success(f"Backup OK: {res.get('name')}")
+                            if res.get("webViewLink"):
+                                st.write(res["webViewLink"])
+                        else:
+                            st.error("Échec upload backup Drive.")
+
+# ---- Players DB index
     players_db = load_players_db(os.path.join(DATA_DIR, PLAYERS_DB_FILENAME))
     players_idx = build_players_index(players_db)
     if players_idx:
