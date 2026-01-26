@@ -32,6 +32,21 @@ import streamlit as st
 DATA_DIR = os.path.join(os.getcwd(), "data") if os.path.isdir(os.path.join(os.getcwd(), "data")) else "data"
 
 
+# ---- Constants & file naming
+DEFAULT_CAP_GC = 88_000_000
+DEFAULT_CAP_CE = 15_000_000
+
+def equipes_path(data_dir: str, season_lbl: str) -> str:
+    """Chemin du fichier alignements/équipes pour la saison (LOCAL)."""
+    season_lbl = str(season_lbl or "").strip() or "season"
+    return os.path.join(str(data_dir or "data"), f"equipes_joueurs_{season_lbl}.csv")
+
+def admin_log_path(data_dir: str, season_lbl: str) -> str:
+    """Historique des actions admin (LOCAL)."""
+    season_lbl = str(season_lbl or "").strip() or "season"
+    return os.path.join(str(data_dir or "data"), f"admin_history_{season_lbl}.csv")
+
+
 # ---- Google Drive retiré (fonctionnalités supprimées)
 
 def _fmt_money(v: int) -> str:
