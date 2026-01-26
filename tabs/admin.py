@@ -78,17 +78,26 @@ except Exception:
 def _drive_service_from_refresh_token_secrets() -> Optional[Any]:
     """
     Construit un service Google Drive via refresh_token dans st.secrets["gdrive_oauth"].
-    Nécessite: google-auth, google-api-python-client.
+
+    ✅ Important: on mémorise la dernière erreur dans st.session_state["_drive_oauth_err"]
+    pour afficher un diagnostic utile dans l'UI (au lieu d'un message générique).
     """
+    st.session_state["_drive_oauth_err"] = ""
     if build is None or Credentials is None:
+        st.session_state["_drive_oauth_err"] = "libs Google absentes (google-api-python-client / google-auth)."
         return None
+
     cfg = st.secrets.get("gdrive_oauth", {}) or {}
     rt = str(cfg.get("refresh_token", "") or "")
     cid = str(cfg.get("client_id", "") or "")
     csec = str(cfg.get("client_secret", "") or "")
     token_uri = str(cfg.get("token_uri", "") or "https://oauth2.googleapis.com/token")
-    if not (rt and cid and csec and token_uri):
+
+    missing = [k for k, v in [("refresh_token", rt), ("client_id", cid), ("client_secret", csec), ("token_uri", token_uri)] if not v]
+    if missing:
+        st.session_state["_drive_oauth_err"] = "secrets manquants: " + ", ".join(missing)
         return None
+
     try:
         from google.auth.transport.requests import Request  # type: ignore
         creds = Credentials(
@@ -101,7 +110,8 @@ def _drive_service_from_refresh_token_secrets() -> Optional[Any]:
         )
         creds.refresh(Request())
         return build("drive", "v3", credentials=creds, cache_discovery=False)
-    except Exception:
+    except Exception as e:
+        st.session_state["_drive_oauth_err"] = f"{type(e).__name__}: {e}"
         return None
 
 
@@ -827,7 +837,7 @@ def render(ctx: dict) -> None:
     st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
     # Drive service (UI optionnelle) + refresh_token
-    drive_svc = _drive_service_from_existing_oauth()
+    drive_svc = _drive_service_from_existing_oauth() or _drive_service_from_refresh_token_secrets()
     folder_id = str(st.secrets.get("gdrive_folder_id", "") or "")
     drive_ok = bool(drive_svc) and bool(folder_id)
 
@@ -910,7 +920,7 @@ def render(ctx: dict) -> None:
 
     with st.expander("🧪 Test Drive write + 🗜️ Backup complet", expanded=False):
         if not drive_ok:
-            st.warning("Drive OAuth non disponible (refresh_token manquant, libs Google absentes, ou folder_id manquant).")
+            st.warning("Drive OAuth non disponible. " + (st.session_state.get("_drive_oauth_err") or "Vérifie refresh_token / libs Google / folder_id."))
             st.write("folder_id:", folder_id or "(absent)")
         else:
             st.success("Drive prêt (connexion silencieuse).")
@@ -966,7 +976,7 @@ def render(ctx: dict) -> None:
         drive_ok = bool(svc) and bool(folder_id)
 
         if not drive_ok:
-            st.warning("Drive OAuth non disponible (creds manquants ou service indisponible).")
+            st.warning("Drive OAuth non disponible. " + (st.session_state.get("_drive_oauth_err") or "Vérifie refresh_token / libs Google / folder_id."))
             st.caption("Conseil: ouvre l’expander 'Connexion Google Drive (OAuth)' et connecte-toi.")
         else:
             files = _drive_list_csv_files(svc, folder_id)
