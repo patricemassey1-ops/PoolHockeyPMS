@@ -217,7 +217,7 @@ def _drive_find_file_id_by_name(svc, folder_id: str, name: str) -> str:
     except Exception:
         return ""
 
-def _drive_download_bytes(svc, file_id: str) -> bytes:
+def _drive_download_bytes(drive_svc, file_id: str) -> bytes:
     if not svc or not file_id or MediaIoBaseDownload is None:
         return b""
     fh = io.BytesIO()
@@ -231,7 +231,7 @@ def _drive_download_bytes(svc, file_id: str) -> bytes:
     except Exception:
         return b""
 
-def _drive_upload_bytes(svc, folder_id: str, name: str, content: bytes, mime: str = "text/csv") -> bool:
+def _drive_upload_bytes(drive_svc, folder_id: str, name: str, content: bytes, mime: str = "text/csv") -> bool:
     """Create or update file in Drive folder."""
     if not svc or not folder_id or not name or MediaIoBaseUpload is None:
         return False
@@ -689,7 +689,7 @@ def _drive_service_from_existing_oauth() -> Optional[Any]:
     except Exception:
         return None
 
-def _drive_list_csv_files(svc: Any, folder_id: str) -> List[Dict[str, str]]:
+def _drive_list_csv_files(drive_svc: Any, folder_id: str) -> List[Dict[str, str]]:
     if not svc or not folder_id:
         return []
     q = f"'{folder_id}' in parents and trashed=false and mimeType='text/csv'"
@@ -704,7 +704,7 @@ def _drive_list_csv_files(svc: Any, folder_id: str) -> List[Dict[str, str]]:
     files.sort(key=lambda x: x.get("modifiedTime", ""), reverse=True)
     return [{"id": f["id"], "name": f["name"]} for f in files if f.get("id") and f.get("name")]
 
-def _drive_download_bytes(svc: Any, file_id: str) -> bytes:
+def _drive_download_bytes(drive_svc: Any, file_id: str) -> bytes:
     request = svc.files().get_media(fileId=file_id, supportsAllDrives=True)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
@@ -733,6 +733,17 @@ def render(ctx: dict) -> None:
 
     season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
     folder_id = str(ctx.get("drive_folder_id") or "").strip()
+
+    # ---- Drive service (lazy) — disponible partout dans render()
+    drive_svc = None
+    drive_ok = False
+    try:
+        # drive_svc/drive_ok déjà calculés plus haut
+        drive_ok = bool(drive_svc) and bool(folder_id)
+    except Exception:
+        drive_svc = None
+        drive_ok = False
+
 
     e_path = equipes_path(DATA_DIR, season_lbl)
     log_path = admin_log_path(DATA_DIR, season_lbl)
@@ -879,14 +890,14 @@ def render(ctx: dict) -> None:
         st.caption("Lister/télécharger les CSV dans ton folder_id. Si ça ne marche pas, utilise Import local (fallback).")
         st.write(f"folder_id (ctx): `{folder_id or ''}`")
 
-        svc = _drive_service_from_existing_oauth()
-        drive_ok = bool(svc) and bool(folder_id)
+        # drive_svc/drive_ok déjà calculés plus haut
+        # drive_ok déjà calculé plus haut
 
         if not drive_ok:
             st.warning("Drive OAuth non disponible (creds manquants ou service indisponible).")
             st.caption("Conseil: ouvre l’expander 'Connexion Google Drive (OAuth)' et connecte-toi.")
         else:
-            files = _drive_list_csv_files(svc, folder_id)
+            files = _drive_list_csv_files(drive_svc, folder_id)
             equipes_files = [f for f in files if "equipes_joueurs" in f["name"].lower()]
 
             if not equipes_files:
@@ -902,7 +913,7 @@ def render(ctx: dict) -> None:
                 df_drive = None
                 if do_preview or do_validate or do_import:
                     try:
-                        b = _drive_download_bytes(svc, pick["id"])
+                        b = _drive_download_bytes(drive_svc, pick["id"])
                         df_drive = _read_csv_bytes(b)
                     except Exception as e:
                         st.error(f"Erreur téléchargement/lecture: {e}")
