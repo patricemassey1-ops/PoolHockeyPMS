@@ -3,7 +3,7 @@
 # PMS Pool Hockey — Admin Tab (Streamlit)
 # Compatible avec: admin.render(ctx) depuis app.py
 # ============================================================
-# ✅ Import local (fallback) — multi-upload CSV équipes
+# ✅ Import équipes depuis Drive (OAuth) + Import local fallback
 # ✅ Preview + validation colonnes attendues
 # ✅ ➕ Ajouter joueurs (anti-triche cross-team)
 # ✅ 🗑️ Retirer joueurs (UI + confirmation)
@@ -804,32 +804,50 @@ def render(ctx: dict) -> None:
     if not ctx.get("is_admin"):
         st.warning("Accès admin requis.")
         return
-
     global DATA_DIR
     DATA_DIR = str(ctx.get("DATA_DIR") or "data")
     os.makedirs(DATA_DIR, exist_ok=True)
 
     season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
+    folder_id = str(ctx.get("drive_folder_id") or "").strip()
 
     e_path = equipes_path(DATA_DIR, season_lbl)
     log_path = admin_log_path(DATA_DIR, season_lbl)
 
     st.subheader("🛠️ Gestion Admin")
 
-    # =====================================================
-    # Google Drive retiré (tel que demandé)
-    # =====================================================
-    drive_svc = None
-    folder_id = ""
-    drive_ok = False
+    # ---- OAuth UI (si ton projet l'avait déjà)
+    with st.expander("🔐 Connexion Google Drive (OAuth)", expanded=False):
+        if callable(_oauth_ui):
+            try:
+                _oauth_ui()
+            except Exception:
+                st.info("UI OAuth présente mais a échoué — vérifie tes secrets OAuth.")
+        else:
+            st.caption("UI OAuth non détectée dans services/*. OK si tu utilises un refresh_token dans Secrets (connexion silencieuse).")
+            if callable(_oauth_enabled):
+                try:
+                    st.write("oauth_drive_enabled():", bool(_oauth_enabled()))
+                except Exception:
+                    pass
 
-    # ---- caps inputs (persistants via settings.csv LOCAL)
+    # ---- caps inputs (persistants via settings.csv)
+    # On charge d'abord local, sinon Drive (si dispo)
     st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
     st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
-    # Auto-load settings au démarrage (1 fois) — LOCAL
+    # Drive service (UI optionnelle) + refresh_token
+    drive_svc = _drive_service_from_existing_oauth() or _drive_service_from_refresh_token_secrets()
+    folder_id = str(st.secrets.get("gdrive_folder_id", "") or "")
+    drive_ok = bool(drive_svc) and bool(folder_id)
+
+    # Auto-load settings au démarrage (1 fois)
     if not st.session_state.get("_admin_settings_loaded", False):
         settings = _load_settings_local()
+        if (not settings) and drive_ok:
+            settings = _drive_load_settings_csv(drive_svc, folder_id)
+            if settings:
+                _save_settings_local(settings)
         if settings:
             if "CAP_GC" in settings:
                 try:
@@ -842,63 +860,6 @@ def render(ctx: dict) -> None:
                 except Exception:
                     pass
         st.session_state["_admin_settings_loaded"] = True
-
-
-    with st.expander("🧪 Test drive write...", expanded=False):
-        st.caption("Test d'écriture et backup **LOCAL** (aucun Google Drive).")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("🧪 Tester écriture locale (/data)", key="adm_local_write_test"):
-                try:
-                    name = f"_local_test_write_{int(time.time())}.txt"
-                    p = os.path.join(DATA_DIR, name)
-                    with open(p, "w", encoding="utf-8") as f:
-                        f.write(f"LOCAL OK — {datetime.utcnow().isoformat()} UTC")
-                    st.success(f"✅ Écriture OK: {name}")
-                except Exception as e:
-                    st.error(f"❌ Échec écriture locale: {type(e).__name__}: {e}")
-        with c2:
-            b = _zip_data_dir_bytes()
-            if b:
-                st.download_button(
-                    "🗜️ Télécharger backup complet (ZIP)",
-                    data=b,
-                    file_name=f"backup_data_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip",
-                    mime="application/zip",
-                    key="adm_download_backup_zip",
-                )
-            else:
-                st.warning("Backup ZIP indisponible (dossier data manquant ?).")
-
-    with st.expander("📋 Historique admin (ADD/REMOVE/MOVE/IMPORT)", expanded=False):
-        if not os.path.exists(log_path):
-            st.info("Aucun historique pour l’instant.")
-        else:
-            try:
-                lg = pd.read_csv(log_path).sort_values("timestamp", ascending=False)
-
-                f1, f2, f3 = st.columns(3)
-                with f1:
-                    act = st.multiselect("Action", sorted(lg["action"].dropna().unique()), default=[], key="adm_log_act")
-                with f2:
-                    own = st.multiselect("Équipe", sorted(lg["owner"].dropna().unique()), default=[], key="adm_log_own")
-                with f3:
-                    q = st.text_input("Recherche joueur", value="", key="adm_log_q").strip().lower()
-
-                view = lg.copy()
-                if act:
-                    view = view[view["action"].isin(act)]
-                if own:
-                    view = view[view["owner"].isin(own)]
-                if q:
-                    view = view[view["player"].astype(str).str.lower().str.contains(q, na=False)]
-
-                st.dataframe(view.head(400), use_container_width=True)
-            except Exception as e:
-                st.error(f"Erreur log: {e}")
-
-    st.caption("✅ Admin: OAuth Drive / Import local • Add/Remove/Move • Caps bars • Log • QC/Level auto")
-
 
     with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
         c1, c2 = st.columns(2)
@@ -953,9 +914,46 @@ def render(ctx: dict) -> None:
                         st.session_state["CAP_CE"] = int(float(settings["CAP_CE"]))
                     st.success("Plafonds rechargés.")
                 else:
-                    st.warning("Aucun settings.csv trouvé (local).")
+                    st.warning("Aucun settings.csv trouvé (local ou Drive).")
 
         st.caption(f"Actuel: GC { _fmt_money(st.session_state.get('CAP_GC', DEFAULT_CAP_GC)) } • CE { _fmt_money(st.session_state.get('CAP_CE', DEFAULT_CAP_CE)) }")
+
+    with st.expander("🧪 Test Drive write + 🗜️ Backup complet", expanded=False):
+        if not drive_ok:
+            st.warning("Drive OAuth non disponible. " + (st.session_state.get("_drive_oauth_err") or "Vérifie refresh_token / libs Google / folder_id."))
+            st.write("folder_id:", folder_id or "(absent)")
+        else:
+            st.success("Drive prêt (connexion silencieuse).")
+            st.write("folder_id:", folder_id)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("🧪 Écrire un fichier TEST dans Drive"):
+                    name = f"drive_test_{int(time.time())}.txt"
+                    payload = f"Drive OK — {datetime.utcnow().isoformat()} UTC".encode("utf-8")
+                    res = _drive_upload_bytes(drive_svc, folder_id, name, payload, "text/plain")
+                    if res:
+                        st.success(f"Test OK: {res.get('name')}")
+                        if res.get("webViewLink"):
+                            st.write(res["webViewLink"])
+                    else:
+                        st.error("Échec écriture Drive (vérifie scopes/token/folder).")
+
+            with c2:
+                if st.button("🗜️ Backup complet (/data → Drive)"):
+                    b = _zip_data_dir_bytes()
+                    if not b:
+                        st.error("Impossible de zipper /data (dossier manquant ?).")
+                    else:
+                        name = f"backup_data_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
+                        res = _drive_upload_bytes(drive_svc, folder_id, name, b, "application/zip")
+                        if res:
+                            st.success(f"Backup OK: {res.get('name')}")
+                            if res.get("webViewLink"):
+                                st.write(res["webViewLink"])
+                        else:
+                            st.error("Échec upload backup Drive.")
+
 # ---- Players DB index
     players_db = load_players_db(os.path.join(DATA_DIR, PLAYERS_DB_FILENAME))
     players_idx = build_players_index(players_db)
@@ -970,282 +968,91 @@ def render(ctx: dict) -> None:
     # =====================================================
     # 🔄 IMPORT ÉQUIPES (Drive)
     # =====================================================
+    with st.expander("🔄 Import équipes depuis Drive (OAuth)", expanded=False):
+        st.caption("Lister/télécharger les CSV dans ton folder_id. Si ça ne marche pas, utilise Import local (fallback).")
+        st.write(f"folder_id (ctx): `{folder_id or ''}`")
 
-    with st.expander("➕ Ajouter joueur(s) (anti-triche)", expanded=False):
-        owner = st.selectbox("Équipe", owners, key="adm_add_owner")
-        assign = st.radio("Assignation", ["GC - Actif", "GC - Banc", "CE - Actif", "CE - Banc"], horizontal=True, key="adm_add_assign")
-        statut = "Grand Club" if assign.startswith("GC") else "Club École"
-        slot = "Actif" if assign.endswith("Actif") else "Banc"
+        svc = _drive_service_from_existing_oauth()
+        drive_ok = bool(svc) and bool(folder_id)
 
-        allow_override = st.checkbox("🛑 Autoriser override admin si joueur appartient déjà à une autre équipe", value=False, key="adm_add_override")
-
-        if players_idx:
-            all_names = sorted({v["Joueur"] for v in players_idx.values() if v.get("Joueur")})
-            selected = st.multiselect("Joueurs", all_names, key="adm_add_players")
+        if not drive_ok:
+            st.warning("Drive OAuth non disponible. " + (st.session_state.get("_drive_oauth_err") or "Vérifie refresh_token / libs Google / folder_id."))
+            st.caption("Conseil: ouvre l’expander 'Connexion Google Drive (OAuth)' et connecte-toi.")
         else:
-            raw = st.text_area("Saisir joueurs (1 par ligne)", height=120, key="adm_add_manual")
-            selected = [x.strip() for x in raw.splitlines() if x.strip()]
+            files = _drive_list_csv_files(svc, folder_id)
+            equipes_files = [f for f in files if "equipes_joueurs" in f["name"].lower()]
 
-        preview: List[Dict[str, Any]] = []
-        blocked: List[Tuple[str, str]] = []
+            if not equipes_files:
+                st.info("Aucun fichier `equipes_joueurs...csv` trouvé sur Drive.")
+            else:
+                pick = st.selectbox("Choisir un CSV équipes (Drive)", equipes_files, format_func=lambda x: x["name"], key="adm_drive_pick")
 
-        for p in selected:
-            info = players_idx.get(_norm_player(p), {}) if players_idx else {}
-            name = info.get("Joueur", p)
-            cur_owner = find_player_owner(df, name)
-            if cur_owner and cur_owner != owner and not allow_override:
-                blocked.append((name, cur_owner))
-                continue
+                colA, colB, colC = st.columns([1, 1, 1])
+                do_preview = colA.button("🧼 Preview", use_container_width=True, key="adm_drive_preview")
+                do_validate = colB.button("🧪 Valider colonnes", use_container_width=True, key="adm_drive_validate")
+                do_import = colC.button("⬇️ Importer → Local + QC + Reload", use_container_width=True, key="adm_drive_import")
 
-            preview.append({
-                "Propriétaire": owner,
-                "Joueur": name,
-                "Pos": info.get("Pos", ""),
-                "Equipe": info.get("Equipe", ""),
-                "Salaire": int(info.get("Salaire", 0) or 0),
-                "Level": info.get("Level", "0"),
-                "Statut": statut,
-                "Slot": slot,
-                "IR Date": "",
-            })
+                df_drive = None
+                if do_preview or do_validate or do_import:
+                    try:
+                        b = _drive_download_bytes(svc, pick["id"])
+                        df_drive = _read_csv_bytes(b)
+                    except Exception as e:
+                        st.error(f"Erreur téléchargement/lecture: {e}")
 
-        if blocked and not allow_override:
-            st.error("⛔ Anti-triche: ces joueurs appartiennent déjà à une autre équipe")
-            st.dataframe(pd.DataFrame(blocked, columns=["Joueur", "Équipe actuelle"]), use_container_width=True)
+                if isinstance(df_drive, pd.DataFrame):
+                    st.caption(f"Source: {pick['name']}")
+                    st.dataframe(df_drive.head(80), use_container_width=True)
 
-        if preview:
-            st.dataframe(pd.DataFrame(preview).head(80), use_container_width=True)
+                    ok, missing, extras = validate_equipes_df(df_drive)
+                    if do_validate:
+                        if ok:
+                            st.success("✅ Colonnes attendues OK.")
+                            if extras:
+                                st.info(f"Colonnes additionnelles: {extras}")
+                        else:
+                            st.error(f"❌ Colonnes manquantes: {missing}")
+                            if extras:
+                                st.info(f"Colonnes additionnelles: {extras}")
 
-        if st.button("✅ Ajouter maintenant", use_container_width=True, key="adm_add_commit"):
-            if not preview:
-                st.warning("Rien à ajouter.")
-                st.stop()
-
-            existing = set(zip(df["Propriétaire"].astype(str).str.strip(), df["Joueur"].astype(str).str.strip()))
-            new_rows = []
-            skipped_dupe = 0
-            skipped_block = 0
-
-            for r in preview:
-                k = (str(r["Propriétaire"]).strip(), str(r["Joueur"]).strip())
-                if k in existing:
-                    skipped_dupe += 1
-                    continue
-                cur_owner = find_player_owner(df, r["Joueur"])
-                if cur_owner and cur_owner != owner and not allow_override:
-                    skipped_block += 1
-                    continue
-                new_rows.append(r)
-
-            if not new_rows:
-                st.warning(f"Rien à ajouter (doublons: {skipped_dupe}, bloqués: {skipped_block}).")
-                st.stop()
-
-            backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-add")
-            df2 = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-            df2_qc, stats = apply_quality(df2, players_idx)
-            save_equipes(df2_qc, e_path)
-            st.session_state["equipes_df"] = df2_qc
-
-            for r in new_rows:
-                append_admin_log(
-                    log_path,
-                    action="ADD",
-                    owner=r["Propriétaire"],
-                    player=r["Joueur"],
-                    to_statut=r["Statut"],
-                    to_slot=r["Slot"],
-                    note=f"assign={assign}; override={allow_override}"
-                )
-
-            st.success(f"✅ Ajout OK: {len(new_rows)} | doublons: {skipped_dupe} | bloqués: {skipped_block} | Level auto: {stats.get('level_autofilled',0)}")
-            st.rerun()
+                    if do_import:
+                        if not ok:
+                            st.error(f"Import refusé: colonnes manquantes {missing}")
+                        else:
+                            df_imp = ensure_equipes_df(df_drive)
+                            df_imp_qc, stats = apply_quality(df_imp, players_idx)
+                            save_equipes(df_imp_qc, e_path)
+                            st.session_state["equipes_df"] = df_imp_qc
+                            append_admin_log(
+                                log_path,
+                                action="IMPORT",
+                                owner="",
+                                player="",
+                                note=f"drive={pick['name']}; level_auto={stats.get('level_autofilled',0)}"
+                            )
+                            st.success(f"✅ Import OK → {os.path.basename(e_path)} | Level auto: {stats.get('level_autofilled',0)}")
+                            st.rerun()
 
     # =====================================================
-    # 🗑️ REMOVE
+    # 📥 IMPORT LOCAL (fallback)
     # =====================================================
 
-    with st.expander("🔁 Déplacer GC ↔ CE (auto-slot)", expanded=False):
-        owner = st.selectbox("Équipe", owners, key="adm_move_owner")
-        team = df[df["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
-
-        if team.empty:
-            st.info("Aucun joueur pour cette équipe.")
-        else:
-            team["__label__"] = team.apply(lambda r: f"{r['Joueur']}  —  {r.get('Pos','')}  —  {r.get('Statut','')} / {r.get('Slot','')}", axis=1)
-            choices = team["__label__"].tolist()
-            sel = st.multiselect("Sélectionner joueur(s) à déplacer", choices, key="adm_move_sel")
-
-            dest_statut = st.radio("Destination", ["Grand Club", "Club École"], horizontal=True, key="adm_move_dest")
-            slot_mode = st.radio("Slot destination", ["Auto (selon Statut)", "Garder Slot actuel", "Forcer Actif", "Forcer Banc"], horizontal=True, key="adm_move_slot_mode")
-            keep_ir = st.checkbox("Conserver IR si joueur déjà IR", value=True, key="adm_move_keep_ir")
-
-            if st.button("🔁 Appliquer déplacement", use_container_width=True, key="adm_move_commit"):
-                if not sel:
-                    st.warning("Sélectionne au moins 1 joueur.")
-                    st.stop()
-
-                sel_rows = team[team["__label__"].isin(sel)].copy()
-                if sel_rows.empty:
-                    st.warning("Sélection invalide.")
-                    st.stop()
-
-                keyset = set(zip(
-                    sel_rows["Propriétaire"].astype(str),
-                    sel_rows["Joueur"].astype(str),
-                    sel_rows["Statut"].astype(str),
-                    sel_rows["Slot"].astype(str),
-                ))
-
-                backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-move")
-                df2 = df.copy()
-                moved = 0
-                for idx, r in df2.iterrows():
-                    k = (str(r["Propriétaire"]), str(r["Joueur"]), str(r["Statut"]), str(r["Slot"]))
-                    if k not in keyset:
-                        continue
-
-                    from_statut = str(r["Statut"])
-                    from_slot = str(r["Slot"])
-
-                    df2.at[idx, "Statut"] = dest_statut
-
-                    if slot_mode.startswith("Auto"):
-                        df2.at[idx, "Slot"] = auto_slot_for_statut(dest_statut, current_slot=from_slot, keep_ir=keep_ir)
-                    elif slot_mode.startswith("Garder"):
-                        df2.at[idx, "Slot"] = from_slot
-                    elif slot_mode.endswith("Actif"):
-                        df2.at[idx, "Slot"] = "Actif"
-                    elif slot_mode.endswith("Banc"):
-                        df2.at[idx, "Slot"] = "Banc"
-                    else:
-                        df2.at[idx, "Slot"] = auto_slot_for_statut(dest_statut, current_slot=from_slot, keep_ir=keep_ir)
-
-                    moved += 1
-
-                    append_admin_log(
-                        log_path,
-                        action="MOVE",
-                        owner=r["Propriétaire"],
-                        player=r["Joueur"],
-                        from_statut=from_statut,
-                        from_slot=from_slot,
-                        to_statut=dest_statut,
-                        to_slot=str(df2.at[idx, "Slot"]),
-                        note=f"slot_mode={slot_mode}"
-                    )
-
-                df2_qc, stats = apply_quality(df2, players_idx)
-                save_equipes(df2_qc, e_path)
-                st.session_state["equipes_df"] = df2_qc
-
-                st.success(f"✅ Move OK: {moved} joueur(s) | Level auto: {stats.get('level_autofilled',0)}")
-                st.rerun()
-
     # =====================================================
-    # 📋 HISTORIQUE ADMIN
+    # 📥 IMPORT LOCAL (fallback) — multi-upload CSV équipes
+    #   Objectif: importer plusieurs fichiers (1 équipe par fichier)
+    #   - Auto: si colonne "Propriétaire" contient 1 valeur unique -> assign auto
+    #   - Sinon: tu choisis l’équipe dans un dropdown (et on force la colonne)
+    #   - Merge: append dans equipes_joueurs_{season}.csv (option replace par équipe)
     # =====================================================
-
-    with st.expander("🗑️ Retirer joueur(s) (avec confirmation)", expanded=False):
-        owner = st.selectbox("Équipe", owners, key="adm_rem_owner")
-        team = df[df["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
-
-        if team.empty:
-            st.info("Aucun joueur pour cette équipe.")
-        else:
-            team["__label__"] = team.apply(lambda r: f"{r['Joueur']}  —  {r.get('Pos','')}  —  {r.get('Statut','')} / {r.get('Slot','')}", axis=1)
-            choices = team["__label__"].tolist()
-            sel = st.multiselect("Sélectionner joueur(s) à retirer", choices, key="adm_rem_sel")
-
-            confirm = st.checkbox("Je confirme la suppression", key="adm_rem_confirm")
-
-            if st.button("🗑️ Retirer maintenant", use_container_width=True, key="adm_rem_commit"):
-                if not sel:
-                    st.warning("Sélectionne au moins 1 joueur.")
-                    st.stop()
-                if not confirm:
-                    st.warning("Coche la confirmation.")
-                    st.stop()
-
-                sel_rows = team[team["__label__"].isin(sel)].copy()
-                if sel_rows.empty:
-                    st.warning("Sélection invalide.")
-                    st.stop()
-
-                keys = set(zip(
-                    sel_rows["Propriétaire"].astype(str),
-                    sel_rows["Joueur"].astype(str),
-                    sel_rows["Statut"].astype(str),
-                    sel_rows["Slot"].astype(str),
-                ))
-
-                def _keep_row(r):
-                    k = (str(r["Propriétaire"]), str(r["Joueur"]), str(r["Statut"]), str(r["Slot"]))
-                    return k not in keys
-
-                backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-remove")
-                before = len(df)
-                df2 = df[df.apply(_keep_row, axis=1)].copy()
-                removed = before - len(df2)
-
-                df2_qc, _ = apply_quality(df2, players_idx)
-                save_equipes(df2_qc, e_path)
-                st.session_state["equipes_df"] = df2_qc
-
-                for _, r in sel_rows.iterrows():
-                    append_admin_log(
-                        log_path,
-                        action="REMOVE",
-                        owner=r["Propriétaire"],
-                        player=r["Joueur"],
-                        from_statut=r.get("Statut", ""),
-                        from_slot=r.get("Slot", ""),
-                        note="removed by admin"
-                    )
-
-                st.success(f"✅ Retrait OK: {removed} joueur(s).")
-                st.rerun()
-
+    
     # =====================================================
-    # 🔁 MOVE GC ↔ CE
+    # 📥 IMPORT LOCAL (fallback) — multi-upload CSV équipes (+ ZIP)
+    #   - 1 fichier = 1 équipe
+    #   - Auto-assign via colonne Propriétaire (si unique) ou via nom de fichier (ex: Whalers.csv)
+    #   - Mode: append ou remplacer l’équipe
+    #   - Backup local par équipe avant modification
     # =====================================================
-
-
-
-    with st.expander("👀 Preview Local", expanded=False):
-        df = load_equipes(e_path)
-        if df.empty:
-            st.info("Aucun fichier équipes local. Importe depuis Drive ou import local.")
-        else:
-            df_qc, stats = apply_quality(df, players_idx)
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Lignes", stats["rows"])
-            c2.metric("Level auto", stats["level_autofilled"])
-            c3.metric("⚠️ IR mismatch", stats["ir_mismatch"])
-            c4.metric("⚠️ Salaire/Level", stats["salary_level_suspect"])
-            try:
-                st.dataframe(df_qc.head(140).style.apply(_preview_style_row, axis=1), use_container_width=True)
-            except Exception:
-                st.dataframe(df_qc.head(140), use_container_width=True)
-
-            if st.button("💾 Appliquer QC + sauvegarder + reload", use_container_width=True, key="adm_apply_qc"):
-                save_equipes(df_qc, e_path)
-                st.session_state["equipes_df"] = df_qc
-                st.success("✅ QC appliqué + sauvegarde + reload.")
-                st.rerun()
-
-    # refresh after potential import
-    df = load_equipes(e_path)
-    owners = sorted([x for x in df.get("Propriétaire", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique() if x])
-    if not owners:
-        st.warning("Aucune équipe (Propriétaire) détectée. Importe d'abord le CSV équipes.")
-        return
-
-    # =====================================================
-    # ➕ ADD (ANTI-TRICHE)
-    # =====================================================
-
-    with st.expander("📥 Import Local", expanded=False):
+    with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=True):
         st.caption("Upload plusieurs CSV (1 par équipe). Auto-assign via `Propriétaire` (si unique) ou via le nom du fichier (ex: `Whalers.csv`).")
         st.code(f"Destination locale (fusion): {e_path}", language="text")
 
@@ -1441,5 +1248,300 @@ def render(ctx: dict) -> None:
             st.success("✅ Fichier équipes vide créé.")
             st.rerun()
 
-    st.caption("✅ Admin: Local only • Import local • Add/Remove/Move • Caps bars • Log • QC/Level auto")
 
+    with st.expander("🧼 Preview local + alertes", expanded=False):
+        df = load_equipes(e_path)
+        if df.empty:
+            st.info("Aucun fichier équipes local. Importe depuis Drive ou import local.")
+        else:
+            df_qc, stats = apply_quality(df, players_idx)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Lignes", stats["rows"])
+            c2.metric("Level auto", stats["level_autofilled"])
+            c3.metric("⚠️ IR mismatch", stats["ir_mismatch"])
+            c4.metric("⚠️ Salaire/Level", stats["salary_level_suspect"])
+            try:
+                st.dataframe(df_qc.head(140).style.apply(_preview_style_row, axis=1), use_container_width=True)
+            except Exception:
+                st.dataframe(df_qc.head(140), use_container_width=True)
+
+            if st.button("💾 Appliquer QC + sauvegarder + reload", use_container_width=True, key="adm_apply_qc"):
+                save_equipes(df_qc, e_path)
+                st.session_state["equipes_df"] = df_qc
+                st.success("✅ QC appliqué + sauvegarde + reload.")
+                st.rerun()
+
+    # refresh after potential import
+    df = load_equipes(e_path)
+    owners = sorted([x for x in df.get("Propriétaire", pd.Series(dtype=str)).dropna().astype(str).str.strip().unique() if x])
+    if not owners:
+        st.warning("Aucune équipe (Propriétaire) détectée. Importe d'abord le CSV équipes.")
+        return
+
+    # =====================================================
+    # ➕ ADD (ANTI-TRICHE)
+    # =====================================================
+    with st.expander("➕ Ajouter joueur(s) (anti-triche)", expanded=False):
+        owner = st.selectbox("Équipe", owners, key="adm_add_owner")
+        assign = st.radio("Assignation", ["GC - Actif", "GC - Banc", "CE - Actif", "CE - Banc"], horizontal=True, key="adm_add_assign")
+        statut = "Grand Club" if assign.startswith("GC") else "Club École"
+        slot = "Actif" if assign.endswith("Actif") else "Banc"
+
+        allow_override = st.checkbox("🛑 Autoriser override admin si joueur appartient déjà à une autre équipe", value=False, key="adm_add_override")
+
+        if players_idx:
+            all_names = sorted({v["Joueur"] for v in players_idx.values() if v.get("Joueur")})
+            selected = st.multiselect("Joueurs", all_names, key="adm_add_players")
+        else:
+            raw = st.text_area("Saisir joueurs (1 par ligne)", height=120, key="adm_add_manual")
+            selected = [x.strip() for x in raw.splitlines() if x.strip()]
+
+        preview: List[Dict[str, Any]] = []
+        blocked: List[Tuple[str, str]] = []
+
+        for p in selected:
+            info = players_idx.get(_norm_player(p), {}) if players_idx else {}
+            name = info.get("Joueur", p)
+            cur_owner = find_player_owner(df, name)
+            if cur_owner and cur_owner != owner and not allow_override:
+                blocked.append((name, cur_owner))
+                continue
+
+            preview.append({
+                "Propriétaire": owner,
+                "Joueur": name,
+                "Pos": info.get("Pos", ""),
+                "Equipe": info.get("Equipe", ""),
+                "Salaire": int(info.get("Salaire", 0) or 0),
+                "Level": info.get("Level", "0"),
+                "Statut": statut,
+                "Slot": slot,
+                "IR Date": "",
+            })
+
+        if blocked and not allow_override:
+            st.error("⛔ Anti-triche: ces joueurs appartiennent déjà à une autre équipe")
+            st.dataframe(pd.DataFrame(blocked, columns=["Joueur", "Équipe actuelle"]), use_container_width=True)
+
+        if preview:
+            st.dataframe(pd.DataFrame(preview).head(80), use_container_width=True)
+
+        if st.button("✅ Ajouter maintenant", use_container_width=True, key="adm_add_commit"):
+            if not preview:
+                st.warning("Rien à ajouter.")
+                st.stop()
+
+            existing = set(zip(df["Propriétaire"].astype(str).str.strip(), df["Joueur"].astype(str).str.strip()))
+            new_rows = []
+            skipped_dupe = 0
+            skipped_block = 0
+
+            for r in preview:
+                k = (str(r["Propriétaire"]).strip(), str(r["Joueur"]).strip())
+                if k in existing:
+                    skipped_dupe += 1
+                    continue
+                cur_owner = find_player_owner(df, r["Joueur"])
+                if cur_owner and cur_owner != owner and not allow_override:
+                    skipped_block += 1
+                    continue
+                new_rows.append(r)
+
+            if not new_rows:
+                st.warning(f"Rien à ajouter (doublons: {skipped_dupe}, bloqués: {skipped_block}).")
+                st.stop()
+
+            backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-add")
+            df2 = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+            df2_qc, stats = apply_quality(df2, players_idx)
+            save_equipes(df2_qc, e_path)
+            st.session_state["equipes_df"] = df2_qc
+
+            for r in new_rows:
+                append_admin_log(
+                    log_path,
+                    action="ADD",
+                    owner=r["Propriétaire"],
+                    player=r["Joueur"],
+                    to_statut=r["Statut"],
+                    to_slot=r["Slot"],
+                    note=f"assign={assign}; override={allow_override}"
+                )
+
+            st.success(f"✅ Ajout OK: {len(new_rows)} | doublons: {skipped_dupe} | bloqués: {skipped_block} | Level auto: {stats.get('level_autofilled',0)}")
+            st.rerun()
+
+    # =====================================================
+    # 🗑️ REMOVE
+    # =====================================================
+    with st.expander("🗑️ Retirer joueur(s) (avec confirmation)", expanded=False):
+        owner = st.selectbox("Équipe", owners, key="adm_rem_owner")
+        team = df[df["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
+
+        if team.empty:
+            st.info("Aucun joueur pour cette équipe.")
+        else:
+            team["__label__"] = team.apply(lambda r: f"{r['Joueur']}  —  {r.get('Pos','')}  —  {r.get('Statut','')} / {r.get('Slot','')}", axis=1)
+            choices = team["__label__"].tolist()
+            sel = st.multiselect("Sélectionner joueur(s) à retirer", choices, key="adm_rem_sel")
+
+            confirm = st.checkbox("Je confirme la suppression", key="adm_rem_confirm")
+
+            if st.button("🗑️ Retirer maintenant", use_container_width=True, key="adm_rem_commit"):
+                if not sel:
+                    st.warning("Sélectionne au moins 1 joueur.")
+                    st.stop()
+                if not confirm:
+                    st.warning("Coche la confirmation.")
+                    st.stop()
+
+                sel_rows = team[team["__label__"].isin(sel)].copy()
+                if sel_rows.empty:
+                    st.warning("Sélection invalide.")
+                    st.stop()
+
+                keys = set(zip(
+                    sel_rows["Propriétaire"].astype(str),
+                    sel_rows["Joueur"].astype(str),
+                    sel_rows["Statut"].astype(str),
+                    sel_rows["Slot"].astype(str),
+                ))
+
+                def _keep_row(r):
+                    k = (str(r["Propriétaire"]), str(r["Joueur"]), str(r["Statut"]), str(r["Slot"]))
+                    return k not in keys
+
+                backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-remove")
+                before = len(df)
+                df2 = df[df.apply(_keep_row, axis=1)].copy()
+                removed = before - len(df2)
+
+                df2_qc, _ = apply_quality(df2, players_idx)
+                save_equipes(df2_qc, e_path)
+                st.session_state["equipes_df"] = df2_qc
+
+                for _, r in sel_rows.iterrows():
+                    append_admin_log(
+                        log_path,
+                        action="REMOVE",
+                        owner=r["Propriétaire"],
+                        player=r["Joueur"],
+                        from_statut=r.get("Statut", ""),
+                        from_slot=r.get("Slot", ""),
+                        note="removed by admin"
+                    )
+
+                st.success(f"✅ Retrait OK: {removed} joueur(s).")
+                st.rerun()
+
+    # =====================================================
+    # 🔁 MOVE GC ↔ CE
+    # =====================================================
+    with st.expander("🔁 Déplacer GC ↔ CE (auto-slot)", expanded=False):
+        owner = st.selectbox("Équipe", owners, key="adm_move_owner")
+        team = df[df["Propriétaire"].astype(str).str.strip().eq(str(owner).strip())].copy()
+
+        if team.empty:
+            st.info("Aucun joueur pour cette équipe.")
+        else:
+            team["__label__"] = team.apply(lambda r: f"{r['Joueur']}  —  {r.get('Pos','')}  —  {r.get('Statut','')} / {r.get('Slot','')}", axis=1)
+            choices = team["__label__"].tolist()
+            sel = st.multiselect("Sélectionner joueur(s) à déplacer", choices, key="adm_move_sel")
+
+            dest_statut = st.radio("Destination", ["Grand Club", "Club École"], horizontal=True, key="adm_move_dest")
+            slot_mode = st.radio("Slot destination", ["Auto (selon Statut)", "Garder Slot actuel", "Forcer Actif", "Forcer Banc"], horizontal=True, key="adm_move_slot_mode")
+            keep_ir = st.checkbox("Conserver IR si joueur déjà IR", value=True, key="adm_move_keep_ir")
+
+            if st.button("🔁 Appliquer déplacement", use_container_width=True, key="adm_move_commit"):
+                if not sel:
+                    st.warning("Sélectionne au moins 1 joueur.")
+                    st.stop()
+
+                sel_rows = team[team["__label__"].isin(sel)].copy()
+                if sel_rows.empty:
+                    st.warning("Sélection invalide.")
+                    st.stop()
+
+                keyset = set(zip(
+                    sel_rows["Propriétaire"].astype(str),
+                    sel_rows["Joueur"].astype(str),
+                    sel_rows["Statut"].astype(str),
+                    sel_rows["Slot"].astype(str),
+                ))
+
+                backup_team_rows(df, DATA_DIR, season_lbl, owner, note="pre-move")
+                df2 = df.copy()
+                moved = 0
+                for idx, r in df2.iterrows():
+                    k = (str(r["Propriétaire"]), str(r["Joueur"]), str(r["Statut"]), str(r["Slot"]))
+                    if k not in keyset:
+                        continue
+
+                    from_statut = str(r["Statut"])
+                    from_slot = str(r["Slot"])
+
+                    df2.at[idx, "Statut"] = dest_statut
+
+                    if slot_mode.startswith("Auto"):
+                        df2.at[idx, "Slot"] = auto_slot_for_statut(dest_statut, current_slot=from_slot, keep_ir=keep_ir)
+                    elif slot_mode.startswith("Garder"):
+                        df2.at[idx, "Slot"] = from_slot
+                    elif slot_mode.endswith("Actif"):
+                        df2.at[idx, "Slot"] = "Actif"
+                    elif slot_mode.endswith("Banc"):
+                        df2.at[idx, "Slot"] = "Banc"
+                    else:
+                        df2.at[idx, "Slot"] = auto_slot_for_statut(dest_statut, current_slot=from_slot, keep_ir=keep_ir)
+
+                    moved += 1
+
+                    append_admin_log(
+                        log_path,
+                        action="MOVE",
+                        owner=r["Propriétaire"],
+                        player=r["Joueur"],
+                        from_statut=from_statut,
+                        from_slot=from_slot,
+                        to_statut=dest_statut,
+                        to_slot=str(df2.at[idx, "Slot"]),
+                        note=f"slot_mode={slot_mode}"
+                    )
+
+                df2_qc, stats = apply_quality(df2, players_idx)
+                save_equipes(df2_qc, e_path)
+                st.session_state["equipes_df"] = df2_qc
+
+                st.success(f"✅ Move OK: {moved} joueur(s) | Level auto: {stats.get('level_autofilled',0)}")
+                st.rerun()
+
+    # =====================================================
+    # 📋 HISTORIQUE ADMIN
+    # =====================================================
+    with st.expander("📋 Historique admin (ADD/REMOVE/MOVE/IMPORT)", expanded=False):
+        if not os.path.exists(log_path):
+            st.info("Aucun historique pour l’instant.")
+        else:
+            try:
+                lg = pd.read_csv(log_path).sort_values("timestamp", ascending=False)
+
+                f1, f2, f3 = st.columns(3)
+                with f1:
+                    act = st.multiselect("Action", sorted(lg["action"].dropna().unique()), default=[], key="adm_log_act")
+                with f2:
+                    own = st.multiselect("Équipe", sorted(lg["owner"].dropna().unique()), default=[], key="adm_log_own")
+                with f3:
+                    q = st.text_input("Recherche joueur", value="", key="adm_log_q").strip().lower()
+
+                view = lg.copy()
+                if act:
+                    view = view[view["action"].isin(act)]
+                if own:
+                    view = view[view["owner"].isin(own)]
+                if q:
+                    view = view[view["player"].astype(str).str.lower().str.contains(q, na=False)]
+
+                st.dataframe(view.head(400), use_container_width=True)
+            except Exception as e:
+                st.error(f"Erreur log: {e}")
+
+    st.caption("✅ Admin: OAuth Drive / Import local • Add/Remove/Move • Caps bars • Log • QC/Level auto")
