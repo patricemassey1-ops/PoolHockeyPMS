@@ -23,6 +23,13 @@ import streamlit as st
 DATA_DIR = "data"
 PLAYERS_PATH = os.path.join(DATA_DIR, "hockey.players.csv")
 
+
+EQUIPES_JOUEURS_FILES = [
+    "equipes_joueurs_2025-2026.csv",
+    "equipes_joueurs_2025_2026.csv",
+    "equipes_joueurs_2025-2026.csv".replace("-","_"),
+]
+
 PMS_TEAM_FILES = [
     "Whalers.csv",
     "Red_Wings.csv",
@@ -139,6 +146,26 @@ def safe_str(x) -> str:
     if not s or s.upper() == "NAN":
         return "—"
     return s
+
+
+def clean_player_name(name: str) -> str:
+    """Nettoie un nom joueur provenant de labels UI.
+    Ex: 'Michael Hage | Michael Hage|' -> 'Michael Hage'
+    """
+    s = str(name or '').strip()
+    if not s:
+        return ''
+    # si le label contient des pipes, on garde le premier segment non vide
+    if '|' in s:
+        parts = [p.strip() for p in s.split('|') if p.strip()]
+        if parts:
+            s = parts[0]
+    # enlève doublon simple 'X X'
+    toks = s.split()
+    if len(toks) >= 4 and toks[:2] == toks[2:4]:
+        s = ' '.join(toks[:2])
+    return s
+
 
 
 def _norm_player_key(name: str) -> str:
@@ -427,7 +454,7 @@ def load_players_db(path: str) -> pd.DataFrame:
     for c in ["Team", "Country", "Flag", "Cap Hit", "Status"]:
         df[c] = df[c].replace({"nan": "", "NaN": "", "NAN": ""})
 
-    df["__pkey"] = df["Player"].apply(_norm_player_key)
+    df["__pkey"] = df["Player"].apply(clean_player_name).apply(_norm_player_key)
     return df
 
 
@@ -472,12 +499,53 @@ def _detect_scope_column(df: pd.DataFrame) -> str | None:
 
 
 @st.cache_data(show_spinner=False)
-def load_owned_index_from_team_files(data_dir: str) -> dict:
-    """
+def load_owned_index(data_dir: str) -> dict:
+    """Index des joueurs appartenant déjà au pool.
+
     Retour: pkey -> {"team_pms": "...", "scope": "...", "source": "..."}
+    Sources supportées:
+      1) fichier unifié equipes_joueurs_*.csv (si présent)
+      2) fichiers par équipe (Whalers.csv, etc.)
     """
     idx: dict[str, dict] = {}
 
+    # --- (1) fichier unifié equipes_joueurs_*.csv
+    for uf in EQUIPES_JOUEURS_FILES:
+        fp = os.path.join(data_dir, uf)
+        if not os.path.exists(fp):
+            continue
+        try:
+            dfu = pd.read_csv(fp, low_memory=False)
+            dfu.columns = [c.strip() for c in dfu.columns]
+
+            pcol = _detect_player_column(dfu)
+            # colonnes possibles pour l'équipe du pool
+            tcol = None
+            for c in ["EquipePMS","ÉquipePMS","Equipe","Équipe","Owner","GM","Team","TeamPMS","Team PMS","Equipe Pool","Équipe Pool"]:
+                if c in dfu.columns:
+                    tcol = c
+                    break
+            scol = _detect_scope_column(dfu)
+
+            if not pcol or not tcol:
+                continue
+
+            for _, r in dfu.iterrows():
+                pkey = _norm_player_key(r.get(pcol, ""))
+                if not pkey or pkey in idx:
+                    continue
+                team_pms = str(r.get(tcol, "")).strip()
+                scope_val = str(r.get(scol, "")).strip() if scol else ""
+                if not team_pms or team_pms.upper() == "NAN":
+                    continue
+                idx[pkey] = {"team_pms": team_pms, "scope": scope_val, "source": uf}
+        except Exception:
+            pass
+
+        if idx:
+            return idx
+
+    # --- (2) fallback fichiers par équipe
     for fname in PMS_TEAM_FILES:
         fp = os.path.join(data_dir, fname)
         if not os.path.exists(fp):
@@ -497,16 +565,10 @@ def load_owned_index_from_team_files(data_dir: str) -> dict:
 
             for _, r in df.iterrows():
                 pkey = _norm_player_key(r.get(pcol, ""))
-                if not pkey:
-                    continue
-                if pkey in idx:
+                if not pkey or pkey in idx:
                     continue
                 scope_val = str(r.get(scol, "")).strip() if scol else ""
-                idx[pkey] = {
-                    "team_pms": team_pms,
-                    "scope": scope_val,
-                    "source": fname,
-                }
+                idx[pkey] = {"team_pms": team_pms, "scope": scope_val, "source": fname}
         except Exception:
             continue
 
@@ -950,38 +1012,7 @@ def render_tab_joueurs():
         st.error("❌ data/hockey.players.csv introuvable ou vide.")
         return
 
-    owned_idx = load_owned_index_from_team_files(DATA_DIR)
-
-    # ---- 🧪 Audit (sanity check) — joueurs du pool qui pourraient apparaître "Disponible"
-    with st.expander("🧪 Audit automatique — sanity check (pool vs Disponible)", expanded=False):
-        audit = audit_pool_vs_availability(df, DATA_DIR)
-
-        dupes = audit.get("dupes", [])
-        missing = audit.get("missing_in_players_db", [])
-        risky = audit.get("players_db_pool_but_available", [])
-
-        cols = st.columns(3)
-        cols[0].metric("Doublons (2 équipes+)", len(dupes))
-        cols[1].metric("Pool introuvable dans players DB", len(missing))
-        cols[2].metric("Risque: marqué pool mais 'Disponible'", len(risky))
-
-        if audit.get("pool_cols_detected"):
-            st.caption("Colonnes détectées dans hockey.players.csv pour l’équipe/owner pool: " + ", ".join(audit["pool_cols_detected"]))
-
-        if dupes:
-            st.markdown("#### ⚠️ Joueurs présents dans plusieurs équipes (à corriger)")
-            st.dataframe(pd.DataFrame(dupes), use_container_width=True, hide_index=True)
-
-        if missing:
-            st.markdown("#### ⚠️ Joueurs dans les fichiers équipes mais introuvables dans hockey.players.csv (mismatch nom / normalisation)")
-            st.dataframe(pd.DataFrame(missing), use_container_width=True, hide_index=True)
-
-        if risky:
-            st.markdown("#### ⚠️ Joueurs marqués dans une équipe (hockey.players.csv) mais non détectés dans les fichiers équipes — ils peuvent apparaître 'Disponible'")
-            st.dataframe(pd.DataFrame(risky), use_container_width=True, hide_index=True)
-
-        if (not dupes) and (not missing) and (not risky):
-            st.success("✅ Aucun problème détecté: tout ce qui est dans le pool est reconnu comme non-disponible.")
+    owned_idx = load_owned_index(DATA_DIR)
 
     # ---- Filtres (4)
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
@@ -1038,8 +1069,10 @@ def render_tab_joueurs():
     goalie = _is_goalie(r)
 
     # ---- Titre joueur
-    player_name = safe_str(r.get("Player"))
-    player_name_alt = safe_str(player_last_first_to_first_last(player_name))
+    raw_name = r.get("Player") or r.get("Joueur") or r.get("Nom") or r.get("Name") or ""
+    player_name_clean = clean_player_name(raw_name) or str(raw_name or "").strip()
+    player_name = safe_str(player_name_clean)
+    player_name_alt = safe_str(player_last_first_to_first_last(player_name_clean))
     st.subheader(player_name_alt if player_name_alt != "—" else player_name)
 
     # ---- Owned badge
@@ -1144,6 +1177,40 @@ def render_tab_joueurs():
                 else:
                     st.caption("Astuce: tape le nom complet (ex: 'Michael Hage') puis lance la recherche.")
 
+
+
+    # ---- 🧪 Audit automatique (sanity check) — même largeur que l’associateur NHL_ID
+    cAL, cAM, cAR = st.columns([1, 1.15, 1])
+    with cAM:
+        with st.expander("🧪 Audit automatique — sanity check (pool vs Disponible)", expanded=False):
+            audit = audit_pool_vs_availability(df, DATA_DIR)
+
+            dupes = audit.get("dupes", [])
+            missing = audit.get("missing_in_players_db", [])
+            risky = audit.get("players_db_pool_but_available", [])
+
+            cols = st.columns(3)
+            cols[0].metric("Doublons (2 équipes+)", len(dupes))
+            cols[1].metric("Pool introuvable dans players DB", len(missing))
+            cols[2].metric("Risque: marqué pool mais 'Disponible'", len(risky))
+
+            if audit.get("pool_cols_detected"):
+                st.caption("Colonnes détectées dans hockey.players.csv pour l’équipe/owner pool: " + ", ".join(audit["pool_cols_detected"]))
+
+            if dupes:
+                st.markdown("#### ⚠️ Joueurs présents dans plusieurs équipes (à corriger)")
+                st.dataframe(pd.DataFrame(dupes), use_container_width=True, hide_index=True)
+
+            if missing:
+                st.markdown("#### ⚠️ Joueurs dans les fichiers équipes mais introuvables dans hockey.players.csv (mismatch nom / normalisation)")
+                st.dataframe(pd.DataFrame(missing), use_container_width=True, hide_index=True)
+
+            if risky:
+                st.markdown("#### ⚠️ Joueurs marqués dans une équipe (hockey.players.csv) mais non détectés dans les fichiers équipes — ils peuvent apparaître 'Disponible'")
+                st.dataframe(pd.DataFrame(risky), use_container_width=True, hide_index=True)
+
+            if (not dupes) and (not missing) and (not risky):
+                st.success("✅ Aucun problème détecté: tout ce qui est dans le pool est reconnu comme non-disponible.")
 
     # ---- API PRO TABLE (seulement si nhl_id présent)
     if pd.notna(nhl_id):
