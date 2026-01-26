@@ -36,6 +36,75 @@ PMS_TEAM_FILES = [
 # ----------------------------
 # Helpers (position / name / formatting)
 # ----------------------------
+
+def nhl_results_to_labels(results):
+    """Convert NHL search results list into UI labels + mapping.
+    Works with various NHL API payload shapes.
+    Returns (labels, id_map) where id_map[label] -> nhl_id (int).
+    """
+    labels = []
+    id_map = {}
+    if not results:
+        return labels, id_map
+
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        # NHL id
+        rid = r.get("id") or r.get("playerId") or r.get("nhlId") or r.get("nhl_id")
+        try:
+            rid_int = int(rid) if rid is not None and str(rid).strip() != "" else None
+        except Exception:
+            rid_int = None
+
+        # name
+        name = (
+            r.get("fullName")
+            or r.get("name")
+            or r.get("displayName")
+            or (f"{r.get('firstName','')} {r.get('lastName','')}".strip() or None)
+        ) or "Unknown"
+
+        # team
+        team = ""
+        t = r.get("currentTeam") or r.get("team") or {}
+        if isinstance(t, dict):
+            team = t.get("abbrev") or t.get("triCode") or t.get("name") or ""
+        elif isinstance(t, str):
+            team = t
+        team = str(team).strip()
+
+        # position
+        pos = ""
+        p = r.get("primaryPosition") or r.get("position") or {}
+        if isinstance(p, dict):
+            pos = p.get("abbrev") or p.get("code") or p.get("name") or ""
+        elif isinstance(p, str):
+            pos = p
+        pos = str(pos).strip()
+
+        # birthdate / age hint
+        b = r.get("birthDate") or r.get("birthdate") or ""
+        b = str(b).strip()
+
+        parts = [name]
+        if team:
+            parts.append(team)
+        if pos:
+            parts.append(pos)
+        if b and b != "nan":
+            parts.append(b)
+
+        label = " — ".join(parts)
+        if rid_int is None:
+            # still allow selection, but mark unknown id
+            label = f"{label} (id?)"
+        labels.append(label)
+        id_map[label] = rid_int
+
+    return labels, id_map
+
+
 def _pos_bucket(pos_raw: str) -> str:
     """
     Mappe Position brute vers: Forward / Defense / Goalie
@@ -447,7 +516,7 @@ def load_owned_index_from_team_files(data_dir: str) -> dict:
 def render_owned_badge(pkey: str, owned_idx: dict):
     info = owned_idx.get(pkey)
     if not info:
-        st.markdown("🟩 **Disponible (pas dans nos équipes)**")
+        st.markdown("🟢 **Disponible**")
         return
 
     team_pms = info.get("team_pms") or "Équipe"
@@ -455,8 +524,122 @@ def render_owned_badge(pkey: str, owned_idx: dict):
     src = info.get("source") or ""
     extra = f" — {scope}" if scope and scope.upper() != "NAN" else ""
     src_txt = f" (source: {src})" if src else ""
-    st.markdown(f"🟥 **Déjà dans nos équipes : {team_pms}{extra}**{src_txt}")
+    st.markdown(f"🔴 **Non disponible** — dans **{team_pms}{extra}**{src_txt}")
 
+
+
+# ----------------------------
+# 🧪 Audit (sanity check)
+#   Détecte les joueurs du pool qui pourraient encore apparaître "Disponible"
+#   à cause d'un mismatch de normalisation ou d'une source de vérité divergente.
+# ----------------------------
+def _detect_pool_team_columns(df: pd.DataFrame) -> list[str]:
+    """Colonnes possibles indiquant l'équipe/owner du pool dans hockey.players.csv."""
+    candidates = [
+        "EquipePool", "ÉquipePool", "Equipe Pool", "Équipe Pool",
+        "TeamPool", "Team Pool", "Owner", "GM", "EquipePMS", "ÉquipePMS",
+        "PMS Team", "TeamPMS", "Team PMS", "PMS_Team",
+    ]
+    return [c for c in candidates if c in df.columns]
+
+
+@st.cache_data(show_spinner=False)
+def audit_pool_vs_availability(players_df: pd.DataFrame, data_dir: str) -> dict:
+    """
+    Retourne un dict avec:
+      - dupes: joueurs présents dans >1 équipe (via fichiers équipes)
+      - missing_in_players_db: joueurs présents dans fichiers équipes mais introuvables dans hockey.players.csv (pkey mismatch)
+      - players_db_pool_but_available: joueurs marqués avec une équipe/owner dans hockey.players.csv mais non trouvés dans fichiers équipes (ils risquent d'apparaître 'Disponible')
+    """
+    # --- build raw pool map from team files with duplicates
+    pool_map: dict[str, dict] = {}  # pkey -> {"teams": set, "samples": set}
+    for fname in PMS_TEAM_FILES:
+        fp = os.path.join(data_dir, fname)
+        if not os.path.exists(fp):
+            continue
+        team_pms = _team_name_from_filename(fname)
+        try:
+            tdf = pd.read_csv(fp, low_memory=False)
+            tdf.columns = [c.strip() for c in tdf.columns]
+            pcol = _detect_player_column(tdf)
+            if not pcol:
+                continue
+            for _, rr in tdf.iterrows():
+                raw_name = str(rr.get(pcol, '') or '').strip()
+                pkey = _norm_player_key(raw_name)
+                if not pkey:
+                    continue
+                ent = pool_map.setdefault(pkey, {"teams": set(), "samples": set(), "files": set()})
+                ent["teams"].add(team_pms)
+                ent["files"].add(fname)
+                if raw_name:
+                    ent["samples"].add(raw_name)
+        except Exception:
+            continue
+
+    dupes = []
+    for pkey, ent in pool_map.items():
+        teams = sorted(ent["teams"])
+        if len(teams) > 1:
+            dupes.append({
+                "PlayerKey": pkey,
+                "Teams": ", ".join(teams),
+                "Examples": ", ".join(sorted(list(ent["samples"]))[:2]),
+            })
+
+    # --- players db keys
+    pdf = players_df.copy()
+    if "__pkey" not in pdf.columns:
+        # best effort: try Player column
+        pcol = "Player" if "Player" in pdf.columns else None
+        if pcol:
+            pdf["__pkey"] = pdf[pcol].astype(str).apply(_norm_player_key)
+        else:
+            pdf["__pkey"] = ""
+
+    pkeys_db = set([k for k in pdf["__pkey"].astype(str).tolist() if k])
+
+    missing_in_players_db = []
+    for pkey, ent in pool_map.items():
+        if pkey not in pkeys_db:
+            missing_in_players_db.append({
+                "PlayerKey": pkey,
+                "Team": ", ".join(sorted(ent["teams"])),
+                "ExampleFromTeamCSV": ", ".join(sorted(list(ent["samples"]))[:2]),
+            })
+
+    # --- players db "pool team" columns vs team files
+    pool_cols = _detect_pool_team_columns(pdf)
+    players_db_pool_but_available = []
+    if pool_cols:
+        # any non-empty value in any pool col
+        def _pool_team_for_row(row):
+            for c in pool_cols:
+                v = str(row.get(c, '') or '').strip()
+                if v and v.upper() != "NAN":
+                    return v
+            return ""
+
+        pdf["__pool_team_hint"] = pdf.apply(_pool_team_for_row, axis=1)
+        hinted = pdf[pdf["__pool_team_hint"].astype(str).str.strip() != ""].copy()
+        # availability in UI is based on team files index (owned_idx) -> so if not in pool_map, it's "Disponible"
+        for _, rr in hinted.iterrows():
+            pkey = str(rr.get("__pkey") or "")
+            if not pkey:
+                continue
+            if pkey not in pool_map:
+                players_db_pool_but_available.append({
+                    "Player": safe_str(rr.get("Player")),
+                    "PoolTeamInPlayersDB": rr.get("__pool_team_hint", ""),
+                    "Note": "Présent dans hockey.players.csv mais absent des fichiers équipes (/data/*) — risque d'apparaitre 'Disponible'",
+                })
+
+    return {
+        "dupes": dupes,
+        "missing_in_players_db": missing_in_players_db,
+        "players_db_pool_but_available": players_db_pool_but_available,
+        "pool_cols_detected": pool_cols,
+    }
 
 # ----------------------------
 # NHL API (landing)
@@ -769,6 +952,37 @@ def render_tab_joueurs():
 
     owned_idx = load_owned_index_from_team_files(DATA_DIR)
 
+    # ---- 🧪 Audit (sanity check) — joueurs du pool qui pourraient apparaître "Disponible"
+    with st.expander("🧪 Audit automatique — sanity check (pool vs Disponible)", expanded=False):
+        audit = audit_pool_vs_availability(df, DATA_DIR)
+
+        dupes = audit.get("dupes", [])
+        missing = audit.get("missing_in_players_db", [])
+        risky = audit.get("players_db_pool_but_available", [])
+
+        cols = st.columns(3)
+        cols[0].metric("Doublons (2 équipes+)", len(dupes))
+        cols[1].metric("Pool introuvable dans players DB", len(missing))
+        cols[2].metric("Risque: marqué pool mais 'Disponible'", len(risky))
+
+        if audit.get("pool_cols_detected"):
+            st.caption("Colonnes détectées dans hockey.players.csv pour l’équipe/owner pool: " + ", ".join(audit["pool_cols_detected"]))
+
+        if dupes:
+            st.markdown("#### ⚠️ Joueurs présents dans plusieurs équipes (à corriger)")
+            st.dataframe(pd.DataFrame(dupes), use_container_width=True, hide_index=True)
+
+        if missing:
+            st.markdown("#### ⚠️ Joueurs dans les fichiers équipes mais introuvables dans hockey.players.csv (mismatch nom / normalisation)")
+            st.dataframe(pd.DataFrame(missing), use_container_width=True, hide_index=True)
+
+        if risky:
+            st.markdown("#### ⚠️ Joueurs marqués dans une équipe (hockey.players.csv) mais non détectés dans les fichiers équipes — ils peuvent apparaître 'Disponible'")
+            st.dataframe(pd.DataFrame(risky), use_container_width=True, hide_index=True)
+
+        if (not dupes) and (not missing) and (not risky):
+            st.success("✅ Aucun problème détecté: tout ce qui est dans le pool est reconnu comme non-disponible.")
+
     # ---- Filtres (4)
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
 
@@ -874,7 +1088,7 @@ def render_tab_joueurs():
 
     # ---- Associer NHL_ID (centré et plus étroit) si manquant
     if missing_nhl:
-        cL, cM, cR = st.columns([1, 2, 1])
+        cL, cM, cR = st.columns([1, 1.15, 1])
         with cM:
             with st.expander("🔗 Associer NHL_ID (activer photo + stats live)", expanded=False):
                 default_q = player_last_first_to_first_last(player_name)
