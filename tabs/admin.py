@@ -29,7 +29,7 @@ import streamlit as st
 # ---- Optional: Google Drive client (if installed)
 try:
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload
+    from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
 except Exception:
@@ -635,12 +635,49 @@ def append_admin_log(
 # ============================================================
 # DRIVE (OAuth) — get service
 # ============================================================
+
+def _drive_service_from_secrets_refresh_token() -> Optional[Any]:
+    """Crée un service Drive via refresh_token dans st.secrets['gdrive_oauth'] (connexion silencieuse).
+    Requiert: client_id, client_secret, refresh_token, token_uri.
+    """
+    try:
+        g = st.secrets.get("gdrive_oauth")  # type: ignore[attr-defined]
+    except Exception:
+        g = None
+    if not g:
+        return None
+    client_id = str(g.get("client_id") or "").strip()
+    client_secret = str(g.get("client_secret") or "").strip()
+    refresh_token = str(g.get("refresh_token") or "").strip()
+    token_uri = str(g.get("token_uri") or "https://oauth2.googleapis.com/token").strip()
+    if not (client_id and client_secret and refresh_token and token_uri):
+        return None
+    try:
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri=token_uri,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        # force refresh maintenant (valide creds.token)
+        creds.refresh(Request())
+        return build("drive", "v3", credentials=creds)
+    except Exception:
+        return None
+
 def _drive_service_from_existing_oauth() -> Optional[Any]:
     """
     Essaie d'obtenir un service Drive "comme avant" :
     1) si ton projet a déjà un helper (services.*drive_oauth*), on l'utilise
     2) sinon, on tente st.session_state['drive_creds'] (dict OAuth) -> google.oauth2.credentials
     """
+    # 0) secrets refresh_token (connexion silencieuse)
+    svc = _drive_service_from_secrets_refresh_token()
+    if svc is not None:
+        return svc
+
     # 1) helper projet
     if callable(_oauth_get_service):
         try:
@@ -690,6 +727,34 @@ def _drive_service_from_existing_oauth() -> Optional[Any]:
         return build("drive", "v3", credentials=creds)
     except Exception:
         return None
+
+
+def _drive_upload_bytes(svc: Any, folder_id: str, filename: str, data: bytes, mimetype: str = "application/octet-stream") -> Optional[dict]:
+    """Upload bytes to Google Drive folder. Returns file metadata dict or None."""
+    if not svc or not folder_id or not filename:
+        return None
+    bio = io.BytesIO(data)
+    media = MediaIoBaseUpload(bio, mimetype=mimetype, resumable=False)
+    body = {"name": filename, "parents": [folder_id]}
+    try:
+        return svc.files().create(body=body, media_body=media, fields="id,name,webViewLink,createdTime").execute()
+    except Exception:
+        return None
+
+def _zip_folder_bytes(folder_path: str, arc_prefix: str = "") -> bytes:
+    """Zip a folder into bytes."""
+    folder_path = str(folder_path or "")
+    bio = io.BytesIO()
+    with zipfile.ZipFile(bio, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        if folder_path and os.path.isdir(folder_path):
+            for root, _, files in os.walk(folder_path):
+                for fn in files:
+                    fp = os.path.join(root, fn)
+                    rel = os.path.relpath(fp, folder_path)
+                    arc = os.path.join(arc_prefix, rel) if arc_prefix else rel
+                    zf.write(fp, arcname=arc)
+    bio.seek(0)
+    return bio.read()
 
 def _drive_list_csv_files(svc: Any, folder_id: str) -> List[Dict[str, str]]:
     if not svc or not folder_id:
@@ -781,7 +846,45 @@ def render(ctx: dict) -> None:
         st.session_state.setdefault("CAP_GC", int(DEFAULT_CAP_GC))
         st.session_state.setdefault("CAP_CE", int(DEFAULT_CAP_CE))
 
-    with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
+    
+# =====================================================
+# 🧪 TEST DRIVE WRITE + BACKUP COMPLET (DATA)
+# =====================================================
+with st.expander("🧪 Test Drive write + backup complet", expanded=False):
+    folder_id = str(ctx.get("gdrive_folder_id") or ctx.get("folder_id") or st.secrets.get("gdrive_folder_id", "")).strip()
+    st.write(f"folder_id: `{folder_id}`")
+    svc_test = _drive_service_from_existing_oauth()
+    drive_ready = bool(svc_test) and bool(folder_id)
+    if not drive_ready:
+        st.warning("Drive non disponible pour l’écriture (OAuth/refresh_token manquant ou folder_id vide).")
+    else:
+        st.success("Drive prêt ✅ (connexion silencieuse via refresh_token).")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🧪 Écrire un fichier TEST dans Drive", use_container_width=True):
+                ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                payload = f"Drive test write OK — {ts}\nfolder_id={folder_id}\n".encode("utf-8")
+                meta = _drive_upload_bytes(svc_test, folder_id, f"TEST_WRITE_{ts}.txt", payload, mimetype="text/plain")
+                if meta and meta.get("id"):
+                    st.success(f"✅ Test OK — fichier créé: {meta.get('name')}")
+                    if meta.get("webViewLink"):
+                        st.link_button("Ouvrir dans Drive", meta["webViewLink"])
+                else:
+                    st.error("❌ Échec du test d’écriture (voir logs).")
+        with col2:
+            if st.button("🗜️ Backup complet (zip /data → Drive)", use_container_width=True):
+                ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                zip_bytes = _zip_folder_bytes(DATA_DIR, arc_prefix=os.path.basename(DATA_DIR.rstrip('/')) or "data")
+                fname = f"BACKUP_DATA_{ts}.zip"
+                meta = _drive_upload_bytes(svc_test, folder_id, fname, zip_bytes, mimetype="application/zip")
+                if meta and meta.get("id"):
+                    st.success(f"✅ Backup OK — {meta.get('name')}")
+                    if meta.get("webViewLink"):
+                        st.link_button("Ouvrir dans Drive", meta["webViewLink"])
+                else:
+                    st.error("❌ Échec du backup (voir logs).")
+
+with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
         st.caption("Format: `1 000 000 $` — valeurs utilisées partout (affichage + alertes).")
         c1, c2 = st.columns(2)
         with c1:
