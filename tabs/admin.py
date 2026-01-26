@@ -31,10 +31,12 @@ try:
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
     from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
 except Exception:
     build = None
     MediaIoBaseDownload = None
     Credentials = None
+    Request = None
 
 # ---- Optional: project-specific OAuth helpers (si ton projet les a déjà)
 # On essaie plusieurs noms possibles, sans casser si absent.
@@ -47,6 +49,10 @@ for _mod, _fn_ui, _fn_enabled, _fn_service in [
     ("services.gdrive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
     ("services.drive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
     ("services.drive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
+    ("services.drive", "render_drive_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
+    ("services.drive", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
+    ("services.auth", "render_drive_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
+
 ]:
     try:
         m = __import__(_mod, fromlist=[_fn_ui, _fn_enabled, _fn_service])
@@ -647,7 +653,33 @@ def _drive_service_from_existing_oauth() -> Optional[Any]:
         except Exception:
             pass
 
-    # 2) session_state creds dict
+    # 2) secrets (refresh_token) — pas besoin d'UI OAuth
+    try:
+        s = st.secrets.get('gdrive_oauth', {})
+    except Exception:
+        s = {}
+    if build is not None and Credentials is not None and Request is not None and isinstance(s, dict):
+        rt = (s.get('refresh_token') or '').strip()
+        cid = (s.get('client_id') or '').strip()
+        csec = (s.get('client_secret') or '').strip()
+        turi = (s.get('token_uri') or 'https://oauth2.googleapis.com/token').strip()
+        if rt and cid and csec:
+            try:
+                creds = Credentials(
+                    token=None,
+                    refresh_token=rt,
+                    token_uri=turi,
+                    client_id=cid,
+                    client_secret=csec,
+                    scopes=['https://www.googleapis.com/auth/drive'],
+                )
+                # Force refresh token -> access token
+                creds.refresh(Request())
+                return build('drive', 'v3', credentials=creds)
+            except Exception:
+                pass
+
+    # 3) session_state creds dict
     if build is None or Credentials is None:
         return None
     creds_dict = st.session_state.get("drive_creds")
@@ -717,7 +749,14 @@ def render(ctx: dict) -> None:
             except Exception:
                 st.info("UI OAuth présente mais a échoué — vérifie tes secrets OAuth.")
         else:
-            st.caption("Aucune UI OAuth détectée dans services/*. Tu peux quand même importer en local (fallback).")
+            st.caption("UI OAuth non détectée dans services/*. (Ce n'est pas bloquant si tes secrets contiennent un refresh_token.)")
+            try:
+                s = st.secrets.get('gdrive_oauth', {})
+            except Exception:
+                s = {}
+            if isinstance(s, dict) and (s.get('refresh_token') and s.get('client_id') and s.get('client_secret')):
+                st.success("OAuth configuré via refresh_token (connexion silencieuse).")
+
             if callable(_oauth_enabled):
                 try:
                     st.write("oauth_drive_enabled():", bool(_oauth_enabled()))
