@@ -1,10 +1,14 @@
 # =====================================================
 # tabs/joueurs.py — Onglet Joueurs (PRO)
 #   ✅ Recherche typeahead (prénom OU nom)
-#   ✅ Filtres: Équipe NHL, Position, Level (ELC/STD)
-#   ✅ Photo headshot NHL via nhl_id (déjà dans hockey.players.csv)
-#   ✅ Stats LIVE via NHL API (landing) en TABLE PRO (skater/goalie)
-#   ✅ Utilise /data/hockey.players.csv (dans ton repo GitHub)
+#   ✅ Filtres: Équipe NHL, Position (Forward/Defense/Goalie), Level (ELC/STD), Pays
+#   ✅ Retire combos (F,D / F,G / etc.) + retire NAN des choix
+#   ✅ Logo équipe NHL à côté de l'équipe
+#   ✅ Badge "déjà dans une de nos équipes" basé sur:
+#       Whalers, Red_Wings, Predateurs, Nordiques, Cracheurs, Canadiens (CSV dans /data/)
+#   ✅ Photo headshot NHL via nhl_id (si présent)
+#   ✅ Stats LIVE via NHL API (landing) en TABLE PRO (skater/goalie) — seulement si nhl_id présent
+#   ✅ Utilise /data/hockey.players.csv
 # =====================================================
 
 import os
@@ -16,45 +20,37 @@ import streamlit as st
 DATA_DIR = "data"
 PLAYERS_PATH = os.path.join(DATA_DIR, "hockey.players.csv")
 
-
-# ----------------------------
-# Load local players DB
-# ----------------------------
-@st.cache_data(show_spinner=False)
-def load_players_db(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        return pd.DataFrame()
-
-    df = pd.read_csv(path, low_memory=False)
-    df.columns = [c.strip() for c in df.columns]
-
-    # Colonnes attendues selon ton header (on garantit l'existence)
-    for c in ["Player", "Team", "Position", "Level", "Age", "Flag", "Country", "Cap Hit", "Jersey#", "H(f)", "W(lbs)"]:
-        if c not in df.columns:
-            df[c] = ""
-
-    # nhl_id: clé essentielle pour headshot + API live
-    if "nhl_id" in df.columns:
-        df["nhl_id"] = pd.to_numeric(df["nhl_id"], errors="coerce").astype("Int64")
-    else:
-        df["nhl_id"] = pd.Series([pd.NA] * len(df), dtype="Int64")
-
-    # Normalise Level
-    df["Level"] = df["Level"].astype(str).str.strip().str.upper().replace({"0": "", "NAN": ""})
-
-    # Normalise Team/Position string
-    df["Team"] = df["Team"].astype(str).str.strip()
-    df["Position"] = df["Position"].astype(str).str.strip().str.upper()
-
-    # Petit tri stable
-    df["Player"] = df["Player"].astype(str).str.strip()
-
-    return df
+PMS_TEAM_FILES = [
+    "Whalers.csv",
+    "Red_Wings.csv",
+    "Predateurs.csv",
+    "Nordiques.csv",
+    "Cracheurs.csv",
+    "Canadiens.csv",
+]
 
 
 # ----------------------------
-# Helpers (name / formatting)
+# Helpers (position / name / formatting)
 # ----------------------------
+def _pos_bucket(pos_raw: str) -> str:
+    """
+    Mappe Position brute vers: Forward / Defense / Goalie
+    - retire NAN
+    - retire combos (F,D / F,G / etc.) -> bucket simple
+    """
+    s = str(pos_raw or "").strip().upper()
+    if not s or s in {"NAN", "NONE", "NULL"}:
+        return ""
+    if "G" in s:
+        return "Goalie"
+    if "D" in s:
+        return "Defense"
+    if "F" in s:
+        return "Forward"
+    return ""
+
+
 def player_last_first_to_first_last(name: str) -> str:
     """'Zucker, Jason' -> 'Jason Zucker'."""
     s = str(name or "").strip()
@@ -67,11 +63,26 @@ def player_last_first_to_first_last(name: str) -> str:
 
 def safe_str(x) -> str:
     s = "" if x is None else str(x)
-    return s if s.strip() else "—"
+    s = s.strip()
+    if not s or s.upper() == "NAN":
+        return "—"
+    return s
+
+
+def _norm_player_key(name: str) -> str:
+    """
+    Normalisation robuste pour matcher les joueurs entre fichiers:
+    - 'Zucker, Jason' -> 'jason zucker'
+    - enlève ponctuation
+    """
+    s = player_last_first_to_first_last(str(name or ""))
+    s = s.lower().strip()
+    s = re.sub(r"[^a-z0-9\s\-]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def _is_goalie(r: pd.Series) -> bool:
-    # Selon tes données: Position = "G" pour gardien
     pos = str(r.get("Position", "") or "").strip().upper()
     sr_type = str(r.get("sr_position_type", "") or "").strip().lower() if "sr_position_type" in r.index else ""
     if pos == "G" or pos.startswith("G"):
@@ -86,17 +97,17 @@ def _fmt_pct(v):
         if v is None or (isinstance(v, float) and pd.isna(v)):
             return "—"
         s = str(v).strip()
-        if not s:
+        if not s or s.upper() == "NAN":
             return "—"
         f = float(s)
-        # 0.913 -> .913 style hockey ; 91.3 -> 91.3%
         if f > 1.0:
             return f"{f:.1f}%"
         if 0.0 <= f <= 1.0:
             return f"{f:.3f}".lstrip("0")
         return s
     except Exception:
-        return str(v) if str(v).strip() else "—"
+        s = str(v).strip()
+        return s if s and s.upper() != "NAN" else "—"
 
 
 def _fmt_num(v, digits=0):
@@ -104,24 +115,197 @@ def _fmt_num(v, digits=0):
         if v is None or (isinstance(v, float) and pd.isna(v)):
             return "—"
         s = str(v).strip()
-        if not s:
+        if not s or s.upper() == "NAN":
             return "—"
         f = float(s)
         if digits == 0:
             return f"{int(round(f))}"
         return f"{f:.{digits}f}"
     except Exception:
-        return str(v) if str(v).strip() else "—"
+        s = str(v).strip()
+        return s if s and s.upper() != "NAN" else "—"
 
 
+def _get_first_present(r: pd.Series, keys: list[str], default=None):
+    for k in keys:
+        if k in r.index:
+            v = r.get(k)
+            if pd.notna(v) and str(v).strip() != "" and str(v).strip().upper() != "NAN":
+                return v
+    return default
+
+
+# ----------------------------
+# NHL Images
+# ----------------------------
 def headshot_url(player_id: int, size: int = 168) -> str:
     return f"https://cms.nhl.bamgrid.com/images/headshots/current/{size}x{size}/{int(player_id)}.jpg"
+
+
+def team_logo_svg_url(team_abbrev: str, variant: str = "light") -> str:
+    ab = (team_abbrev or "").strip().upper()
+    if not ab or ab == "—":
+        return ""
+    v = "light" if variant not in ("light", "dark") else variant
+    return f"https://assets.nhle.com/logos/nhl/svg/{ab}_{v}.svg"
+
+
+def render_team_with_logo(team_abbrev: str):
+    team = safe_str(team_abbrev)
+    if team == "—":
+        st.write("—")
+        return
+
+    logo = team_logo_svg_url(team, "light")
+    if not logo:
+        st.write(team)
+        return
+
+    st.markdown(
+        f"""
+        <div style="display:flex; align-items:center; gap:10px;">
+          <img src="{logo}" alt="{team}" style="height:30px; width:auto; display:block;" />
+          <div style="font-size:28px; font-weight:700; line-height:1;">{team}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+# ----------------------------
+# Load local players DB
+# ----------------------------
+@st.cache_data(show_spinner=False)
+def load_players_db(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame()
+
+    df = pd.read_csv(path, low_memory=False)
+    df.columns = [c.strip() for c in df.columns]
+
+    for c in ["Player", "Team", "Position", "Level", "Age", "Flag", "Country", "Cap Hit", "Jersey#", "H(f)", "W(lbs)", "Status"]:
+        if c not in df.columns:
+            df[c] = ""
+
+    if "nhl_id" in df.columns:
+        df["nhl_id"] = pd.to_numeric(df["nhl_id"], errors="coerce").astype("Int64")
+    else:
+        df["nhl_id"] = pd.Series([pd.NA] * len(df), dtype="Int64")
+
+    df["Player"] = df["Player"].astype(str).str.strip()
+    df["Team"] = df["Team"].astype(str).str.strip().str.upper()
+    df["Position"] = df["Position"].astype(str).str.strip().str.upper()
+    df["Country"] = df["Country"].astype(str).str.strip()
+    df["Level"] = df["Level"].astype(str).str.strip().str.upper().replace({"0": "", "NAN": ""})
+    df["PosBucket"] = df["Position"].apply(_pos_bucket)
+
+    for c in ["Team", "Country", "Flag", "Cap Hit", "Status"]:
+        df[c] = df[c].replace({"nan": "", "NaN": "", "NAN": ""})
+
+    df["__pkey"] = df["Player"].apply(_norm_player_key)
+    return df
+
+
+# ----------------------------
+# Owned index from 6 PMS team CSV files
+# ----------------------------
+def _team_name_from_filename(fname: str) -> str:
+    base = os.path.splitext(os.path.basename(fname))[0]
+    return base.replace("_", " ").strip()
+
+
+def _detect_player_column(df: pd.DataFrame) -> str | None:
+    """
+    Détecte la colonne joueur dans un roster CSV.
+    On essaie des noms fréquents; sinon, si une colonne contient des valeurs "Last, First" on la choisit.
+    """
+    cols = [c.strip() for c in df.columns]
+    for c in ["Joueur", "Player", "Nom", "Name"]:
+        if c in cols:
+            return c
+
+    # Heuristique: première colonne qui ressemble à des noms
+    for c in cols[:5]:
+        s = df[c].dropna().astype(str)
+        if s.empty:
+            continue
+        # si plusieurs valeurs contiennent une virgule (Last, First)
+        sample = s.head(30).tolist()
+        comma_hits = sum(1 for x in sample if "," in str(x))
+        if comma_hits >= 5:
+            return c
+
+    # fallback: première colonne
+    return cols[0] if cols else None
+
+
+def _detect_scope_column(df: pd.DataFrame) -> str | None:
+    for c in ["Scope", "Club", "GC/CE", "GC_CE", "Type", "Roster", "Slot", "Statut", "Status"]:
+        if c in df.columns:
+            return c
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def load_owned_index_from_team_files(data_dir: str) -> dict:
+    """
+    Retour: pkey -> {"team_pms": "...", "scope": "...", "source": "..."}
+    """
+    idx: dict[str, dict] = {}
+
+    for fname in PMS_TEAM_FILES:
+        fp = os.path.join(data_dir, fname)
+        if not os.path.exists(fp):
+            continue
+
+        team_pms = _team_name_from_filename(fname)
+
+        try:
+            df = pd.read_csv(fp, low_memory=False)
+            df.columns = [c.strip() for c in df.columns]
+
+            pcol = _detect_player_column(df)
+            if not pcol:
+                continue
+
+            scol = _detect_scope_column(df)
+
+            for _, r in df.iterrows():
+                pkey = _norm_player_key(r.get(pcol, ""))
+                if not pkey:
+                    continue
+                if pkey in idx:
+                    continue
+                scope_val = str(r.get(scol, "")).strip() if scol else ""
+                idx[pkey] = {
+                    "team_pms": team_pms,
+                    "scope": scope_val,
+                    "source": fname,
+                }
+        except Exception:
+            continue
+
+    return idx
+
+
+def render_owned_badge(pkey: str, owned_idx: dict):
+    info = owned_idx.get(pkey)
+    if not info:
+        st.markdown("🟩 **Disponible (pas dans nos équipes)**")
+        return
+
+    team_pms = info.get("team_pms") or "Équipe"
+    scope = str(info.get("scope") or "").strip()
+    src = info.get("source") or ""
+    extra = f" — {scope}" if scope and scope.upper() != "NAN" else ""
+    src_txt = f" (source: {src})" if src else ""
+    st.markdown(f"🟥 **Déjà dans nos équipes : {team_pms}{extra}**{src_txt}")
 
 
 # ----------------------------
 # NHL API (landing)
 # ----------------------------
-@st.cache_data(show_spinner=False, ttl=600)  # 10 minutes
+@st.cache_data(show_spinner=False, ttl=600)
 def nhl_player_landing(player_id: int) -> dict:
     url = f"https://api-web.nhle.com/v1/player/{int(player_id)}/landing"
     r = requests.get(url, timeout=12)
@@ -133,10 +317,6 @@ def nhl_player_landing(player_id: int) -> dict:
 # API -> PRO TABLE extraction (robust)
 # ----------------------------
 def _deep_find_lists(obj, key_hint=None, max_lists=20):
-    """
-    Parcourt un JSON dict/list et retourne des (path, list_value) pour toutes les listes de dict.
-    Si key_hint est fourni, on préfère les chemins contenant ce hint.
-    """
     found = []
 
     def rec(x, path=""):
@@ -161,31 +341,16 @@ def _deep_find_lists(obj, key_hint=None, max_lists=20):
         found.sort(key=lambda t: (0 if hint in t[0].lower() else 1, len(t[0])))
     else:
         found.sort(key=lambda t: len(t[0]))
-
     return found
 
 
 def _pick_season_list(landing: dict):
-    """
-    Essaie de trouver la liste qui ressemble à des stats par saison.
-    On teste d'abord quelques clés typiques, sinon on fait une recherche deep.
-    """
-    candidates = []
-
-    # Clés fréquentes possibles
     for k in ["seasonTotals", "seasonTotal", "seasons", "statsBySeason", "playerStatsBySeason"]:
         v = landing.get(k)
         if isinstance(v, list) and v and all(isinstance(it, dict) for it in v):
-            candidates.append((k, v))
+            return v
 
-    if candidates:
-        # Priorise celle qui a le plus d'entrées
-        candidates.sort(key=lambda t: len(t[1]), reverse=True)
-        return candidates[0][1]
-
-    # Sinon: search deep
     found = _deep_find_lists(landing, key_hint="season")
-    # On préfère une liste où plusieurs éléments ont une clé 'season' ou 'seasonId' ou 'gameType'
     for _, lst in found:
         score = 0
         for it in lst[:5]:
@@ -199,7 +364,6 @@ def _pick_season_list(landing: dict):
         if score >= 6:
             return lst
 
-    # fallback: première liste plausible
     return found[0][1] if found else []
 
 
@@ -210,9 +374,8 @@ def _to_number(x):
         if isinstance(x, (int, float)):
             return float(x)
         s = str(x).strip()
-        if not s:
+        if not s or s.upper() == "NAN":
             return None
-        # handle ".913"
         if s.startswith("."):
             s = "0" + s
         return float(s)
@@ -221,7 +384,6 @@ def _to_number(x):
 
 
 def _map_skater_row(it: dict) -> dict:
-    # Accepte variations: gp/gamesPlayed, pts/points
     season = it.get("season") or it.get("seasonId") or it.get("seasonYear") or ""
     team = it.get("teamAbbrev") or it.get("team") or it.get("teamName") or it.get("teamAbbreviation") or ""
     gt = it.get("gameTypeAbbrev") or it.get("gameType") or it.get("gameTypeId") or ""
@@ -244,7 +406,6 @@ def _map_skater_row(it: dict) -> dict:
         "Season": str(season),
         "Team": str(team),
         "Type": str(gt),
-        "Lg": str(league),
         "GP": _to_number(gp),
         "G": _to_number(g),
         "A": _to_number(a),
@@ -257,6 +418,7 @@ def _map_skater_row(it: dict) -> dict:
         "SHP": _to_number(shp),
         "SOG": _to_number(sog),
         "Sh%": _to_number(sh_pct),
+        "Lg": str(league),
     }
 
 
@@ -281,7 +443,6 @@ def _map_goalie_row(it: dict) -> dict:
         "Season": str(season),
         "Team": str(team),
         "Type": str(gt),
-        "Lg": str(league),
         "GP": _to_number(gp),
         "W": _to_number(w),
         "L": _to_number(l),
@@ -292,23 +453,54 @@ def _map_goalie_row(it: dict) -> dict:
         "Saves": _to_number(saves),
         "SA": _to_number(sa),
         "GA": _to_number(ga),
+        "Lg": str(league),
     }
 
 
+def _format_api_table(df: pd.DataFrame, goalie: bool) -> pd.DataFrame:
+    df2 = df.copy()
+
+    def _type_norm(x):
+        s = str(x or "").strip().upper()
+        if s in ["R", "RS", "REG", "REGULAR", "2"]:
+            return "RS"
+        if s in ["P", "PO", "PLAYOFF", "PLAYOFFS", "3"]:
+            return "PO"
+        return s
+
+    if "Type" in df2.columns:
+        df2["Type"] = df2["Type"].apply(_type_norm)
+
+    if goalie:
+        keep = ["Season", "Team", "Type", "GP", "W", "L", "OTL", "SV%", "GAA", "SO", "Saves", "SA", "GA"]
+        keep = [c for c in keep if c in df2.columns]
+        df2 = df2[keep]
+        if "SV%" in df2.columns:
+            df2["SV%"] = df2["SV%"].apply(_fmt_pct)
+        if "GAA" in df2.columns:
+            df2["GAA"] = df2["GAA"].apply(lambda x: _fmt_num(x, 2))
+        for c in ["GP", "W", "L", "OTL", "SO", "Saves", "SA", "GA"]:
+            if c in df2.columns:
+                df2[c] = df2[c].apply(lambda x: _fmt_num(x, 0))
+        return df2
+
+    keep = ["Season", "Team", "Type", "GP", "G", "A", "PTS", "+/-", "PIM", "PPP", "PPG", "PPA", "SHP", "SOG", "Sh%"]
+    keep = [c for c in keep if c in df2.columns]
+    df2 = df2[keep]
+    for c in ["GP", "G", "A", "PTS", "+/-", "PIM", "PPP", "PPG", "PPA", "SHP", "SOG"]:
+        if c in df2.columns:
+            df2[c] = df2[c].apply(lambda x: _fmt_num(x, 0))
+    if "Sh%" in df2.columns:
+        df2["Sh%"] = df2["Sh%"].apply(lambda x: _fmt_num(x, 1))
+    return df2
+
+
 def render_api_pro_tables(landing: dict, goalie: bool):
-    """
-    Affiche des tables pro en tentant:
-    - une table "Regular Season" (game type RS si dispo)
-    - une table "Playoffs" (PO si dispo)
-    Sinon: affiche table unique.
-    """
     season_list = _pick_season_list(landing)
     if not season_list:
         st.info("Aucune table de saisons trouvée dans la réponse API (landing).")
-        st.json(landing, expanded=False)
         return
 
-    # map -> DataFrame
     rows = []
     for it in season_list:
         try:
@@ -318,106 +510,40 @@ def render_api_pro_tables(landing: dict, goalie: bool):
 
     if not rows:
         st.info("Impossible de mapper les stats API en table (structure différente).")
-        st.json(landing, expanded=False)
         return
 
-    df = pd.DataFrame(rows)
-
-    # Nettoyage: drop lignes vides
-    df = df.dropna(how="all")
+    df = pd.DataFrame(rows).dropna(how="all")
     if df.empty:
         st.info("Table API vide après nettoyage.")
-        st.json(landing, expanded=False)
         return
 
-    # Formattage colonnes numériques
-    num_cols = [c for c in df.columns if c not in ["Season", "Team", "Type", "Lg"]]
-    for c in num_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    # Heuristique de Type: si c'est numérique (gameTypeId), on le laisse mais on peut mieux
-    # On essaie de normaliser: si "R" / "P" existent, sinon on garde tel quel.
-    # Beaucoup de réponses utilisent "R" (regular) ou "P" (playoffs) ou "2"/"3" etc.
-    def _type_norm(x):
-        s = str(x or "").strip().upper()
-        if s in ["R", "RS", "REG", "REGULAR", "2"]:
-            return "RS"
-        if s in ["P", "PO", "PLAYOFF", "PLAYOFFS", "3"]:
-            return "PO"
-        return s
-
-    df["Type"] = df["Type"].apply(_type_norm)
-
-    # Tri: saison desc
-    df["_season_sort"] = pd.to_numeric(df["Season"].str.extract(r"(\d{4})")[0], errors="coerce")
+    df["_season_sort"] = pd.to_numeric(df["Season"].astype(str).str.extract(r"(\d{4})")[0], errors="coerce")
     df = df.sort_values(by=["_season_sort", "Type", "Team"], ascending=[False, True, True]).drop(columns=["_season_sort"])
 
-    # Split RS / PO si possible
-    rs = df[df["Type"] == "RS"].copy()
-    po = df[df["Type"] == "PO"].copy()
+    df_fmt = _format_api_table(df, goalie=goalie)
+    rs = df_fmt[df_fmt["Type"] == "RS"] if "Type" in df_fmt.columns else pd.DataFrame()
+    po = df_fmt[df_fmt["Type"] == "PO"] if "Type" in df_fmt.columns else pd.DataFrame()
 
     if not rs.empty:
         st.markdown("#### Regular Season (API)")
-        st.dataframe(_format_api_table(rs, goalie), use_container_width=True)
-
+        st.dataframe(rs, use_container_width=True)
     if not po.empty:
         st.markdown("#### Playoffs (API)")
-        st.dataframe(_format_api_table(po, goalie), use_container_width=True)
+        st.dataframe(po, use_container_width=True)
 
     if rs.empty and po.empty:
         st.markdown("#### Stats (API)")
-        st.dataframe(_format_api_table(df, goalie), use_container_width=True)
+        st.dataframe(df_fmt, use_container_width=True)
 
-    # FeaturedStats compact (si présent)
     featured = landing.get("featuredStats")
     if featured:
         with st.expander("Featured stats (API) — détail", expanded=False):
             st.json(featured, expanded=False)
 
 
-def _format_api_table(df: pd.DataFrame, goalie: bool) -> pd.DataFrame:
-    """
-    Formatte un DF API en table lisible (arrondis + colonnes pertinentes).
-    """
-    df2 = df.copy()
-
-    if goalie:
-        keep = ["Season", "Team", "Type", "GP", "W", "L", "OTL", "SV%", "GAA", "SO", "Saves", "SA", "GA"]
-        keep = [c for c in keep if c in df2.columns]
-        df2 = df2[keep]
-        if "SV%" in df2.columns:
-            df2["SV%"] = df2["SV%"].apply(lambda x: _fmt_pct(x))
-        if "GAA" in df2.columns:
-            df2["GAA"] = df2["GAA"].apply(lambda x: _fmt_num(x, 2))
-        for c in ["GP", "W", "L", "OTL", "SO", "Saves", "SA", "GA"]:
-            if c in df2.columns:
-                df2[c] = df2[c].apply(lambda x: _fmt_num(x, 0))
-        return df2
-
-    else:
-        keep = ["Season", "Team", "Type", "GP", "G", "A", "PTS", "+/-", "PIM", "PPP", "PPG", "PPA", "SHP", "SOG", "Sh%"]
-        keep = [c for c in keep if c in df2.columns]
-        df2 = df2[keep]
-        for c in ["GP", "G", "A", "PTS", "+/-", "PIM", "PPP", "PPG", "PPA", "SHP", "SOG"]:
-            if c in df2.columns:
-                df2[c] = df2[c].apply(lambda x: _fmt_num(x, 0))
-        if "Sh%" in df2.columns:
-            df2["Sh%"] = df2["Sh%"].apply(lambda x: _fmt_num(x, 1))
-        return df2
-
-
 # ----------------------------
 # Local PRO stats (CSV) panels
 # ----------------------------
-def _get_first_present(r: pd.Series, keys: list[str], default=None):
-    for k in keys:
-        if k in r.index:
-            v = r.get(k)
-            if pd.notna(v) and str(v).strip() != "":
-                return v
-    return default
-
-
 def render_local_pro_panel(row: pd.DataFrame):
     r = row.iloc[0]
     goalie = _is_goalie(r)
@@ -482,41 +608,46 @@ def render_tab_joueurs():
     df = load_players_db(PLAYERS_PATH)
     if df.empty:
         st.error("❌ data/hockey.players.csv introuvable ou vide.")
-        st.info("Assure-toi que le fichier est bien dans /data/ (repo GitHub).")
         return
 
-    # ---- Filtres
-    c1, c2, c3 = st.columns([2, 2, 2])
+    owned_idx = load_owned_index_from_team_files(DATA_DIR)
+
+    # ---- Filtres (4)
+    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
 
     with c1:
-        teams = sorted([t for t in df["Team"].dropna().astype(str).unique() if t.strip()])
+        teams = sorted([t for t in df["Team"].dropna().astype(str).unique() if t.strip() and t.strip().upper() != "NAN"])
         team_pick = st.selectbox("Équipe NHL", ["Toutes"] + teams, index=0)
 
     with c2:
-        poss = sorted([p for p in df["Position"].dropna().astype(str).unique() if p.strip()])
-        pos_pick = st.selectbox("Position", ["Toutes"] + poss, index=0)
+        pos_pick = st.selectbox("Position", ["Toutes", "Forward", "Defense", "Goalie"], index=0)
 
     with c3:
         level_pick = st.selectbox("Level", ["Tous", "ELC", "STD"], index=0)
+
+    with c4:
+        countries = sorted([c for c in df["Country"].dropna().astype(str).unique() if c.strip() and c.strip().upper() != "NAN"])
+        country_pick = st.selectbox("Pays", ["Tous"] + countries, index=0)
 
     filt = df.copy()
     if team_pick != "Toutes":
         filt = filt[filt["Team"].astype(str) == team_pick]
     if pos_pick != "Toutes":
-        filt = filt[filt["Position"].astype(str).str.upper() == str(pos_pick).upper()]
+        filt = filt[filt["PosBucket"] == pos_pick]
     if level_pick != "Tous":
         filt = filt[filt["Level"].astype(str).str.upper() == level_pick]
+    if country_pick != "Tous":
+        filt = filt[filt["Country"].astype(str) == country_pick]
 
     if filt.empty:
         st.warning("Aucun joueur ne correspond aux filtres.")
         return
 
     # ---- Recherche typeahead
-    # selectbox est searchable -> tape prénom OU nom
     filt = filt.copy()
     filt["__display"] = filt["Player"].astype(str).str.strip()
     filt["__alt"] = filt["Player"].astype(str).apply(player_last_first_to_first_last)
-    filt["__opt"] = filt["__display"] + "  |  " + filt["__alt"]
+    filt["__opt"] = filt["__display"] + " | " + filt["__alt"]
     options = filt.sort_values("__display")["__opt"].tolist()
 
     picked = st.selectbox(
@@ -534,17 +665,29 @@ def render_tab_joueurs():
     r = row.iloc[0]
     goalie = _is_goalie(r)
 
-    # ---- Fiche joueur (header)
+    # ---- Titre joueur
     player_name = safe_str(r.get("Player"))
     player_name_alt = safe_str(player_last_first_to_first_last(player_name))
     st.subheader(player_name_alt if player_name_alt != "—" else player_name)
 
+    # ---- Owned badge
+    render_owned_badge(str(r.get("__pkey", "")), owned_idx)
+
+    # ---- Header metrics (avec logo NHL)
+    pos_simple = safe_str(r.get("PosBucket")) if safe_str(r.get("PosBucket")) != "—" else safe_str(r.get("Position"))
+
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Équipe", safe_str(r.get("Team")))
-    m2.metric("Position", safe_str(r.get("Position")))
-    m3.metric("Level", safe_str(r.get("Level")))
-    m4.metric("Âge", safe_str(r.get("Age")))
-    m5.metric("Cap Hit", safe_str(r.get("Cap Hit")))
+    with m1:
+        st.caption("Équipe (NHL)")
+        render_team_with_logo(r.get("Team"))
+    with m2:
+        st.metric("Position", pos_simple)
+    with m3:
+        st.metric("Level", safe_str(r.get("Level")))
+    with m4:
+        st.metric("Âge", safe_str(r.get("Age")))
+    with m5:
+        st.metric("Cap Hit", safe_str(r.get("Cap Hit")))
 
     # ---- Photo + drapeau + infos
     left, right = st.columns([1, 2])
@@ -556,7 +699,7 @@ def render_tab_joueurs():
             st.image(headshot_url(int(nhl_id), size=168), use_container_width=True)
             st.caption(f"NHL ID: {int(nhl_id)}")
         else:
-            st.info("Pas de nhl_id → pas de headshot / API.")
+            st.info("Photo NHL et stats live indisponibles (nhl_id manquant).")
 
         if flag_url.startswith("http"):
             st.image(flag_url, caption=safe_str(r.get("Country")), width=90)
@@ -571,9 +714,9 @@ def render_tab_joueurs():
         st.markdown("### 📊 Stats (PRO — CSV)")
         render_local_pro_panel(row)
 
-    # ---- API PRO TABLE
-    st.markdown("### ⚡ Stats NHL LIVE (API — table pro)")
+    # ---- API PRO TABLE (seulement si nhl_id présent)
     if pd.notna(nhl_id):
+        st.markdown("### ⚡ Stats NHL LIVE (API — table pro)")
         try:
             landing = nhl_player_landing(int(nhl_id))
 
@@ -587,13 +730,10 @@ def render_tab_joueurs():
 
         except Exception as e:
             st.warning(f"API NHL indisponible (ID {int(nhl_id)}). Détail: {e}")
-    else:
-        st.info("Ajoute / corrige la colonne nhl_id pour activer la photo + stats live.")
 
 
 # =====================================================
-# Entry point attendu par ton app: joueurs.render(ctx)
+# Entry point attendu: joueurs.render(ctx)
 # =====================================================
 def render(ctx: dict):
-    # ctx non requis ici, mais on garde la signature cohérente avec admin.render(ctx)
     render_tab_joueurs()
