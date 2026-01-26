@@ -13,6 +13,9 @@
 
 import os
 import re
+import difflib
+import datetime
+import urllib.parse
 import requests
 import pandas as pd
 import streamlit as st
@@ -134,6 +137,134 @@ def _get_first_present(r: pd.Series, keys: list[str], default=None):
                 return v
     return default
 
+
+
+# ----------------------------
+# NHL Search (associer NHL_ID)
+# ----------------------------
+def nhl_search_players(query: str, limit: int = 25) -> list[dict]:
+    """Recherche des joueurs dans l'index NHL (pour retrouver nhl_id)."""
+    q = str(query or "").strip()
+    if not q:
+        return []
+    try:
+        url = (
+            "https://search.d3.nhle.com/api/v1/search/player"
+            f"?culture=en-us&limit={int(limit)}&q={urllib.parse.quote(q)}"
+        )
+        r = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _norm_name(s: str) -> str:
+    s = str(s or "").lower().strip()
+    s = re.sub(r"[^a-z\s\-']", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def _seq_ratio(a: str, b: str) -> float:
+    a = _norm_name(a)
+    b = _norm_name(b)
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+def _auto_pick_nhl_id(player_name: str, team_abbrev: str, pos_bucket: str, age, results: list[dict]):
+    """Retourne (best_id, best_label, ranked_labels, id_map, confident_bool)."""
+    team_abbrev = str(team_abbrev or "").strip().upper()
+    pos_bucket = str(pos_bucket or "").strip()
+
+    birth_year_target = None
+    try:
+        if pd.notna(age):
+            birth_year_target = int(datetime.date.today().year) - int(float(age))
+    except Exception:
+        birth_year_target = None
+
+    scored = []
+    for it in (results or []):
+        pid = it.get("playerId") or it.get("player_id") or it.get("id")
+        if not pid:
+            continue
+        first = it.get("firstName", "") or ""
+        last = it.get("lastName", "") or ""
+        full = (f"{first} {last}").strip() or str(it.get("name") or "").strip()
+
+        team = (it.get("teamAbbrev") or it.get("team") or "").strip().upper()
+        pos = (it.get("position") or it.get("positionCode") or "").strip().upper()
+        bd = (it.get("birthDate") or it.get("birthdate") or "").strip()
+
+        name_score = _seq_ratio(full, player_name)
+        team_score = 0.08 if (team_abbrev and team and team_abbrev == team) else 0.0
+
+        # Position: map NHL position letters to bucket
+        pos_score = 0.0
+        if pos_bucket:
+            if pos == "G" and pos_bucket == "Goalie":
+                pos_score = 0.06
+            elif pos in {"D"} and pos_bucket == "Defense":
+                pos_score = 0.06
+            elif pos in {"C","L","R","LW","RW","F"} and pos_bucket == "Forward":
+                pos_score = 0.06
+
+        birth_score = 0.0
+        if birth_year_target and bd and len(bd) >= 4:
+            try:
+                by = int(bd[:4])
+                if abs(by - birth_year_target) <= 1:
+                    birth_score = 0.06
+            except Exception:
+                pass
+
+        total = name_score + team_score + pos_score + birth_score
+
+        lbl = f"{full} — {team} {pos} — {bd} — ID {pid}".strip()
+        scored.append((total, name_score, lbl, int(pid)))
+
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+    id_map = {}
+    labels = []
+    for total, name_score, lbl, pid in scored:
+        labels.append(lbl)
+        id_map[lbl] = pid
+
+    if not scored:
+        return None, None, [], {}, False
+
+    best_total, best_name, best_lbl, best_id = scored[0]
+    second_total = scored[1][0] if len(scored) > 1 else 0.0
+
+    # Heuristique confiance: nom très proche OU score total fort + marge
+    confident = (best_name >= 0.86) or (best_total >= 0.92 and (best_total - second_total) >= 0.06)
+
+    return best_id, best_lbl, labels, id_map, confident
+
+
+
+def save_players_db(df: pd.DataFrame, path: str) -> None:
+    """Sauvegarde hockey.players.csv en retirant les colonnes calculées."""
+    if df is None or df.empty:
+        return
+
+    out = df.copy()
+
+    # Colonnes internes à ne pas écrire
+    drop_cols = {"PosBucket", "__pkey", "__display", "__alt", "__opt", "__rowid"}
+    for c in list(drop_cols):
+        if c in out.columns:
+            out = out.drop(columns=[c])
+
+    # nhl_id -> entier nullable
+    if "nhl_id" in out.columns:
+        out["nhl_id"] = pd.to_numeric(out["nhl_id"], errors="coerce").astype("Int64")
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    out.to_csv(path, index=False, na_rep="")
 
 # ----------------------------
 # NHL Images
@@ -546,6 +677,7 @@ def render_api_pro_tables(landing: dict, goalie: bool):
 # ----------------------------
 def render_local_pro_panel(row: pd.DataFrame):
     r = row.iloc[0]
+    rowid = int(r.get("__rowid", 0))
     goalie = _is_goalie(r)
 
     gp = _get_first_present(r, ["nhl_gp", "NHL GP", "GP"], default=None)
@@ -663,6 +795,7 @@ def render_tab_joueurs():
         return
 
     r = row.iloc[0]
+    rowid = int(r.get("__rowid", 0))
     goalie = _is_goalie(r)
 
     # ---- Titre joueur
@@ -700,6 +833,80 @@ def render_tab_joueurs():
             st.caption(f"NHL ID: {int(nhl_id)}")
         else:
             st.info("Photo NHL et stats live indisponibles (nhl_id manquant).")
+
+            with st.expander("🔗 Associer NHL_ID (activer photo + stats live)", expanded=True):
+                default_q = player_last_first_to_first_last(player_name)
+                q = st.text_input(
+                    "Recherche NHL (nom / prénom)",
+                    value=default_q if default_q != "—" else str(player_name or "").strip(),
+                    key=f"nhl_q__{rowid}",
+                )
+
+                # --- Auto association (best effort)
+                if st.button("🤖 Associer automatiquement", key=f"nhl_auto__{rowid}"):
+                    # Cherche large à partir du nom (et tente un match avec équipe/pos/âge)
+                    auto_results = nhl_search_players(default_q, limit=25)
+                    best_id, best_lbl, labels, id_map, confident = _auto_pick_nhl_id(
+                        player_name=default_q,
+                        team_abbrev=r.get("Team"),
+                        pos_bucket=_pos_bucket(r.get("Position")),
+                        age=r.get("Age"),
+                        results=auto_results,
+                    )
+                    if best_id and confident:
+                        df.loc[df["__rowid"] == rowid, "nhl_id"] = int(best_id)
+                        save_players_db(df, PLAYERS_PATH)
+                        load_players_db.clear()
+                        st.success(f"✅ NHL_ID auto-associé: {best_id} ({best_lbl})")
+                        st.rerun()
+                    elif labels:
+                        st.session_state[f"nhl_results__{rowid}"] = auto_results
+                        st.warning("Match automatique incertain — sélectionne le bon joueur ci-dessous 👇")
+                        # Pré-sélection du meilleur
+                        st.session_state[f"nhl_pick__{rowid}"] = best_lbl
+                    else:
+                        st.warning("Aucun match trouvé automatiquement. Essaie la recherche manuelle.")
+
+                if st.button("🔎 Chercher dans la NHL", key=f"nhl_search__{rowid}"):
+                    st.session_state[f"nhl_results__{rowid}"] = nhl_search_players(q, limit=25)
+
+                results = st.session_state.get(f"nhl_results__{rowid}", [])
+                if results:
+                    labels = []
+                    id_map = {}
+                    for it in results:
+                        pid = it.get("playerId") or it.get("player_id") or it.get("id")
+                        if not pid:
+                            continue
+                        first = it.get("firstName", "") or ""
+                        last = it.get("lastName", "") or ""
+                        full = (f"{first} {last}").strip() or safe_str(it.get("name"))
+                        team = (it.get("teamAbbrev") or it.get("team") or "").strip()
+                        pos = (it.get("position") or it.get("positionCode") or "").strip()
+                        bd = (it.get("birthDate") or it.get("birthdate") or "").strip()
+                        lbl = f"{full} — {team} {pos} — {bd} — ID {pid}".strip()
+                        labels.append(lbl)
+                        id_map[lbl] = int(pid)
+
+                    if labels:
+                        pick_lbl = st.radio(
+                            "Choisis le bon joueur:",
+                            labels,
+                            index=0,
+                            key=f"nhl_pick__{rowid}",
+                        )
+                        if st.button("✅ Enregistrer NHL_ID", key=f"nhl_save__{rowid}"):
+                            chosen_id = id_map.get(pick_lbl)
+                            if chosen_id:
+                                df.loc[df["__rowid"] == rowid, "nhl_id"] = int(chosen_id)
+                                save_players_db(df, PLAYERS_PATH)
+                                load_players_db.clear()
+                                st.success(f"✅ NHL_ID enregistré: {chosen_id} (hockey.players.csv mis à jour)")
+                                st.rerun()
+                    else:
+                        st.warning("Aucun résultat exploitable.")
+                else:
+                    st.caption("Tip: essaie « Prénom Nom » ou seulement le nom de famille.")
 
         if flag_url.startswith("http"):
             st.image(flag_url, caption=safe_str(r.get("Country")), width=90)
