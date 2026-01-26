@@ -30,6 +30,7 @@ import streamlit as st
 try:
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaIoBaseDownload
+    from googleapiclient.http import MediaIoBaseUpload
     from google.oauth2.credentials import Credentials
 except Exception:
     build = None
@@ -43,8 +44,6 @@ _oauth_enabled = None
 _oauth_get_service = None
 
 for _mod, _fn_ui, _fn_enabled, _fn_service in [
-    ("services.drive", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
-    ("services.auth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
     ("services.gdrive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
     ("services.gdrive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
     ("services.drive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
@@ -57,6 +56,29 @@ for _mod, _fn_ui, _fn_enabled, _fn_service in [
         _oauth_get_service = getattr(m, _fn_service, None) or _oauth_get_service
     except Exception:
         pass
+# ---- Optional: project-specific Drive/Auth modules (repo PMS)
+# Dans ton repo, tu as services/drive.py et services/auth.py. On les utilise si disponibles.
+try:
+    from services import drive as _pms_drive  # type: ignore
+except Exception:
+    _pms_drive = None
+try:
+    from services import auth as _pms_auth  # type: ignore
+except Exception:
+    _pms_auth = None
+
+def _bind_oauth_helpers():
+    """Bind best-effort OAuth helpers from project modules; safe if absent."""
+    global _oauth_ui, _oauth_enabled, _oauth_get_service
+    for mod in [ _pms_auth, _pms_drive ]:
+        if not mod:
+            continue
+        _oauth_ui = getattr(mod, "render_drive_oauth_connect_ui", None) or getattr(mod, "render_oauth_connect_ui", None) or _oauth_ui
+        _oauth_enabled = getattr(mod, "oauth_drive_enabled", None) or _oauth_enabled
+        _oauth_get_service = getattr(mod, "get_drive_service", None) or getattr(mod, "drive_get_service", None) or _oauth_get_service
+
+_bind_oauth_helpers()
+
 
 
 
@@ -65,137 +87,6 @@ try:
     from google_auth_oauthlib.flow import Flow  # type: ignore
 except Exception:
     Flow = None
-
-
-# ============================================================
-# Helpers (money + paths + settings)
-# ============================================================
-
-def _fmt_money(n: int) -> str:
-    try:
-        n = int(n)
-    except Exception:
-        n = 0
-    return f"{n:,}".replace(",", " ") + " $"
-
-def _parse_money(s: str) -> int:
-    s = str(s or "")
-    digits = re.sub(r"[^0-9]", "", s)
-    try:
-        return int(digits) if digits else 0
-    except Exception:
-        return 0
-
-def _resolve_repo_root() -> str:
-    try:
-        return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    except Exception:
-        return os.getcwd()
-
-def _resolve_data_dir() -> str:
-    root = _resolve_repo_root()
-    for name in ["data", "Data", "DATA"]:
-        p = os.path.join(root, name)
-        if os.path.isdir(p):
-            return p
-    return os.path.join(root, "data")
-
-DATA_DIR = _resolve_data_dir()
-
-def _settings_local_path() -> str:
-    return os.path.join(DATA_DIR, "settings.csv")
-
-def _load_caps_from_settings_local() -> tuple[int, int]:
-    path = _settings_local_path()
-    if not os.path.exists(path):
-        return (0, 0)
-    try:
-        df = pd.read_csv(path)
-        if df.empty:
-            return (0, 0)
-        row = df.iloc[0].to_dict()
-        return (int(row.get("cap_gc", 0) or 0), int(row.get("cap_ce", 0) or 0))
-    except Exception:
-        return (0, 0)
-
-def _save_caps_to_settings_local(cap_gc: int, cap_ce: int) -> bool:
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        df = pd.DataFrame([{"cap_gc": int(cap_gc), "cap_ce": int(cap_ce)}])
-        df.to_csv(_settings_local_path(), index=False)
-        return True
-    except Exception:
-        return False
-
-def _creds_from_session() -> Optional["Credentials"]:
-    if Credentials is None:
-        return None
-    d = st.session_state.get("drive_creds") or {}
-    if not d:
-        return None
-    try:
-        return Credentials(
-            token=d.get("token"),
-            refresh_token=d.get("refresh_token"),
-            token_uri=d.get("token_uri"),
-            client_id=d.get("client_id"),
-            client_secret=d.get("client_secret"),
-            scopes=d.get("scopes") or ["https://www.googleapis.com/auth/drive"],
-        )
-    except Exception:
-        return None
-
-def _fallback_get_drive_service():
-    if build is None or Credentials is None:
-        return None
-    creds = _creds_from_session()
-    if creds is None:
-        return None
-    try:
-        return build("drive", "v3", credentials=creds)
-    except Exception:
-        return None
-
-def _drive_find_file_id_by_name(svc, folder_id: str, name: str) -> Optional[str]:
-    try:
-        q = f"'{folder_id}' in parents and name = '{name}' and trashed = false"
-        res = svc.files().list(q=q, fields="files(id,name)").execute()
-        files = res.get("files", []) or []
-        return files[0]["id"] if files else None
-    except Exception:
-        return None
-
-def _drive_download_csv(svc, file_id: str) -> Optional[str]:
-    if MediaIoBaseDownload is None:
-        return None
-    try:
-        req = svc.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, req)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        fh.seek(0)
-        return fh.read().decode("utf-8", errors="ignore")
-    except Exception:
-        return None
-
-def _drive_upload_csv(svc, folder_id: str, name: str, csv_text: str) -> bool:
-    try:
-        from googleapiclient.http import MediaInMemoryUpload
-    except Exception:
-        return False
-    try:
-        existing_id = _drive_find_file_id_by_name(svc, folder_id, name)
-        media = MediaInMemoryUpload(csv_text.encode("utf-8"), mimetype="text/csv", resumable=False)
-        if existing_id:
-            svc.files().update(fileId=existing_id, media_body=media).execute()
-        else:
-            meta = {"name": name, "parents": [folder_id]}
-            svc.files().create(body=meta, media_body=media, fields="id").execute()
-        return True
-    except Exception:
-        return False
 
 
 def render_drive_oauth_connect_ui() -> None:
@@ -287,24 +178,106 @@ EQUIPES_COLUMNS = [
 DEFAULT_CAP_GC = 88_000_000
 DEFAULT_CAP_CE = 12_000_000
 
+# ============================================================
+# 💾 Settings (caps) — local + Drive
+# ============================================================
+
+SETTINGS_FILE_NAME = "settings.csv"
+
+def _fmt_money(n: Any) -> str:
+    try:
+        v = int(float(str(n).replace(" ", "").replace("$","").replace(",","")))
+    except Exception:
+        v = 0
+    s = f"{v:,}".replace(",", " ")
+    return f"{s} $"
+
+def _parse_money(s: str) -> int:
+    s = str(s or "")
+    digits = re.sub(r"[^0-9]", "", s)
+    try:
+        return int(digits) if digits else 0
+    except Exception:
+        return 0
+
+def _cap_is_reasonable(v: int) -> bool:
+    return 1_000_000 <= int(v) <= 200_000_000
+
+def settings_local_path(data_dir: str) -> str:
+    return os.path.join(data_dir, SETTINGS_FILE_NAME)
+
+def _drive_find_file_id_by_name(svc, folder_id: str, name: str) -> str:
+    if not svc or not folder_id or not name:
+        return ""
+    try:
+        q = f"'{folder_id}' in parents and name='{name}' and trashed=false"
+        res = svc.files().list(q=q, spaces="drive", fields="files(id,name)", pageSize=10).execute()
+        files = res.get("files", []) if isinstance(res, dict) else []
+        return str(files[0]["id"]) if files else ""
+    except Exception:
+        return ""
+
+def _drive_download_bytes(svc, file_id: str) -> bytes:
+    if not svc or not file_id or MediaIoBaseDownload is None:
+        return b""
+    fh = io.BytesIO()
+    try:
+        request = svc.files().get_media(fileId=file_id)
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        return fh.getvalue()
+    except Exception:
+        return b""
+
+def _drive_upload_bytes(svc, folder_id: str, name: str, content: bytes, mime: str = "text/csv") -> bool:
+    """Create or update file in Drive folder."""
+    if not svc or not folder_id or not name or MediaIoBaseUpload is None:
+        return False
+    try:
+        file_id = _drive_find_file_id_by_name(svc, folder_id, name)
+        media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime, resumable=False)
+        if file_id:
+            svc.files().update(fileId=file_id, media_body=media).execute()
+        else:
+            meta = {"name": name, "parents": [folder_id]}
+            svc.files().create(body=meta, media_body=media, fields="id").execute()
+        return True
+    except Exception:
+        return False
+
+def load_caps_from_settings_csv(csv_bytes: bytes) -> Tuple[int,int]:
+    """Parse settings.csv content -> (cap_gc, cap_ce)."""
+    try:
+        df = pd.read_csv(io.BytesIO(csv_bytes))
+    except Exception:
+        try:
+            df = pd.read_csv(io.BytesIO(csv_bytes), sep=";")
+        except Exception:
+            return (DEFAULT_CAP_GC, DEFAULT_CAP_CE)
+    cap_gc = DEFAULT_CAP_GC
+    cap_ce = DEFAULT_CAP_CE
+    if not df.empty:
+        cols = {c.lower(): c for c in df.columns}
+        if "cap_gc" in cols:
+            cap_gc = int(df.loc[0, cols["cap_gc"]])
+        if "cap_ce" in cols:
+            cap_ce = int(df.loc[0, cols["cap_ce"]])
+    return (cap_gc, cap_ce)
+
+def dump_caps_settings_csv(cap_gc: int, cap_ce: int) -> bytes:
+    df = pd.DataFrame([{"cap_gc": int(cap_gc), "cap_ce": int(cap_ce), "updated_at": datetime.utcnow().isoformat()}])
+    bio = io.BytesIO()
+    df.to_csv(bio, index=False)
+    return bio.getvalue()
+
 
 # ============================================================
 # UTILS
 # ============================================================
 def _now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-# ---- Bind OAuth helpers (final fallback)
-if _oauth_ui is None:
-    _oauth_ui = render_drive_oauth_connect_ui
-
-if _oauth_enabled is None:
-    def _oauth_enabled() -> bool:
-        return bool(st.session_state.get("drive_creds"))
-
-if _oauth_get_service is None:
-    _oauth_get_service = _fallback_get_drive_service
-
 
 def _norm(x: Any) -> str:
     return str(x or "").strip()
@@ -755,7 +728,7 @@ def render(ctx: dict) -> None:
         st.warning("Accès admin requis.")
         return
 
-    DATA_DIR = str(ctx.get("DATA_DIR") or "Data")
+    DATA_DIR = str(ctx.get("DATA_DIR") or ("data" if os.path.isdir("data") else "Data"))
     os.makedirs(DATA_DIR, exist_ok=True)
 
     season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
@@ -785,79 +758,123 @@ def render(ctx: dict) -> None:
     st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
     st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
-        with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
-        st.caption("Ici on définit seulement les plafonds utilisés partout (affichage + alertes). Pas de vérification live dans Admin.")
-
-        # Auto-load (local settings.csv) on first run
-        if not st.session_state.get("_caps_loaded_once"):
-            cap_gc0, cap_ce0 = _load_caps_from_settings_local()
-            if cap_gc0:
-                st.session_state["CAP_GC"] = cap_gc0
-            if cap_ce0:
-                st.session_state["CAP_CE"] = cap_ce0
-            st.session_state["_caps_loaded_once"] = True
-
-        cap_gc_txt = st.text_input("Cap GC", value=_fmt_money(int(st.session_state.get("CAP_GC", DEFAULT_CAP_GC))), key="cap_gc_txt")
-        cap_ce_txt = st.text_input("Cap CE", value=_fmt_money(int(st.session_state.get("CAP_CE", DEFAULT_CAP_CE))), key="cap_ce_txt")
-
-        cap_gc = _parse_money(cap_gc_txt)
-        cap_ce = _parse_money(cap_ce_txt)
-
-        def _valid(x: int) -> bool:
-            return 1_000_000 <= int(x or 0) <= 200_000_000
-
-        cA, cB = st.columns(2)
-        with cA:
-            if st.button("💾 Sauvegarder (local + Drive)", use_container_width=True, key="caps_save_btn"):
-                if not (_valid(cap_gc) and _valid(cap_ce)):
-                    st.error("Caps invalides. Doivent être entre 1 000 000 et 200 000 000.")
-                else:
-                    st.session_state["CAP_GC"] = cap_gc
-                    st.session_state["CAP_CE"] = cap_ce
-                    ok_local = _save_caps_to_settings_local(cap_gc, cap_ce)
-
-                    # try Drive upload if connected + folder_id present
-                    folder_id = str((ctx or {}).get("folder_id") or (ctx or {}).get("GDRIVE_FOLDER_ID") or "")
-                    svc = _oauth_get_service() if callable(_oauth_get_service) else None
-                    ok_drive = False
-                    if svc and folder_id:
-                        csv_text = f"cap_gc,cap_ce\n{cap_gc},{cap_ce}\n"
-                        ok_drive = _drive_upload_csv(svc, folder_id, "settings.csv", csv_text)
-
-                    if ok_local and (ok_drive or not folder_id):
-                        st.success("✅ Settings sauvegardés.")
-                    elif ok_local and folder_id and not ok_drive:
-                        st.warning("⚠️ Local OK. Upload Drive échoué (OAuth non connecté ou scope insuffisant).")
-                    else:
-                        st.error("❌ Échec sauvegarde settings.")
-        with cB:
-            if st.button("🔄 Recharger (local/Drive)", use_container_width=True, key="caps_reload_btn"):
-                cap_gc1, cap_ce1 = _load_caps_from_settings_local()
-
-                if (not cap_gc1 or not cap_ce1):
-                    folder_id = str((ctx or {}).get("folder_id") or (ctx or {}).get("GDRIVE_FOLDER_ID") or "")
-                    svc = _oauth_get_service() if callable(_oauth_get_service) else None
-                    if svc and folder_id:
-                        fid = _drive_find_file_id_by_name(svc, folder_id, "settings.csv")
+    
+    with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
+        st.caption("Définis ici les plafonds utilisés partout (affichage + alertes). Format: `1 000 000 $`.")
+        # auto-load at first render
+        if "caps_loaded_once" not in st.session_state:
+            st.session_state["caps_loaded_once"] = True
+            # local first
+            lp = settings_local_path(DATA_DIR)
+            if os.path.exists(lp):
+                try:
+                    b = Path(lp).read_bytes()
+                    gc, ce = load_caps_from_settings_csv(b)
+                    if _cap_is_reasonable(gc): st.session_state["CAP_GC"] = gc
+                    if _cap_is_reasonable(ce): st.session_state["CAP_CE"] = ce
+                except Exception:
+                    pass
+            else:
+                # drive fallback if available
+                if drive_ok and folder_id:
+                    try:
+                        fid = _drive_find_file_id_by_name(drive_svc, folder_id, SETTINGS_FILE_NAME)
                         if fid:
-                            csv_text = _drive_download_csv(svc, fid) or ""
-                            if csv_text.strip():
-                                try:
-                                    df = pd.read_csv(io.StringIO(csv_text))
-                                    if not df.empty:
-                                        cap_gc1 = int(df.iloc[0].get("cap_gc", 0) or 0)
-                                        cap_ce1 = int(df.iloc[0].get("cap_ce", 0) or 0)
-                                except Exception:
-                                    pass
+                            b = _drive_download_bytes(drive_svc, fid)
+                            gc, ce = load_caps_from_settings_csv(b)
+                            if _cap_is_reasonable(gc): st.session_state["CAP_GC"] = gc
+                            if _cap_is_reasonable(ce): st.session_state["CAP_CE"] = ce
+                            # cache local
+                            try:
+                                Path(lp).write_bytes(b)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
 
-                if cap_gc1 and cap_ce1:
-                    st.session_state["CAP_GC"] = int(cap_gc1)
-                    st.session_state["CAP_CE"] = int(cap_ce1)
-                    st.success("✅ Settings rechargés.")
-                    st.rerun()
+        c1, c2 = st.columns(2)
+        with c1:
+            cap_gc_txt = st.text_input("Cap GC", value=_fmt_money(st.session_state.get("CAP_GC", DEFAULT_CAP_GC)), key="cap_gc_txt")
+        with c2:
+            cap_ce_txt = st.text_input("Cap CE", value=_fmt_money(st.session_state.get("CAP_CE", DEFAULT_CAP_CE)), key="cap_ce_txt")
+
+        # parse + validate
+        new_gc = _parse_money(cap_gc_txt)
+        new_ce = _parse_money(cap_ce_txt)
+        if new_gc and _cap_is_reasonable(new_gc):
+            st.session_state["CAP_GC"] = int(new_gc)
+        if new_ce and _cap_is_reasonable(new_ce):
+            st.session_state["CAP_CE"] = int(new_ce)
+
+        btn1, btn2 = st.columns([1,1])
+        with btn1:
+            if st.button("💾 Sauvegarder (local + Drive)", use_container_width=True, key="save_caps_btn"):
+                gc = int(st.session_state.get("CAP_GC", DEFAULT_CAP_GC))
+                ce = int(st.session_state.get("CAP_CE", DEFAULT_CAP_CE))
+                if not (_cap_is_reasonable(gc) and _cap_is_reasonable(ce)):
+                    st.error("Caps invalides. Valeurs acceptées: 1 000 000 à 200 000 000.")
                 else:
-                    st.info("Aucun settings trouvé (local ou Drive).")
+                    b = dump_caps_settings_csv(gc, ce)
+                    # save local
+                    try:
+                        Path(settings_local_path(DATA_DIR)).write_bytes(b)
+                        st.success("✅ Sauvegardé en local.")
+                    except Exception:
+                        st.warning("⚠️ Échec sauvegarde locale.")
+                    # save drive if possible
+                    if drive_ok and folder_id:
+                        ok = _drive_upload_bytes(drive_svc, folder_id, SETTINGS_FILE_NAME, b)
+                        st.success("✅ Sauvegardé sur Drive.") if ok else st.warning("⚠️ Drive non disponible pour sauvegarde.")
+                    else:
+                        st.info("Drive OAuth non disponible — sauvegarde locale seulement.")
 
+        with btn2:
+            if st.button("🔄 Recharger (local/Drive)", use_container_width=True, key="reload_caps_btn"):
+                lp = settings_local_path(DATA_DIR)
+                loaded = False
+                if os.path.exists(lp):
+                    try:
+                        b = Path(lp).read_bytes()
+                        gc, ce = load_caps_from_settings_csv(b)
+                        if _cap_is_reasonable(gc): st.session_state["CAP_GC"] = gc
+                        if _cap_is_reasonable(ce): st.session_state["CAP_CE"] = ce
+                        loaded = True
+                        st.success("✅ Rechargé depuis local.")
+                    except Exception:
+                        pass
+                if (not loaded) and drive_ok and folder_id:
+                    fid = _drive_find_file_id_by_name(drive_svc, folder_id, SETTINGS_FILE_NAME)
+                    if fid:
+                        b = _drive_download_bytes(drive_svc, fid)
+                        gc, ce = load_caps_from_settings_csv(b)
+                        if _cap_is_reasonable(gc): st.session_state["CAP_GC"] = gc
+                        if _cap_is_reasonable(ce): st.session_state["CAP_CE"] = ce
+                        try:
+                            Path(lp).write_bytes(b)
+                        except Exception:
+                            pass
+                        st.success("✅ Rechargé depuis Drive.")
+                    else:
+                        st.warning("Aucun settings.csv trouvé sur Drive.")
+                st.rerun()
+
+        st.caption(f"Actuel: GC {st.session_state.get('CAP_GC')} • CE {st.session_state.get('CAP_CE')}")
+
+    # ---- Players DB index
+
+    players_db = load_players_db(os.path.join(DATA_DIR, PLAYERS_DB_FILENAME))
+    players_idx = build_players_index(players_db)
+    if players_idx:
+        st.success(f"Players DB détectée: {PLAYERS_DB_FILENAME} (Level auto + infos).")
+    else:
+        st.warning(f"{PLAYERS_DB_FILENAME} indisponible — fallback Level par Salaire.")
+
+    # ---- Load équipes
+    df = load_equipes(e_path)
+
+    # =====================================================
+    # 🔄 IMPORT ÉQUIPES (Drive)
+    # =====================================================
     with st.expander("🔄 Import équipes depuis Drive (OAuth)", expanded=False):
         st.caption("Lister/télécharger les CSV dans ton folder_id. Si ça ne marche pas, utilise Import local (fallback).")
         st.write(f"folder_id (ctx): `{folder_id or ''}`")
@@ -942,7 +959,7 @@ def render(ctx: dict) -> None:
     #   - Mode: append ou remplacer l’équipe
     #   - Backup local par équipe avant modification
     # =====================================================
-    with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=True):
+    with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=False):
         st.caption("Upload plusieurs CSV (1 par équipe). Auto-assign via `Propriétaire` (si unique) ou via le nom du fichier (ex: `Whalers.csv`).")
         st.code(f"Destination locale (fusion): {e_path}", language="text")
 
