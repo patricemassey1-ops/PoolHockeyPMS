@@ -455,6 +455,9 @@ def load_players_db(path: str) -> pd.DataFrame:
         df[c] = df[c].replace({"nan": "", "NaN": "", "NAN": ""})
 
     df["__pkey"] = df["Player"].apply(clean_player_name).apply(_norm_player_key)
+    # volatile row id to target updates (nhl_id association)
+    if "__rowid" not in df.columns:
+        df["__rowid"] = range(len(df))
     return df
 
 
@@ -498,6 +501,88 @@ def _detect_scope_column(df: pd.DataFrame) -> str | None:
     return None
 
 
+
+def _looks_like_nhl_abbrev_series(s: pd.Series) -> float:
+    """Retourne la proportion de valeurs qui ressemblent à des abréviations NHL (2-3 lettres majuscules)."""
+    if s is None:
+        return 0.0
+    vals = [str(x).strip() for x in s.dropna().astype(str).tolist()]
+    vals = [v for v in vals if v and v.upper() != "NAN"]
+    if not vals:
+        return 0.0
+    hits = 0
+    for v in vals[:400]:
+        vv = v.strip()
+        if re.fullmatch(r"[A-Z]{2,3}", vv):
+            hits += 1
+    return hits / max(1, min(len(vals), 400))
+
+
+def _pick_pool_team_column(dfu: pd.DataFrame) -> str | None:
+    """Choisit la colonne qui correspond à l'équipe du pool (Whalers, etc.) dans le fichier unifié.
+
+    On évite les colonnes ambiguës (ex: 'Team' = souvent NHL).
+    Heuristiques:
+      - Priorité aux colonnes explicitement pool: Owner/GM/EquipePMS/TeamPMS/Equipe Pool...
+      - Si une colonne ressemble majoritairement à des abréviations NHL (MTL, BOS, etc.), on la rejette.
+      - Si une colonne contient des valeurs qui matchent nos équipes PMS connues, on la favorise.
+    """
+    if dfu is None or dfu.empty:
+        return None
+
+    # Liste d'équipes pool connues (on compare en normalisant)
+    known_pool = set([_team_name_from_filename(x + ".csv").lower() for x in [
+        "Whalers","Red_Wings","Predateurs","Nordiques","Cracheurs","Canadiens"
+    ]])
+    known_pool |= set([k.replace("_"," ").lower() for k in known_pool])
+
+    candidates = []
+    preferred = [
+        "EquipePMS","ÉquipePMS","TeamPMS","Team PMS","Equipe Pool","Équipe Pool",
+        "EquipePool","ÉquipePool","TeamPool","Team Pool",
+        "Owner","GM","PMS Team","PMS_Team",
+    ]
+    # 'Equipe' / 'Team' sont ambigus, on les garde mais en dernier
+    ambiguous = ["Equipe","Équipe","Team"]
+
+    for c in preferred + ambiguous:
+        if c in dfu.columns:
+            candidates.append(c)
+
+    if not candidates:
+        return None
+
+    best = None
+    best_score = -1e9
+
+    for c in candidates:
+        s = dfu[c]
+        # score de base: préféré > ambigu
+        base = 2.0 if c in preferred else 0.5
+        nhl_like = _looks_like_nhl_abbrev_series(s)
+        # pénalité si ça ressemble à des abréviations NHL
+        penalty = 3.0 * nhl_like
+
+        # bonus si on voit des noms d'équipes pool connues
+        vals = [str(x).strip() for x in s.dropna().astype(str).tolist()][:400]
+        vals_norm = [v.replace("_"," ").lower() for v in vals if v and v.upper() != "NAN"]
+        pool_hits = sum(1 for v in vals_norm if v in known_pool)
+        bonus = 1.5 * (pool_hits / max(1, len(vals_norm))) if vals_norm else 0.0
+
+        score = base + bonus - penalty
+        if score > best_score:
+            best_score = score
+            best = c
+
+    # si meilleur candidat est trop "NHL-like", on refuse
+    if best is None:
+        return None
+    if _looks_like_nhl_abbrev_series(dfu[best]) >= 0.6 and best in ambiguous:
+        return None
+
+    return best
+
+
 @st.cache_data(show_spinner=False)
 def load_owned_index(data_dir: str) -> dict:
     """Index des joueurs appartenant déjà au pool.
@@ -519,12 +604,8 @@ def load_owned_index(data_dir: str) -> dict:
             dfu.columns = [c.strip() for c in dfu.columns]
 
             pcol = _detect_player_column(dfu)
-            # colonnes possibles pour l'équipe du pool
-            tcol = None
-            for c in ["EquipePMS","ÉquipePMS","Equipe","Équipe","Owner","GM","Team","TeamPMS","Team PMS","Equipe Pool","Équipe Pool"]:
-                if c in dfu.columns:
-                    tcol = c
-                    break
+            # colonne équipe du pool (heuristique robuste)
+            tcol = _pick_pool_team_column(dfu)
             scol = _detect_scope_column(dfu)
 
             if not pcol or not tcol:
@@ -1134,6 +1215,8 @@ def render_tab_joueurs():
                 # --- Auto association (best effort)
                 if st.button("🤖 Associer automatiquement", key=f"nhl_auto__{rowid}"):
                     auto_results = nhl_search_players(default_q, limit=25)
+                    if not auto_results:
+                        st.warning("Aucun résultat NHL trouvé (endpoint de recherche vide). Essaie 🔎 Chercher dans la NHL avec un nom complet.")
                     best_id, best_lbl, labels, id_map, confident = _auto_pick_nhl_id(
                         player_name=default_q,
                         team_abbrev=r.get("Team"),
