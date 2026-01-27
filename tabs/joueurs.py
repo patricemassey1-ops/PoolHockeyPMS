@@ -800,32 +800,6 @@ def render_tab_joueurs():
 
     owned_idx = load_owned_index_from_team_files(DATA_DIR)
 
-# -----------------------------------------------------
-# 🧪 Debug (Whalers / admin) — pourquoi un joueur est "Disponible"
-# -----------------------------------------------------
-_owner = str(st.session_state.get("selected_team") or st.session_state.get("align_owner") or st.session_state.get("owner") or "").strip()
-_is_dbg = (_owner.lower() == "whalers") or bool(st.session_state.get("is_admin"))
-if _is_dbg:
-    with st.expander("🧪 Debug disponibilité (rosters → owned_idx)", expanded=False):
-        st.write({"DATA_DIR": DATA_DIR, "owned_idx_size": int(len(owned_idx))})
-        try:
-            files = sorted([f for f in os.listdir(DATA_DIR) if f.lower().endswith(".csv")])
-        except Exception:
-            files = []
-        st.write({"csv_files_in_data": files})
-        if owned_idx:
-            # show whether Caufield is detected
-            _test_names = ["Cole Caufield", "Caufield, Cole", "Michael Hage", "Hage, Michael"]
-            _tests = {}
-            for nm in _test_names:
-                k = _norm_player_key(nm)
-                _tests[nm] = owned_idx.get(k)
-            st.write({"lookup_tests": _tests})
-        st.caption("Si owned_idx_size == 0: rosters non parsés (header/délimiteur). Si lookup_tests est vide: mismatch de nom.")
-
-    # ---- Filtres (4)
-    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
-
     with c1:
         teams = sorted([t for t in df["Team"].dropna().astype(str).unique() if t.strip() and t.strip().upper() != "NAN"])
         team_pick = st.selectbox("Équipe NHL", ["Toutes"] + teams, index=0)
