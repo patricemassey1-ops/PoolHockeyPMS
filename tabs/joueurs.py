@@ -719,69 +719,119 @@ def _pick_pool_team_column(dfu: pd.DataFrame) -> str | None:
 
 @st.cache_data(show_spinner=False)
 def load_owned_index(data_dir: str, nonce: str = "") -> dict:
-    """Index des joueurs appartenant déjà au pool.
+    """Index des joueurs appartenant déjà au pool (SOURCE DE VÉRITÉ = rosters par équipe).
 
     Retour: pkey -> {"team_pms": "...", "scope": "...", "source": "..."}
-    Sources supportées:
-      1) fichier unifié equipes_joueurs_*.csv (si présent)
-      2) fichiers par équipe (Whalers.csv, etc.)
+    - On ignore volontairement toute colonne "Equipe Pool" dans hockey.players.csv.
+    - On ignore volontairement tout fichier "equipes_joueurs_*.csv" : ça crée des divergences.
+    - On lit seulement les rosters d'équipes (whalers.csv, nordiques.csv, ...)
+
+    Robustesse:
+    - data_dir supporte data/ et Data/ (Linux case-sensitive)
+    - détection colonne joueur: Player/Joueur/Nom/Name + fallback sur colonnes contenant 'player'/'joueur'/'name'
+    - scope/slot: Slot/Scope/Statut/Status/Roster/Type (optionnel)
     """
     idx: dict[str, dict] = {}
 
-    # --- (1) fichier unifié equipes_joueurs_*.csv
-    for uf in EQUIPES_JOUEURS_FILES:
-        fp = os.path.join(data_dir, uf)
-        if not os.path.exists(fp):
+    # --- resolve data_dir (data vs Data)
+    data_dir = str(data_dir or "")
+    if data_dir and not os.path.isdir(data_dir):
+        base = os.path.dirname(data_dir)
+        cand = os.path.join(base, "data")
+        cand2 = os.path.join(base, "Data")
+        if os.path.isdir(cand):
+            data_dir = cand
+        elif os.path.isdir(cand2):
+            data_dir = cand2
+    if not data_dir or not os.path.isdir(data_dir):
+        return idx
+
+    # --- known pool teams (for filename matching)
+    POOL_TEAMS = [
+        "Whalers", "Nordiques", "Predateurs", "Prédateurs",
+        "Red_Wings", "Red Wings", "Canadiens", "Cracheurs"
+    ]
+    team_keys = {re.sub(r"[^a-z0-9]+", "", t.lower()): t for t in POOL_TEAMS}
+
+    def _team_from_filename(fname: str) -> str:
+        base = os.path.splitext(os.path.basename(fname))[0]
+        key = re.sub(r"[^a-z0-9]+", "", base.lower())
+        # direct match
+        if key in team_keys:
+            return team_keys[key]
+        # partial match (e.g. 'equipes_whalers_2025')
+        for k, t in team_keys.items():
+            if k and k in key:
+                return t
+        return ""
+
+    # --- scan candidate roster CSVs
+    ignore_prefixes = (
+        "hockey.players", "puckpedia", "pro_stats", "transactions",
+        "backup", "trade_market", "settings", "plafond", "caps",
+        "equipes_joueurs", "_nhl_id_", "nhl_id_"
+    )
+    csv_files = []
+    for fn in os.listdir(data_dir):
+        if not fn.lower().endswith(".csv"):
             continue
+        low = fn.lower()
+        if low.startswith(ignore_prefixes):
+            continue
+        # keep only likely team rosters
+        team_pms = _team_from_filename(fn)
+        if not team_pms:
+            continue
+        csv_files.append((fn, team_pms))
+
+    # deterministic order for audit/debug
+    csv_files.sort(key=lambda x: x[0].lower())
+
+    def _detect_player_col(df: pd.DataFrame) -> str:
+        cols = list(df.columns)
+        lower = {c.lower(): c for c in cols}
+        for c in ["player", "joueur", "nom", "name", "full name", "fullname"]:
+            if c in lower:
+                return lower[c]
+        # fallback: any column containing keywords
+        for c in cols:
+            cl = c.lower()
+            if "joueur" in cl or "player" in cl or ("name" in cl and "team" not in cl):
+                return c
+        return ""
+
+    def _detect_scope_col(df: pd.DataFrame) -> str:
+        cols = list(df.columns)
+        lower = {c.lower(): c for c in cols}
+        for c in ["slot", "scope", "statut", "status", "roster", "type"]:
+            if c in lower:
+                return lower[c]
+        return ""
+
+    # --- build index from rosters
+    for fname, team_pms in csv_files:
+        fpath = os.path.join(data_dir, fname)
         try:
-            dfu = pd.read_csv(fp, low_memory=False)
-            dfu.columns = [c.strip() for c in dfu.columns]
-
-            pcol = _detect_player_column(dfu)
-            # colonne équipe du pool (heuristique robuste)
-            tcol = _pick_pool_team_column(dfu)
-            scol = _detect_scope_column(dfu)
-
-            if not pcol or not tcol:
+            rdf = pd.read_csv(fpath, low_memory=False)
+            if rdf is None or rdf.empty:
                 continue
-
-            for _, r in dfu.iterrows():
-                pkey = _norm_player_key(clean_player_name(r.get(pcol, "")))
-                if not pkey or pkey in idx:
-                    continue
-                team_pms = str(r.get(tcol, "")).strip()
-                scope_val = str(r.get(scol, "")).strip() if scol else ""
-                if not team_pms or team_pms.upper() == "NAN":
-                    continue
-                idx[pkey] = {"team_pms": team_pms, "scope": scope_val, "source": uf}
-        except Exception:
-            pass
-
-        # NOTE: ne pas 'return' ici — on fusionne aussi les fichiers par équipe (whalers.csv, etc.)
-
-    # --- (2) fallback fichiers par équipe
-    for fname in _discover_pms_team_files(data_dir):
-        fp = os.path.join(data_dir, fname)
-        if not os.path.exists(fp):
-            continue
-
-        team_pms = _team_name_from_filename(fname)
-
-        try:
-            df = pd.read_csv(fp, low_memory=False)
-            df.columns = [c.strip() for c in df.columns]
-
-            pcol = _detect_player_column(df)
+            pcol = _detect_player_col(rdf)
             if not pcol:
                 continue
+            scol = _detect_scope_col(rdf)
 
-            scol = _detect_scope_column(df)
-
-            for _, r in df.iterrows():
-                pkey = _norm_player_key(clean_player_name(r.get(pcol, "")))
-                if not pkey or pkey in idx:
+            for _, r in rdf.iterrows():
+                raw = r.get(pcol, "")
+                pkey = _norm_player_key(clean_player_name(raw))
+                if not pkey:
+                    continue
+                # first win (avoid flip-flop if duplicates across files)
+                if pkey in idx:
                     continue
                 scope_val = str(r.get(scol, "")).strip() if scol else ""
+                # hide nan
+                if scope_val.lower() == "nan":
+                    scope_val = ""
                 idx[pkey] = {"team_pms": team_pms, "scope": scope_val, "source": fname}
         except Exception:
             continue
