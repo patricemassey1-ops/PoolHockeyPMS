@@ -1493,7 +1493,9 @@ def build_players_master(
     }
 
 def render(ctx: dict) -> None:
-    if not ctx.get("is_admin"):
+    # --- Admin guard (source unique: ctx['is_admin'] défini dans app.py)
+    is_admin = bool(ctx.get("is_admin"))
+    if not is_admin:
         st.warning("Accès admin requis.")
         return
 
