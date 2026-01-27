@@ -15,7 +15,13 @@ from services.storage import DATA_DIR as STORAGE_DATA_DIR, ensure_data_dir, seas
 from services.ui import apply_theme
 
 from services.enrich import resolve_update_players_db
-from tabs import home, joueurs, alignement, transactions, gm, historique, classement, admin
+try:
+    from tabs import home, joueurs, alignement, transactions, gm, historique, classement, admin
+except Exception as e:
+    import streamlit as st
+    st.error(f"❌ Import tabs failed: {e}")
+    raise
+
 
 
 # =========================================================

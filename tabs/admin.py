@@ -28,6 +28,20 @@ import pandas as pd
 import streamlit as st
 
 
+
+
+def _first_existing_col(df, candidates):
+    """Return the first column name that exists in df among candidates (case-sensitive),
+    else ''.
+    """
+    if df is None or df.empty:
+        return ""
+    cols = set(map(str, df.columns))
+    for c in candidates:
+        if c in cols:
+            return c
+    return ""
+
 ADMIN_VERSION = "ADMIN_PANEL_V5_NO_STATUS_2026-01-27"
 
 import pathlib
