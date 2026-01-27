@@ -20,17 +20,12 @@ import io
 import os
 import re
 import zipfile
+from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
-import time
 import streamlit as st
-
-# ---- Paths (module defaults)
-# DATA_DIR is resolved/overridden inside render(ctx); must exist at import time for helper functions.
-DATA_DIR = os.path.join(os.getcwd(), "data") if os.path.isdir(os.path.join(os.getcwd(), "data")) else "data"
-
 
 # ---- Optional: Google Drive client (if installed)
 try:
@@ -69,189 +64,6 @@ try:
     from google_auth_oauthlib.flow import Flow  # type: ignore
 except Exception:
     Flow = None
-
-
-# ============================================================
-# Drive OAuth (refresh_token) — robuste, sans UI
-# ============================================================
-
-def _drive_service_from_refresh_token_secrets() -> Optional[Any]:
-    """
-    Construit un service Google Drive via refresh_token dans st.secrets["gdrive_oauth"].
-
-    ✅ Important: on mémorise la dernière erreur dans st.session_state["_drive_oauth_err"]
-    pour afficher un diagnostic utile dans l'UI (au lieu d'un message générique).
-    """
-    st.session_state["_drive_oauth_err"] = ""
-    if build is None or Credentials is None:
-        st.session_state["_drive_oauth_err"] = "libs Google absentes (google-api-python-client / google-auth)."
-        return None
-
-    cfg = st.secrets.get("gdrive_oauth", {}) or {}
-    rt = str(cfg.get("refresh_token", "") or "")
-    cid = str(cfg.get("client_id", "") or "")
-    csec = str(cfg.get("client_secret", "") or "")
-    token_uri = str(cfg.get("token_uri", "") or "https://oauth2.googleapis.com/token")
-
-    missing = [k for k, v in [("refresh_token", rt), ("client_id", cid), ("client_secret", csec), ("token_uri", token_uri)] if not v]
-    if missing:
-        st.session_state["_drive_oauth_err"] = "secrets manquants: " + ", ".join(missing)
-        return None
-
-    try:
-        from google.auth.transport.requests import Request  # type: ignore
-        creds = Credentials(
-            token=None,
-            refresh_token=rt,
-            token_uri=token_uri,
-            client_id=cid,
-            client_secret=csec,
-            scopes=["https://www.googleapis.com/auth/drive"],
-        )
-        creds.refresh(Request())
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
-    except Exception as e:
-        st.session_state["_drive_oauth_err"] = f"{type(e).__name__}: {e}"
-        return None
-
-
-def _fmt_money(v: int) -> str:
-    try:
-        v = int(v)
-    except Exception:
-        v = 0
-    return f"{v:,}".replace(",", " ") + " $"
-
-
-def _parse_money(s: str) -> int:
-    s = str(s or "")
-    s = s.replace("$", "").replace(" ", "").replace(",", "")
-    # allow dots in input like 1.000.000
-    s = s.replace(".", "")
-    try:
-        return int(float(s))
-    except Exception:
-        return 0
-
-
-def _validate_cap(v: int) -> Tuple[bool, str]:
-    if v < 1_000_000:
-        return False, "Valeur trop basse (< 1 000 000)."
-    if v > 200_000_000:
-        return False, "Valeur trop haute (> 200 000 000)."
-    return True, ""
-
-
-def _settings_local_path() -> str:
-    return os.path.join(DATA_DIR, "settings.csv")
-
-
-def _load_settings_local() -> Dict[str, Any]:
-    p = _settings_local_path()
-    if not os.path.exists(p):
-        return {}
-    try:
-        df = pd.read_csv(p)
-        out = {}
-        for _, r in df.iterrows():
-            k = str(r.get("key", "")).strip()
-            if not k:
-                continue
-            out[k] = r.get("value")
-        return out
-    except Exception:
-        return {}
-
-
-def _save_settings_local(settings: Dict[str, Any]) -> bool:
-    try:
-        rows = [{"key": k, "value": settings[k]} for k in sorted(settings.keys())]
-        pd.DataFrame(rows).to_csv(_settings_local_path(), index=False)
-        return True
-    except Exception:
-        return False
-
-
-def _drive_upload_bytes(svc: Any, folder_id: str, name: str, data: bytes, mime: str) -> Optional[Dict[str, Any]]:
-    if not svc:
-        return None
-    try:
-        from googleapiclient.http import MediaInMemoryUpload  # type: ignore
-        media = MediaInMemoryUpload(data, mimetype=mime, resumable=False)
-        meta = {"name": name}
-        if folder_id:
-            meta["parents"] = [folder_id]
-        res = svc.files().create(
-            body=meta,
-            media_body=media,
-            fields="id,name,webViewLink",
-            supportsAllDrives=True
-        ).execute()
-        return res
-    except Exception:
-        return None
-
-
-def _drive_download_file_bytes(svc: Any, file_id: str) -> Optional[bytes]:
-    if not svc or not file_id:
-        return None
-    try:
-        request = svc.files().get_media(fileId=file_id, supportsAllDrives=True)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while done is False:
-            _, done = downloader.next_chunk()
-        return fh.getvalue()
-    except Exception:
-        return None
-
-
-def _drive_load_settings_csv(svc: Any, folder_id: str) -> Dict[str, Any]:
-    """Cherche settings.csv dans le folder et le charge (clé/valeur)."""
-    if not svc or not folder_id:
-        return {}
-    try:
-        q = f"'{folder_id}' in parents and trashed=false and name='settings.csv'"
-        res = svc.files().list(
-            q=q,
-            fields="files(id,name,modifiedTime)",
-            pageSize=10,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        ).execute()
-        files = res.get("files", []) or []
-        if not files:
-            return {}
-        fid = files[0]["id"]
-        b = _drive_download_file_bytes(svc, fid)
-        if not b:
-            return {}
-        df = pd.read_csv(io.BytesIO(b))
-        out = {}
-        for _, r in df.iterrows():
-            k = str(r.get("key", "")).strip()
-            if not k:
-                continue
-            out[k] = r.get("value")
-        return out
-    except Exception:
-        return {}
-
-
-def _zip_data_dir_bytes() -> Optional[bytes]:
-    data_dir = DATA_DIR
-    if not os.path.isdir(data_dir):
-        return None
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for root, _, files in os.walk(data_dir):
-            for f in files:
-                p = os.path.join(root, f)
-                arc = os.path.relpath(p, data_dir)
-                z.write(p, arcname=arc)
-    return buf.getvalue()
-
 
 
 def render_drive_oauth_connect_ui() -> None:
@@ -507,7 +319,7 @@ def load_players_db(path: str) -> pd.DataFrame:
     if not path or not os.path.exists(path):
         return pd.DataFrame()
     try:
-        return pd.read_csv(path)
+        return pd.read_csv(path, low_memory=False, dtype=str, engine="python", on_bad_lines="skip")
     except Exception:
         return pd.DataFrame()
 
@@ -756,15 +568,9 @@ def _drive_service_from_existing_oauth() -> Optional[Any]:
         return None
     try:
         creds = Credentials.from_authorized_user_info(creds_dict)
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
+        return build("drive", "v3", credentials=creds)
     except Exception:
-        pass
-
-    # 3) refresh_token secrets (connexion silencieuse)
-    svc = _drive_service_from_refresh_token_secrets()
-    if svc:
-        return svc
-    return None
+        return None
 
 def _drive_list_csv_files(svc: Any, folder_id: str) -> List[Dict[str, str]]:
     if not svc or not folder_id:
@@ -790,22 +596,625 @@ def _drive_download_bytes(svc: Any, file_id: str) -> bytes:
         _, done = downloader.next_chunk()
     return fh.getvalue()
 
-def _read_csv_bytes(b: bytes) -> pd.DataFrame:
+def _read_csv_bytes(b: bytes, *, sep: str = "AUTO", on_bad_lines: str = "skip") -> pd.DataFrame:
+    """Lecture CSV robuste (Fantrax / exports):
+    - encodings: utf-8-sig -> utf-8 -> latin-1
+    - sep: AUTO (sniff , ; 	 |) ou valeur explicite
+    - fallback engine=python si le C-engine plante
+    """
+    import csv
+
+    if not isinstance(b, (bytes, bytearray)) or not b:
+        return pd.DataFrame()
+
+    sample = b[:8192]
+
+    # --- encoding detection
+    encodings = ["utf-8-sig", "utf-8", "latin-1"]
+    decoded = None
+    used_enc = "utf-8-sig"
+    for enc in encodings:
+        try:
+            decoded = sample.decode(enc)
+            used_enc = enc
+            break
+        except Exception:
+            continue
+    if decoded is None:
+        used_enc = "latin-1"
+
+    # --- delimiter sniff
+    used_sep = None
+    if str(sep or "").upper() != "AUTO":
+        used_sep = sep
+    else:
+        try:
+            sniffer = csv.Sniffer()
+            dialect = sniffer.sniff(sample.decode(used_enc, errors="ignore"), delimiters=[",", ";", "	", "|"])
+            used_sep = dialect.delimiter
+        except Exception:
+            used_sep = None  # pandas will infer best effort
+
+    # Try combos: (engine, sep)
+    attempts = []
+    if used_sep is None:
+        attempts = [
+            ("python", None),
+            ("c", None),
+        ]
+    else:
+        attempts = [
+            ("c", used_sep),
+            ("python", used_sep),
+            ("python", None),
+        ]
+
+    last_err = None
+    for engine, sep_try in attempts:
+        try:
+            return pd.read_csv(
+                io.BytesIO(b),
+                encoding=used_enc,
+                sep=sep_try,
+                engine=engine,
+                on_bad_lines=on_bad_lines,
+            )
+        except TypeError:
+            # pandas plus vieux: pas de on_bad_lines
+            try:
+                return pd.read_csv(
+                    io.BytesIO(b),
+                    encoding=used_enc,
+                    sep=sep_try,
+                    engine=engine,
+                )
+            except Exception as e:
+                last_err = e
+        except Exception as e:
+            last_err = e
+
+    # dernier recours: latin-1 python engine, sans sniff
     try:
-        return pd.read_csv(io.BytesIO(b))
+        return pd.read_csv(io.BytesIO(b), encoding="latin-1", engine="python")
     except Exception:
-        return pd.read_csv(io.BytesIO(b), encoding="latin-1")
+        if last_err:
+            raise last_err
+        return pd.DataFrame()
+
+
+def _payload_to_bytes(payload: Any) -> Optional[bytes]:
+    """Convertit un payload (bytes, UploadedFile, filepath) -> bytes."""
+    try:
+        if payload is None:
+            return None
+        if isinstance(payload, (bytes, bytearray)):
+            return bytes(payload)
+        if isinstance(payload, str) and os.path.exists(payload):
+            return Path(payload).read_bytes()
+        if hasattr(payload, "getvalue"):
+            return payload.getvalue()
+        if hasattr(payload, "read"):
+            return payload.read()
+    except Exception:
+        return None
+    return None
+
+
+def _drop_unnamed_and_dupes(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+
+    # Drop "Unnamed"
+    drop_cols = [c for c in out.columns if str(c).startswith("Unnamed")]
+    if drop_cols:
+        out.drop(columns=drop_cols, inplace=True, errors="ignore")
+
+    # Drop duplicated columns like "X.1"
+    keep = []
+    seen = set()
+    for c in list(out.columns):
+        base = str(c).split(".")[0]
+        if base in seen:
+            continue
+        seen.add(base)
+        keep.append(c)
+    return out[keep].copy()
+
+
+def normalize_team_import_df(df_raw: pd.DataFrame, owner_default: str, players_idx: dict) -> pd.DataFrame:
+    """Normalise un export (Fantrax ou autre) vers le schéma EQUIPES_COLUMNS.
+    Priorité absolue: colonne Player (nom complet) -> Joueur.
+    """
+    if df_raw is None or not isinstance(df_raw, pd.DataFrame) or df_raw.empty:
+        return pd.DataFrame(columns=EQUIPES_COLUMNS)
+
+    df = _drop_unnamed_and_dupes(df_raw)
+
+    # --- capture ID si présent (optionnel)
+    id_col = _pick_col(df, ["ID", "Id", "PlayerId", "playerId", "FantraxID", "Fantrax Id"])
+    if id_col and id_col != "FantraxID":
+        df.rename(columns={id_col: "FantraxID"}, inplace=True)
+
+    # --- Propriétaire
+    owner_col = _pick_col(df, ["Propriétaire", "Proprietaire", "Owner", "Team Owner"])
+    if owner_col and owner_col != "Propriétaire":
+        df.rename(columns={owner_col: "Propriétaire"}, inplace=True)
+    if "Propriétaire" not in df.columns:
+        df["Propriétaire"] = str(owner_default or "").strip()
+
+    # --- Joueur (PRIORITÉ: Player -> Joueur)
+    if "Player" in df.columns:
+        df.rename(columns={"Player": "Joueur"}, inplace=True)
+    else:
+        jcol = _pick_col(df, ["Joueur", "Skaters", "Name", "Player Name", "Full Name"])
+        if jcol and jcol != "Joueur":
+            df.rename(columns={jcol: "Joueur"}, inplace=True)
+
+    if "Joueur" not in df.columns:
+        df["Joueur"] = ""
+
+    # Si Joueur ressemble à un ID (A/7/24...), on tente un autre champ nom
+    j = df["Joueur"].astype(str).str.strip()
+    try:
+        looks_like_id = (j.str.len().fillna(0) <= 3).mean() > 0.6
+    except Exception:
+        looks_like_id = False
+    if looks_like_id:
+        for alt in ["Player", "Skaters", "Player Name", "Full Name", "Name"]:
+            if alt in df.columns:
+                df["Joueur"] = df[alt].astype(str).str.strip()
+                break
+
+    # --- Pos / Equipe / Salaire / Statut / IR Date / Level / Slot
+    mappings = [
+        (["Pos", "Position"], "Pos"),
+        (["Team", "NHL Team", "Equipe", "Équipe"], "Equipe"),
+        (["Salary", "Cap Hit", "CapHit", "Salaire"], "Salaire"),
+        (["Status", "Roster Status", "Statut"], "Statut"),
+        (["IR Date", "IRDate", "Date IR"], "IR Date"),
+        (["Level", "Contract Level"], "Level"),
+        (["Slot"], "Slot"),
+    ]
+    for src_list, dst in mappings:
+        if dst in df.columns:
+            continue
+        scol = _pick_col(df, src_list)
+        if scol and scol != dst:
+            df.rename(columns={scol: dst}, inplace=True)
+
+    if "Pos" not in df.columns:
+        df["Pos"] = ""
+    if "Equipe" not in df.columns:
+        df["Equipe"] = ""
+    if "Salaire" not in df.columns:
+        df["Salaire"] = 0
+    if "Level" not in df.columns:
+        df["Level"] = ""
+    if "Statut" not in df.columns:
+        df["Statut"] = ""
+    if "IR Date" not in df.columns:
+        df["IR Date"] = ""
+    if "Slot" not in df.columns:
+        df["Slot"] = df["Statut"].apply(auto_slot_for_statut) if "Statut" in df.columns else "Actif"
+
+    # Normalize salary int
+    df["Salaire"] = pd.to_numeric(df["Salaire"], errors="coerce").fillna(0).astype(int)
+
+    # Force owner if empty
+    if owner_default:
+        df["Propriétaire"] = df["Propriétaire"].astype(str).str.strip().replace({"": owner_default})
+        df.loc[df["Propriétaire"].isna(), "Propriétaire"] = owner_default
+
+    # Keep only expected columns (+ FantraxID if present)
+    keep = [c for c in (EQUIPES_COLUMNS + ["FantraxID"]) if c in df.columns]
+    df = df[keep].copy()
+    return df
+
+
+# ---- Optional NHL API enrichment (Pos/Equipe only; no salary from NHL)
+try:
+    import requests  # type: ignore
+except Exception:
+    requests = None
+
+
+@st.cache_data(show_spinner=False)
+def nhl_find_player_id(full_name: str) -> Optional[int]:
+    if not requests:
+        return None
+    name = str(full_name or "").strip()
+    if not name:
+        return None
+    try:
+        url = "https://search.d3.nhle.com/api/v1/search/player"
+        params = {"culture": "en-us", "limit": 5, "q": name}
+        r = requests.get(url, params=params, timeout=8)
+        if r.status_code != 200:
+            return None
+        data = r.json() or []
+        if not data:
+            return None
+        pid = data[0].get("playerId") or data[0].get("id")
+        return int(pid) if pid is not None else None
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def nhl_player_landing(player_id: int) -> dict:
+    if not requests:
+        return {}
+    try:
+        url = f"https://api-web.nhle.com/v1/player/{int(player_id)}/landing"
+        r = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return {}
+        return r.json() or {}
+    except Exception:
+        return {}
+
+
+def enrich_df_from_nhl(df: pd.DataFrame) -> pd.DataFrame:
+    """Complète Pos/Equipe si manquant. (Ne touche pas Salaire.)"""
+    if df is None or df.empty or "Joueur" not in df.columns:
+        return df
+
+    out = df.copy()
+    if "Pos" not in out.columns:
+        out["Pos"] = ""
+    if "Equipe" not in out.columns:
+        out["Equipe"] = ""
+
+    for idx, row in out.iterrows():
+        name = str(row.get("Joueur") or "").strip()
+        if not name:
+            continue
+        need_pos = str(row.get("Pos") or "").strip().lower() in ("", "nan", "none")
+        need_team = str(row.get("Equipe") or "").strip().lower() in ("", "nan", "none")
+        if not (need_pos or need_team):
+            continue
+
+        pid = nhl_find_player_id(name)
+        if not pid:
+            continue
+        info = nhl_player_landing(pid)
+        if not info:
+            continue
+
+        if need_pos:
+            pos = info.get("position") or info.get("positionCode") or ""
+            out.at[idx, "Pos"] = str(pos).strip()
+        if need_team:
+            team = info.get("currentTeamAbbrev") or (info.get("currentTeam") or {}).get("abbrev") or ""
+            out.at[idx, "Equipe"] = str(team).strip()
+
+    return out
 
 
 # ============================================================
 # MAIN RENDER
 # ============================================================
+
+# ============================================================
+
+# =====================================================
+# 🆔 BULK NHL_ID (AUTO) — par coup de 250 + checkpoint
+#   - Safe: n'écrit que si match très confiant
+#   - Sauvegarde atomique + cache bust
+#   - Reprise via checkpoint (json)
+# =====================================================
+
+def _atomic_save_csv(df: pd.DataFrame, path: str) -> None:
+    """Écriture atomique (évite fichiers partiels si crash)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    df.to_csv(tmp, index=False, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _pms_norm_name(s: Any) -> str:
+    s = "" if s is None else str(s)
+    s = s.strip()
+    if not s:
+        return ""
+    # 'A | A|' -> garder le 1er segment
+    if "|" in s:
+        parts = [p.strip() for p in s.split("|") if p.strip()]
+        if parts:
+            s = parts[0]
+    s = s.replace(",", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"[^A-Za-zÀ-ÿ'\- ]+", "", s).strip()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.lower()
+
+
+def _split_first_last(name: str) -> Tuple[str, str]:
+    n = _pms_norm_name(name)
+    if not n:
+        return "", ""
+    parts = n.split()
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[-1]
+
+
+def _nhl_search_players(query: str, limit: int = 15) -> List[Dict[str, Any]]:
+    """Recherche joueurs via l'index public NHL (rapide)."""
+    import requests  # local import (évite dépendance au top)
+
+    q = (query or "").strip()
+    if not q:
+        return []
+    url = "https://search.d3.nhle.com/api/v1/search/player"
+    params = {"culture": "en-us", "limit": str(limit), "q": q}
+    try:
+        r = requests.get(url, params=params, timeout=12)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            return data["items"]
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception:
+        return []
+
+
+def _extract_nhl_id(item: Dict[str, Any]) -> Optional[int]:
+    for k in ("playerId", "player_id", "id", "nhlId", "nhl_id"):
+        if k in item and item[k] not in (None, ""):
+            try:
+                return int(str(item[k]).strip())
+            except Exception:
+                pass
+    return None
+
+
+def _extract_full_name(item: Dict[str, Any]) -> str:
+    for k in ("name", "fullName", "full_name", "playerName"):
+        if k in item and item[k]:
+            return str(item[k])
+    fn = item.get("firstName") or item.get("first_name") or ""
+    ln = item.get("lastName") or item.get("last_name") or ""
+    return f"{fn} {ln}".strip()
+
+
+def _confidence_match(target_name: str, item: Dict[str, Any]) -> Tuple[bool, float]:
+    """Match SAFE. ok=True seulement si score très élevé."""
+    t = _pms_norm_name(target_name)
+    if not t:
+        return False, 0.0
+    full = _pms_norm_name(_extract_full_name(item))
+    if not full:
+        return False, 0.0
+
+    if full == t:
+        return True, 1.0
+
+    tf, tl = _split_first_last(t)
+    ff, fl = _split_first_last(full)
+
+    score = 0.0
+    if tl and fl and tl == fl:
+        score += 0.55
+    if tf and ff and tf == ff:
+        score += 0.35
+    if tl and tl in full.split():
+        score += 0.10
+
+    return (score >= 0.90), score
+
+
+def _ckpt_path(DATA_DIR: str, season_lbl: str) -> str:
+    return os.path.join(DATA_DIR, f"_nhl_id_bulk_checkpoint_{season_lbl}.json")
+
+
+def _load_ckpt(path: str) -> Dict[str, Any]:
+    if not os.path.exists(path):
+        return {}
+    try:
+        import json
+        return json.loads(open(path, "r", encoding="utf-8").read())
+    except Exception:
+        return {}
+
+
+def _save_ckpt(path: str, payload: Dict[str, Any]) -> None:
+    try:
+        import json
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _clear_ckpt(path: str) -> None:
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def render_bulk_nhl_id_admin(DATA_DIR: str, season_lbl: str, is_admin: bool) -> None:
+    """Section Admin: associer automatiquement les NHL_ID manquants par batch (250)."""
+    if not is_admin:
+        st.warning("Accès admin requis.")
+        return
+
+    players_path = os.path.join(DATA_DIR, PLAYERS_DB_FILENAME)
+    if not os.path.exists(players_path):
+        st.error(f"Fichier introuvable: {players_path}")
+        return
+
+    df = load_players_db(players_path)
+    if df is None or df.empty:
+        st.warning("Players DB vide.")
+        return
+
+    if "__rowid" not in df.columns:
+        df["__rowid"] = range(len(df))
+    if "nhl_id" not in df.columns:
+        df["nhl_id"] = ""
+
+    missing = df[df["nhl_id"].astype(str).str.strip().eq("")]
+
+    st.markdown("### 🆔 Bulk NHL_ID (AUTO) — par 250")
+    st.caption("Safe: n’écrit un NHL_ID que si le match est très confiant. Sauvegarde + checkpoint pour reprise.")
+
+    ckpt_file = _ckpt_path(DATA_DIR, season_lbl)
+    ckpt = _load_ckpt(ckpt_file)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Total joueurs", len(df))
+    with c2:
+        st.metric("NHL_ID manquants", int(missing.shape[0]))
+    with c3:
+        st.metric("Checkpoint", "Oui" if bool(ckpt) else "Non")
+
+    if ckpt:
+        with st.expander("Voir checkpoint", expanded=False):
+            st.json(ckpt)
+
+    colA, colB, colC, colD = st.columns([1, 1, 1, 1])
+    with colA:
+        batch_size = st.number_input("Batch (associations)", 50, 500, 250, step=50)
+    with colB:
+        max_requests = st.number_input("Max requêtes NHL/run", 50, 5000, 750, step=50)
+    with colC:
+        allow_exact_only = st.checkbox("Mode strict (exact seulement)", value=False)
+    with colD:
+        dry_run = st.checkbox("Dry run (pas de sauvegarde)", value=False)
+
+    b1, b2, b3 = st.columns([1, 1, 2])
+    with b1:
+        do_run = st.button("🚀 Lancer / Reprendre", use_container_width=True, key="adm_bulk_nhl_run")
+    with b2:
+        do_reset = st.button("🧹 Reset checkpoint", use_container_width=True, key="adm_bulk_nhl_reset")
+    with b3:
+        st.write("")
+
+    if do_reset:
+        _clear_ckpt(ckpt_file)
+        st.success("✅ Checkpoint supprimé.")
+        st.rerun()
+
+    if not do_run:
+        st.info("Clique **Lancer / Reprendre** pour associer automatiquement (250 par run).")
+        return
+
+    # Resume
+    work_ids = df[df["nhl_id"].astype(str).str.strip().eq("")]["__rowid"].tolist()
+    next_rowid = ckpt.get("next_rowid") if ckpt else None
+    if next_rowid in work_ids:
+        work_ids = work_ids[work_ids.index(next_rowid):]
+
+    if not work_ids:
+        st.success("✅ Rien à faire.")
+        _clear_ckpt(ckpt_file)
+        return
+
+    prog = st.progress(0)
+    status = st.empty()
+
+    updated = 0
+    ambiguous = 0
+    notfound = 0
+    req_count = 0
+
+    # Loop rows until we hit batch_size updates
+    for i, rowid in enumerate(work_ids):
+        if req_count >= int(max_requests):
+            status.warning("⏸️ Arrêt (max requêtes atteint). Relance pour continuer.")
+            break
+        if updated >= int(batch_size):
+            status.info("⏸️ Batch atteint. Sauvegarde + checkpoint.")
+            break
+
+        row = df.loc[df["__rowid"] == rowid].iloc[0]
+        # name field variants
+        name_raw = row.get("Player") or row.get("Joueur") or row.get("Nom") or row.get("name") or ""
+        name = str(name_raw or "").strip()
+        if not name:
+            notfound += 1
+            continue
+
+        results = _nhl_search_players(name, limit=15)
+        req_count += 1
+
+        best_id = None
+        best_score = 0.0
+
+        if results:
+            for it in results:
+                pid = _extract_nhl_id(it)
+                if pid is None:
+                    continue
+                full = _pms_norm_name(_extract_full_name(it))
+                t = _pms_norm_name(name)
+                if allow_exact_only:
+                    ok = (full == t)
+                    score = 1.0 if ok else 0.0
+                else:
+                    ok, score = _confidence_match(name, it)
+                if ok and score >= best_score:
+                    best_score = score
+                    best_id = pid
+
+        if best_id is None:
+            if results:
+                ambiguous += 1
+            else:
+                notfound += 1
+        else:
+            df.loc[df["__rowid"] == rowid, "nhl_id"] = int(best_id)
+            updated += 1
+
+        pct = int((i + 1) / max(1, len(work_ids)) * 100)
+        prog.progress(min(100, pct))
+        status.write(
+            f"rowid={rowid} | req={req_count} | ✅ associés={updated} | ⚠️ ambigus={ambiguous} | ❌ introuvables={notfound}"
+        )
+
+    # Save
+    if updated > 0 and not dry_run:
+        _atomic_save_csv(df.drop(columns=["__pkey"], errors="ignore"), players_path)
+        st.cache_data.clear()
+        st.session_state["players_db_nonce"] = str(time.time())
+        st.success(f"✅ Sauvegardé: {updated} NHL_ID ajoutés dans {PLAYERS_DB_FILENAME}")
+    elif updated > 0 and dry_run:
+        st.warning(f"Dry run: {updated} associations trouvées, aucune sauvegarde.")
+
+    # Next checkpoint
+    next_rowid_out = None
+    if 'i' in locals() and (i + 1) < len(work_ids):
+        next_rowid_out = work_ids[i + 1]
+
+    if next_rowid_out is not None:
+        _save_ckpt(ckpt_file, {
+            "next_rowid": next_rowid_out,
+            "ts": time.time(),
+            "batch_size": int(batch_size),
+            "max_requests": int(max_requests),
+        })
+        st.warning("Checkpoint écrit — relance pour continuer.")
+    else:
+        _clear_ckpt(ckpt_file)
+        st.success("🎉 Terminé — il ne reste que des cas ambigus / introuvables.")
+
+    st.markdown("#### Résumé")
+    st.write({"associés": updated, "ambigus": ambiguous, "introuvables": notfound, "requêtes": req_count})
+
 def render(ctx: dict) -> None:
     if not ctx.get("is_admin"):
         st.warning("Accès admin requis.")
         return
-    global DATA_DIR
-    DATA_DIR = str(ctx.get("DATA_DIR") or "data")
+
+    DATA_DIR = str(ctx.get("DATA_DIR") or "Data")
     os.makedirs(DATA_DIR, exist_ok=True)
 
     season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
@@ -824,137 +1233,32 @@ def render(ctx: dict) -> None:
             except Exception:
                 st.info("UI OAuth présente mais a échoué — vérifie tes secrets OAuth.")
         else:
-            st.caption("UI OAuth non détectée dans services/*. OK si tu utilises un refresh_token dans Secrets (connexion silencieuse).")
+            st.caption("Aucune UI OAuth détectée dans services/*. Tu peux quand même importer en local (fallback).")
             if callable(_oauth_enabled):
                 try:
                     st.write("oauth_drive_enabled():", bool(_oauth_enabled()))
                 except Exception:
                     pass
 
-    # ---- caps inputs (persistants via settings.csv)
-    # On charge d'abord local, sinon Drive (si dispo)
+    # ---- caps inputs
     st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
     st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
-    # Drive service (UI optionnelle) + refresh_token
-    drive_svc = _drive_service_from_existing_oauth() or _drive_service_from_refresh_token_secrets()
-    folder_id = str(st.secrets.get("gdrive_folder_id", "") or "")
-    drive_ok = bool(drive_svc) and bool(folder_id)
-
-    # Auto-load settings au démarrage (1 fois)
-    if not st.session_state.get("_admin_settings_loaded", False):
-        settings = _load_settings_local()
-        if (not settings) and drive_ok:
-            settings = _drive_load_settings_csv(drive_svc, folder_id)
-            if settings:
-                _save_settings_local(settings)
-        if settings:
-            if "CAP_GC" in settings:
-                try:
-                    st.session_state["CAP_GC"] = int(float(settings["CAP_GC"]))
-                except Exception:
-                    pass
-            if "CAP_CE" in settings:
-                try:
-                    st.session_state["CAP_CE"] = int(float(settings["CAP_CE"]))
-                except Exception:
-                    pass
-        st.session_state["_admin_settings_loaded"] = True
-
-    with st.expander("💰 Plafonds salariaux (GC / CE)", expanded=False):
-        c1, c2 = st.columns(2)
+    with st.expander("🧪 Vérification cap (live) + barres", expanded=True):
+        c1, c2, c3 = st.columns([1, 1, 2])
         with c1:
-            cap_gc_txt = st.text_input("Cap GC", value=_fmt_money(st.session_state.get("CAP_GC", DEFAULT_CAP_GC)), key="cap_gc_txt")
+            st.session_state["CAP_GC"] = st.number_input("Cap GC", min_value=0, value=int(st.session_state["CAP_GC"]), step=500000)
         with c2:
-            cap_ce_txt = st.text_input("Cap CE", value=_fmt_money(st.session_state.get("CAP_CE", DEFAULT_CAP_CE)), key="cap_ce_txt")
-
-        cap_gc = _parse_money(cap_gc_txt)
-        cap_ce = _parse_money(cap_ce_txt)
-
-        ok_gc, msg_gc = _validate_cap(cap_gc)
-        ok_ce, msg_ce = _validate_cap(cap_ce)
-
-        if not ok_gc:
-            st.warning(f"GC: {msg_gc}")
-        if not ok_ce:
-            st.warning(f"CE: {msg_ce}")
-
-        b1, b2 = st.columns([1, 1])
-        with b1:
-            if st.button("💾 Sauvegarder (local + Drive)"):
-                if ok_gc and ok_ce:
-                    st.session_state["CAP_GC"] = cap_gc
-                    st.session_state["CAP_CE"] = cap_ce
-                    settings = {"CAP_GC": cap_gc, "CAP_CE": cap_ce}
-                    ok_local = _save_settings_local(settings)
-                    ok_drive = False
-                    if drive_ok:
-                        payload = pd.DataFrame([{"key":"CAP_CE","value":cap_ce},{"key":"CAP_GC","value":cap_gc}]).to_csv(index=False).encode("utf-8")
-                        res = _drive_upload_bytes(drive_svc, folder_id, "settings.csv", payload, "text/csv")
-                        ok_drive = bool(res)
-                    if ok_local:
-                        st.success("Sauvegarde locale OK (data/settings.csv).")
-                    else:
-                        st.error("Sauvegarde locale a échoué.")
-                    if drive_ok:
-                        st.success("Sauvegarde Drive OK." if ok_drive else "Sauvegarde Drive a échoué.")
-                else:
-                    st.error("Corrige les plafonds avant de sauvegarder.")
-        with b2:
-            if st.button("🔄 Recharger (local/Drive)"):
-                settings = _load_settings_local()
-                if (not settings) and drive_ok:
-                    settings = _drive_load_settings_csv(drive_svc, folder_id)
-                    if settings:
-                        _save_settings_local(settings)
-                if settings:
-                    if "CAP_GC" in settings:
-                        st.session_state["CAP_GC"] = int(float(settings["CAP_GC"]))
-                    if "CAP_CE" in settings:
-                        st.session_state["CAP_CE"] = int(float(settings["CAP_CE"]))
-                    st.success("Plafonds rechargés.")
-                else:
-                    st.warning("Aucun settings.csv trouvé (local ou Drive).")
-
-        st.caption(f"Actuel: GC { _fmt_money(st.session_state.get('CAP_GC', DEFAULT_CAP_GC)) } • CE { _fmt_money(st.session_state.get('CAP_CE', DEFAULT_CAP_CE)) }")
-
-    with st.expander("🧪 Test Drive write + 🗜️ Backup complet", expanded=False):
-        if not drive_ok:
-            st.warning("Drive OAuth non disponible. " + (st.session_state.get("_drive_oauth_err") or "Vérifie refresh_token / libs Google / folder_id."))
-            st.write("folder_id:", folder_id or "(absent)")
+            st.session_state["CAP_CE"] = st.number_input("Cap CE", min_value=0, value=int(st.session_state["CAP_CE"]), step=250000)
+        with c3:
+            st.caption("Caps utilisés ici pour affichage & alertes.")
+        df_eq = load_equipes(e_path)
+        if df_eq.empty:
+            st.info("Aucun fichier équipes local trouvé (importe depuis Drive ou local).")
         else:
-            st.success("Drive prêt (connexion silencieuse).")
-            st.write("folder_id:", folder_id)
+            _render_caps_bars(df_eq, int(st.session_state["CAP_GC"]), int(st.session_state["CAP_CE"]))
 
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("🧪 Écrire un fichier TEST dans Drive"):
-                    name = f"drive_test_{int(time.time())}.txt"
-                    payload = f"Drive OK — {datetime.utcnow().isoformat()} UTC".encode("utf-8")
-                    res = _drive_upload_bytes(drive_svc, folder_id, name, payload, "text/plain")
-                    if res:
-                        st.success(f"Test OK: {res.get('name')}")
-                        if res.get("webViewLink"):
-                            st.write(res["webViewLink"])
-                    else:
-                        st.error("Échec écriture Drive (vérifie scopes/token/folder).")
-
-            with c2:
-                if st.button("🗜️ Backup complet (/data → Drive)"):
-                    b = _zip_data_dir_bytes()
-                    if not b:
-                        st.error("Impossible de zipper /data (dossier manquant ?).")
-                    else:
-                        name = f"backup_data_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
-                        res = _drive_upload_bytes(drive_svc, folder_id, name, b, "application/zip")
-                        if res:
-                            st.success(f"Backup OK: {res.get('name')}")
-                            if res.get("webViewLink"):
-                                st.write(res["webViewLink"])
-                        else:
-                            st.error("Échec upload backup Drive.")
-
-# ---- Players DB index
+    # ---- Players DB index
     players_db = load_players_db(os.path.join(DATA_DIR, PLAYERS_DB_FILENAME))
     players_idx = build_players_index(players_db)
     if players_idx:
@@ -976,7 +1280,7 @@ def render(ctx: dict) -> None:
         drive_ok = bool(svc) and bool(folder_id)
 
         if not drive_ok:
-            st.warning("Drive OAuth non disponible. " + (st.session_state.get("_drive_oauth_err") or "Vérifie refresh_token / libs Google / folder_id."))
+            st.warning("Drive OAuth non disponible (creds manquants ou service indisponible).")
             st.caption("Conseil: ouvre l’expander 'Connexion Google Drive (OAuth)' et connecte-toi.")
         else:
             files = _drive_list_csv_files(svc, folder_id)
@@ -1055,6 +1359,15 @@ def render(ctx: dict) -> None:
     with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=True):
         st.caption("Upload plusieurs CSV (1 par équipe). Auto-assign via `Propriétaire` (si unique) ou via le nom du fichier (ex: `Whalers.csv`).")
         st.code(f"Destination locale (fusion): {e_path}", language="text")
+        # Options lecture/normalisation
+        colA, colB, colC = st.columns([1, 1, 1])
+        with colA:
+            sep_choice = st.selectbox("Delimiter (AUTO par défaut)", ["AUTO", ",", ";", "\t", "|"], index=0, key="adm_sep_choice")
+        with colB:
+            ignore_bad = st.checkbox("Ignorer lignes brisées (on_bad_lines='skip')", value=True, key="adm_ignore_bad_lines")
+        with colC:
+            adm_nhl_enrich = st.checkbox("Compléter Pos/Equipe via NHL API (si manquant)", value=False, key="adm_nhl_enrich")
+        adm_nhl_enrich = bool(st.session_state.get("adm_nhl_enrich", adm_nhl_enrich))
 
         mode = st.radio(
             "Mode de fusion",
@@ -1063,20 +1376,53 @@ def render(ctx: dict) -> None:
             key="adm_multi_mode",
         )
 
-        uploads = st.file_uploader(
-            "Uploader un ou plusieurs CSV (équipes)",
-            type=["csv"],
-            accept_multiple_files=True,
-            key="adm_multi_uploads",
+        use_from_data = st.checkbox(
+            "📂 Utiliser les fichiers déjà présents dans /data (sans upload)",
+            value=True,
+            key="adm_use_data_files",
         )
-        zip_up = st.file_uploader(
-            "Ou uploader un ZIP contenant plusieurs CSV",
-            type=["zip"],
-            key="adm_multi_zip",
-            help="Fallback si ton navigateur ne permet pas de multi-sélectionner.",
+        data_csvs = []
+        try:
+            data_csvs = sorted([
+                f for f in os.listdir(DATA_DIR)
+                if f.lower().endswith(".csv")
+                and f.lower() not in {PLAYERS_DB_FILENAME.lower()}
+                and not f.lower().startswith("equipes_joueurs_")
+                and not f.lower().startswith("backup_")
+                and not f.lower().startswith("admin_log_")
+            ])
+        except Exception:
+            data_csvs = []
+
+        selected_data_csvs = st.multiselect(
+            "Fichiers CSV dans /data à importer (un fichier par équipe)",
+            options=data_csvs,
+            default=data_csvs,
+            disabled=not use_from_data,
+            key="adm_data_csvs_sel",
         )
 
+        uploads = []
+        zip_up = None
+        if not use_from_data:
+            uploads = st.file_uploader(
+                "Uploader un ou plusieurs CSV (équipes)",
+                type=["csv"],
+                accept_multiple_files=True,
+                key="adm_multi_uploads",
+            )
+            zip_up = st.file_uploader(
+                "Ou uploader un ZIP contenant plusieurs CSV",
+                type=["zip"],
+                key="adm_multi_zip",
+                help="Fallback: si tu préfères déposer un seul fichier .zip.",
+            )
+        else:
+            st.caption("Les équipes sont auto-déduites du nom du fichier (ex: Whalers.csv → Whalers).")
         items: List[Tuple[str, Any]] = []
+        if use_from_data and selected_data_csvs:
+            for fn in selected_data_csvs:
+                items.append((fn, os.path.join(DATA_DIR, fn)))
         if uploads:
             for f in uploads:
                 items.append((getattr(f, "name", "upload.csv"), f))
@@ -1101,34 +1447,20 @@ def render(ctx: dict) -> None:
             errors: List[Tuple[str, str]] = []
 
             for file_name, payload in items:
-                # read csv
+                # read + normalize (robuste)
                 try:
-                    if isinstance(payload, (bytes, bytearray)):
-                        df_up = pd.read_csv(io.BytesIO(payload))
-                    else:
-                        df_up = pd.read_csv(payload)
-                except Exception:
-                    try:
-                        if isinstance(payload, (bytes, bytearray)):
-                            df_up = pd.read_csv(io.BytesIO(payload), encoding="latin-1")
-                        else:
-                            try:
-                                payload.seek(0)
-                            except Exception:
-                                pass
-                            df_up = pd.read_csv(payload, encoding="latin-1")
-                    except Exception as e:
-                        errors.append((file_name, f"Lecture CSV impossible: {e}"))
-                        continue
-
-                ok, missing, _extras = validate_equipes_df(df_up)
-                if not ok:
-                    errors.append((file_name, f"Colonnes manquantes: {missing}"))
+                    b = _payload_to_bytes(payload)
+                    if b is None:
+                        raise ValueError("payload vide / non supporté")
+                    df_raw = _read_csv_bytes(b, sep=sep_choice, on_bad_lines=('skip' if ignore_bad else 'error'))
+                except Exception as e:
+                    errors.append((file_name, f"{type(e).__name__}: {e}"))
                     continue
 
-                df_up = ensure_equipes_df(df_up)
+                df_up = normalize_team_import_df(df_raw, owner_default="", players_idx=players_idx)
+
                 owners_in_file = sorted([
-                    x for x in df_up["Propriétaire"].astype(str).str.strip().unique()
+                    x for x in df_up.get("Propriétaire", pd.Series(dtype=str)).astype(str).str.strip().unique()
                     if x and x.lower() != "nan"
                 ])
 
@@ -1198,6 +1530,8 @@ def render(ctx: dict) -> None:
 
                         df_up = p["df"].copy()
                         df_up["Propriétaire"] = owner
+                        if st.session_state.get("adm_nhl_enrich"):
+                            df_up = enrich_df_from_nhl(df_up)
                         df_up_qc, stats = apply_quality(df_up, players_idx)
 
                         if mode.startswith("Remplacer"):
@@ -1517,6 +1851,12 @@ def render(ctx: dict) -> None:
     # =====================================================
     # 📋 HISTORIQUE ADMIN
     # =====================================================
+    # =====================================================
+    # 🆔 BULK NHL_ID (AUTO) — par 250 (checkpoint)
+    # =====================================================
+    with st.expander("🆔 Bulk NHL_ID (AUTO) — par 250", expanded=False):
+        render_bulk_nhl_id_admin(DATA_DIR, season_lbl, is_admin)
+
     with st.expander("📋 Historique admin (ADD/REMOVE/MOVE/IMPORT)", expanded=False):
         if not os.path.exists(log_path):
             st.info("Aucun historique pour l’instant.")
