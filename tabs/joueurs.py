@@ -33,6 +33,23 @@ PMS_TEAM_FILES = [
 ]
 
 
+
+def _read_csv_auto(fp: str) -> pd.DataFrame:
+    """Lit un CSV avec détection auto du séparateur (',' ';' '\t' '|') + tolérance aux lignes brisées."""
+    # 1) Essai pandas auto-sniff
+    try:
+        return pd.read_csv(fp, sep=None, engine="python", low_memory=False, on_bad_lines="skip")
+    except Exception:
+        pass
+    # 2) Fallback séparateurs communs
+    for sep in [",",";","\t","|"]:
+        try:
+            return pd.read_csv(fp, sep=sep, engine="python", low_memory=False, on_bad_lines="skip")
+        except Exception:
+            continue
+    # 3) dernier recours
+    return pd.read_csv(fp, low_memory=False, on_bad_lines="skip")
+
 # ----------------------------
 # Helpers (position / name / formatting)
 # ----------------------------
@@ -283,7 +300,7 @@ def load_owned_index_from_team_files(data_dir: str) -> dict:
         team_pms = _team_name_from_filename(fname)
 
         try:
-            df = pd.read_csv(fp, low_memory=False)
+            df = _read_csv_auto(fp)
             df.columns = [c.strip() for c in df.columns]
 
             pcol = _detect_player_column(df)
