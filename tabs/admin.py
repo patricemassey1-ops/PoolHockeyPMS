@@ -1613,9 +1613,9 @@ def render(ctx: dict) -> None:
                     pass
                 if msg:
                     try:
-                        status_ph.info(msg)
+            st.caption(msg)
                     except Exception:
-                        st.caption(msg)
+                        pass
 
             try:
                 res = build_players_master(
