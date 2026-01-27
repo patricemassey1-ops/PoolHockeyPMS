@@ -800,6 +800,9 @@ def render_tab_joueurs():
 
     owned_idx = load_owned_index_from_team_files(DATA_DIR)
 
+    # Filtres (1 ligne)
+    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
+
     with c1:
         teams = sorted([t for t in df["Team"].dropna().astype(str).unique() if t.strip() and t.strip().upper() != "NAN"])
         team_pick = st.selectbox("Équipe NHL", ["Toutes"] + teams, index=0)
