@@ -1248,26 +1248,46 @@ def _split_player_name(player: str) -> tuple[str, str]:
 
 
 def _safe_read_csv(path: str) -> pd.DataFrame:
+    """Lecture CSV robuste (détecte ',' / ';' / '	' / sniff python)."""
     try:
+        # 1) Essai standard
         return pd.read_csv(path, low_memory=False)
-    except TypeError:
-        return pd.read_csv(path)
     except Exception:
-        return pd.DataFrame()
+        pass
+    # 2) Sniff automatique (engine python)
+    try:
+        return pd.read_csv(path, sep=None, engine="python", low_memory=False)
+    except Exception:
+        pass
+    # 3) Separateurs fréquents
+    for sep in [";", "	", "|"]:
+        try:
+            return pd.read_csv(path, sep=sep, engine="python", low_memory=False)
+        except Exception:
+            continue
+    return pd.DataFrame()
 
 
 def _discover_team_csvs(data_dir: str) -> list[str]:
+    """Liste les CSV d'équipes (Whalers.csv, etc.) dans /data."""
     dd = pathlib.Path(str(data_dir))
     if not dd.exists():
         return []
-    out = []
+    out: list[str] = []
     for fp in dd.glob("*.csv"):
         name = fp.name.lower()
+        # fichiers non-équipe
         if "equipes_joueurs" in name:
             continue
-        if "players_master_" in name:
+        if "players_master" in name:
             continue
-        if name in {"hockey_players.csv", "hockey.players.csv", "puckpedia2025_26.csv", "backup_history.csv", "event_log.csv"}:
+        if "puckpedia" in name:
+            continue
+        if "backup" in name:
+            continue
+        if "event_log" in name:
+            continue
+        if name in {"hockey_players.csv", "hockey.players.csv", "hockey.players.csv", "hockey.players.csv"}:
             continue
         out.append(str(fp))
     return sorted(out)
@@ -1377,136 +1397,209 @@ def _assignments_from_sources(data_dir: str, season_lbl: str, prefer_equipes_fus
     return out
 
 
-def build_players_master(
-    data_dir: str,
-    season_lbl: str,
-    dry_run: bool = True,
-    prefer_equipes_fused: bool = True,
-    read_team_csvs: bool = True,
-    batch_size: int = 250,
-    progress_cb=None,
-) -> dict:
-    data_dir = str(data_dir or "data")
-    season_lbl = str(season_lbl or "2025-2026").strip() or "2025-2026"
-    master = players_master_path(data_dir, season_lbl)
-    preview = os.path.join(data_dir, f"_preview_players_master_{season_lbl}.csv")
+def build_players_master(data_dir: str, season_lbl: str, batch: int = 250, dry_run: bool = True) -> dict:
+    """Construit data/players_master.csv (source de vérité) à partir de:
+    - hockey.players.csv / hockey_players.csv (infos joueurs)
+    - *.csv (1 par équipe) (rosters Fantrax) -> ownership + disponibilité
+    - data/equipes_joueurs_YYYY-YYYY.csv (si présent) (fallback ownership)
+    """
+    dd = pathlib.Path(str(data_dir))
+    dd.mkdir(parents=True, exist_ok=True)
 
-    hp_path = os.path.join(data_dir, "hockey_players.csv")
-    if not os.path.exists(hp_path):
-        hp2 = os.path.join(data_dir, "hockey.players.csv")
-        hp_path = hp2 if os.path.exists(hp2) else hp_path
-
-    hp = _safe_read_csv(hp_path)
-    if hp.empty:
-        return {"ok": False, "error": f"hockey_players.csv introuvable ou vide: {hp_path}", "preview_path": None}
-
-    cols = {c.lower(): c for c in hp.columns}
-    c_first = cols.get("first_name") or cols.get("prenom") or cols.get("prénom") or ""
-    c_last = cols.get("last_name") or cols.get("nom") or ""
-    c_team = cols.get("team") or cols.get("equipe") or cols.get("équipe") or cols.get("team_nhl") or ""
-    c_pos = cols.get("position") or cols.get("pos") or ""
-    c_country = cols.get("country") or cols.get("pays") or ""
-    c_level = cols.get("level") or ""
-    c_age = cols.get("age") or ""
-    c_cap = cols.get("cap hit") or cols.get("cap_hit") or cols.get("salary") or cols.get("salaire") or ""
-    c_nhlid = cols.get("nhl_id") or cols.get("nhlid") or cols.get("nhl id") or ""
-
-    if not c_first or not c_last:
-        c_player = cols.get("player") or cols.get("joueur") or ""
-        if c_player:
-            fl = hp[c_player].apply(lambda s: _split_player_name(s))
-            hp["_first"] = [a for a, b in fl]
-            hp["_last"] = [b for a, b in fl]
-            c_first, c_last = "_first", "_last"
-        else:
-            return {"ok": False, "error": "Colonnes prénom/nom introuvables dans hockey_players.csv", "preview_path": None}
-
-    base = pd.DataFrame({
-        "season": season_lbl,
-        "first_name": hp[c_first].astype(str).str.strip(),
-        "last_name": hp[c_last].astype(str).str.strip(),
-        "team_nhl": hp[c_team].astype(str).str.strip() if c_team else "",
-        "position": hp[c_pos].astype(str).str.strip() if c_pos else "",
-        "country": hp[c_country].astype(str).str.strip() if c_country else "",
-        "level": hp[c_level].astype(str).str.strip() if c_level else "",
-        "age": hp[c_age] if c_age else None,
-        "cap_hit": hp[c_cap] if c_cap else None,
-        "nhl_id": hp[c_nhlid] if c_nhlid else None,
-    })
-    base["key"] = base.apply(lambda r: _norm_name_key(r.get("first_name", ""), r.get("last_name", "")), axis=1)
-    base = base[base["key"].astype(str).str.len() > 0].copy()
-
-    assigns = _assignments_from_sources(data_dir, season_lbl, prefer_equipes_fused, read_team_csvs)
-    base = base.merge(assigns, on="key", how="left")
-
-    base["player_uid"] = base["key"].apply(lambda k: f"{season_lbl}::{k}")
-    base["disponible"] = base["pool_team"].isna() | (base["pool_team"].astype(str).str.strip() == "")
-
-    out_cols = [
-        "player_uid","season","first_name","last_name","nhl_id",
-        "team_nhl","position","level","age","cap_hit","country",
-        "pool_team","slot","disponible"
+    # --- Trouver le fichier "players"
+    hp_candidates = [
+        dd / "hockey.players.csv",
+        dd / "hockey_players.csv",
+        dd / "hockey.players.csv",
+        dd / "Hockey.Players.csv",
+        dd / "hockey.players.csv",
+        dd / "hockey.players.csv",
     ]
-    for c in out_cols:
-        if c not in base.columns:
-            base[c] = None
-    out = base[out_cols].copy()
+    hp_path = next((p for p in hp_candidates if p.exists()), None)
 
-    out.to_csv(preview, index=False)
+    # --- Charger base players (peut être vide si absent)
+    hp = pd.DataFrame()
+    if hp_path:
+        hp = _safe_read_csv(str(hp_path))
+    else:
+        hp = pd.DataFrame()
 
-    if not dry_run:
-        if os.path.exists(master):
-            bk = master + f".bak_{int(time.time())}"
-            try:
-                shutil.copy2(master, bk)
-            except Exception:
-                pass
+    # Colonnes "player name" possibles
+    name_col = _first_existing_col(hp, ["Player","player","Joueur","joueur","Name","name","Nom","nom"])
+    first_col = _first_existing_col(hp, ["Prénom","Prenom","First","FirstName","first_name","firstname"])
+    last_col  = _first_existing_col(hp, ["Nom","Last","LastName","last_name","lastname"])
 
-        tmp = master + ".tmp"
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
+    # Construire une clé joueur normalisée
+    if hp is not None and not hp.empty:
+        if name_col:
+            hp["_player_raw"] = hp[name_col].astype(str)
+        elif first_col and last_col:
+            hp["_player_raw"] = (hp[last_col].astype(str) + ", " + hp[first_col].astype(str))
+        else:
+            # fallback: première colonne non numérique
+            hp["_player_raw"] = hp.iloc[:,0].astype(str)
 
-        n = len(out)
-        bs = max(1, int(batch_size) if batch_size else 250)
-        total_batches = (n + bs - 1) // bs
-        for b, i in enumerate(range(0, n, bs), start=1):
-            if callable(progress_cb):
-                try:
-                    progress_cb((b - 1) / max(1, total_batches), f"Écriture players_master.csv — batch {b}/{total_batches}")
-                except Exception:
-                    pass
-            chunk = out.iloc[i:i+bs]
-            chunk.to_csv(tmp, mode="a", header=(i == 0), index=False)
-        if callable(progress_cb):
-            try:
-                progress_cb(1.0, f"Écriture players_master.csv — terminé ({total_batches} batches)")
-            except Exception:
-                pass
-        try:
-            os.replace(tmp, master)
-        except Exception:
-            try:
-                shutil.copy2(tmp, master)
-            finally:
-                try:
-                    os.remove(tmp)
-                except Exception:
-                    pass
+        hp["_pkey"] = hp["_player_raw"].apply(_norm_player_key)
+        hp = hp[hp["_pkey"].astype(bool)].copy()
+    else:
+        hp = pd.DataFrame(columns=["_player_raw","_pkey"])
 
-    in_pool = int((~out["disponible"]).sum())
+    # Préparer master (au minimum les joueurs de hp)
+    master = pd.DataFrame()
+    if not hp.empty:
+        master = pd.DataFrame({"pkey": hp["_pkey"].values})
+        master = master.drop_duplicates("pkey").reset_index(drop=True)
+    else:
+        master = pd.DataFrame(columns=["pkey"])
+
+    # --- Lire rosters (Whalers.csv etc.)
+    team_csvs = _discover_team_csvs(str(dd))
+    roster_frames: list[pd.DataFrame] = []
+
+    progress = st.progress(0.0)
+    msg = st.empty()
+    total = max(len(team_csvs), 1)
+    msg.info(f"Lecture rosters équipes: {len(team_csvs)} fichier(s)…")
+
+    for i, fp in enumerate(team_csvs):
+        team_name = pathlib.Path(fp).stem.replace('_',' ').strip()
+        df = _safe_read_csv(fp)
+        r = _extract_roster_from_fantrax(df, team_name=team_name)
+        if not r.empty:
+            roster_frames.append(r)
+        progress.progress(min(0.5, (i+1)/total*0.5))
+
+    rosters = pd.concat(roster_frames, ignore_index=True) if roster_frames else pd.DataFrame(columns=["pkey","pool_team","pool_status"])
+    if not rosters.empty:
+        rosters["pkey"] = rosters["pkey"].apply(_norm_player_key)
+        rosters = rosters[rosters["pkey"].astype(bool)].copy()
+        rosters = rosters.drop_duplicates(["pkey","pool_team"], keep="first")
+
+    # Si hp vide mais rosters non vides: créer master à partir des rosters
+    if master.empty and not rosters.empty:
+        master = pd.DataFrame({"pkey": rosters["pkey"].unique()})
+        master = master.drop_duplicates("pkey").reset_index(drop=True)
+
+    # --- Ownership principal depuis rosters
+    owner_map = {}
+    status_map = {}
+    if not rosters.empty:
+        # si joueur apparaît dans plusieurs équipes: garder première (ou flag plus tard)
+        for _, row in rosters.iterrows():
+            pk = row.get("pkey","")
+            if pk and pk not in owner_map:
+                owner_map[pk] = str(row.get("pool_team","")).strip()
+                status_map[pk] = str(row.get("pool_status","")).strip()
+
+    master["pool_team"] = master["pkey"].map(owner_map).fillna("")
+    master["pool_status"] = master["pkey"].map(status_map).fillna("")
+    master["is_available"] = master["pool_team"].eq("")
+
+    # --- Fallback ownership depuis equipes_joueurs_*
+    eq_candidates = sorted(dd.glob("equipes_joueurs_*.csv"))
+    eq_path = eq_candidates[-1] if eq_candidates else None
+    if eq_path and master["is_available"].any():
+        eq = _safe_read_csv(str(eq_path))
+        eq_key_col = _first_existing_col(eq, ["pkey","player_key","Joueur","Player","player","Name","Nom"])
+        eq_team_col = _first_existing_col(eq, ["Proprietaire","Propriétaire","Owner","Equipe_Pool","Équipe Pool","Équipe","Equipe"])
+        if eq_key_col and eq_team_col and not eq.empty:
+            eq["_pkey"] = eq[eq_key_col].astype(str).apply(_norm_player_key)
+            eq_map = dict(zip(eq["_pkey"], eq[eq_team_col].astype(str)))
+            mask = master["pool_team"].eq("") & master["pkey"].isin(eq_map.keys())
+            master.loc[mask, "pool_team"] = master.loc[mask, "pkey"].map(eq_map).fillna("")
+            master["is_available"] = master["pool_team"].eq("")
+
+    # --- Enrichissements depuis hp (si dispo)
+    # NHL_ID
+    nhl_id_col = _first_existing_col(hp, ["NHL_ID","nhl_id","NHL Id","NHLID","playerId","player_id"])
+    if nhl_id_col and not hp.empty:
+        nhl_map = dict(zip(hp["_pkey"], hp[nhl_id_col]))
+        master["nhl_id"] = master["pkey"].map(nhl_map)
+    else:
+        master["nhl_id"] = ""
+
+    # Team (NHL)
+    team_col = _first_existing_col(hp, ["Team","Équipe","Equipe","Team (NHL)","NHL Team","team_abbr","NHLTeam"])
+    if team_col and not hp.empty:
+        tm = dict(zip(hp["_pkey"], hp[team_col].astype(str)))
+        master["team"] = master["pkey"].map(tm).fillna("")
+    else:
+        master["team"] = ""
+
+    # Position
+    pos_col = _first_existing_col(hp, ["Position","Pos","pos","Position (NHL)","position"])
+    if pos_col and not hp.empty:
+        pm = dict(zip(hp["_pkey"], hp[pos_col].astype(str)))
+        master["position"] = master["pkey"].map(pm).fillna("")
+    else:
+        master["position"] = ""
+
+    # Salary / CapHit
+    cap_col = _first_existing_col(hp, ["Cap Hit","CapHit","cap_hit","Salary","Salaire","AAV","aav"])
+    if cap_col and not hp.empty:
+        master["cap_hit"] = master["pkey"].map(dict(zip(hp["_pkey"], hp[cap_col])) )
+    else:
+        master["cap_hit"] = ""
+
+    # Level
+    level_col = _first_existing_col(hp, ["Level","level","Niveau","Contract Level"])
+    if level_col and not hp.empty:
+        master["level"] = master["pkey"].map(dict(zip(hp["_pkey"], hp[level_col].astype(str)))).fillna("")
+    else:
+        master["level"] = ""
+
+    # Nom affiché
+    master["player"] = master["pkey"].apply(lambda k: " ".join([p.strip() for p in k.split(" ") if p.strip()]).title())
+    if not hp.empty:
+        # Si hp a une version meilleure du nom, on l'utilise
+        nm = dict(zip(hp["_pkey"], hp["_player_raw"].astype(str)))
+        master["player"] = master["pkey"].map(nm).fillna(master["player"])
+
+    # --- Ecriture par batch (ou dry run)
+    out_path = dd / "players_master.csv"
+    n = int(len(master))
+    msg.success(f"Fusion prête: {n} joueurs (base={len(hp)} / rosters={len(rosters)}).")
+
+    if dry_run:
+        progress.progress(1.0)
+        return {
+            "dry_run": True,
+            "players_master": str(out_path),
+            "rows": n,
+            "hp_path": str(hp_path) if hp_path else "",
+            "team_csvs": team_csvs,
+        }
+
+    # write atomique batch
+    tmp = dd / f"players_master.__tmp__.csv"
+    if tmp.exists():
+        tmp.unlink()
+
+    # header
+    master.iloc[0:0].to_csv(tmp, index=False)
+    written = 0
+    for i in range(0, n, max(1, int(batch))):
+        chunk = master.iloc[i:i+batch]
+        chunk.to_csv(tmp, index=False, header=False, mode="a")
+        written += len(chunk)
+        progress.progress(0.5 + 0.5 * (written / max(n,1)))
+        msg.info(f"Écriture players_master.csv: {written}/{n}…")
+
+    # swap
+    if out_path.exists():
+        out_path.unlink()
+    tmp.rename(out_path)
+    progress.progress(1.0)
+    msg.success(f"✅ players_master.csv écrit: {n} lignes")
     return {
-        "ok": True,
-        "dry_run": bool(dry_run),
-        "season": season_lbl,
-        "players_total": int(len(out)),
-        "players_in_pool": in_pool,
-        "players_available": int(len(out) - in_pool),
-        "master_path": master,
-        "preview_path": preview,
+        "dry_run": False,
+        "players_master": str(out_path),
+        "rows": n,
+        "hp_path": str(hp_path) if hp_path else "",
+        "team_csvs": team_csvs,
     }
+
+
 
 def render(ctx: dict) -> None:
     # --- Admin guard (source unique: ctx['is_admin'] défini dans app.py)
