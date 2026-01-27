@@ -1638,7 +1638,6 @@ def render(ctx: dict) -> None:
                         with st.expander("⚠️ Notes / issues détectés", expanded=False):
                             for it in issues[:200]:
                                 st.write("•", it)
-                    st.session_state["admin_panel"] = "Fusion"
                 else:
                     status_ph.error("❌ Fusion échouée")
                     st.error("❌ Fusion échouée. Voir détails ci-dessous.")
