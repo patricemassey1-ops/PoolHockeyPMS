@@ -1397,7 +1397,15 @@ def _assignments_from_sources(data_dir: str, season_lbl: str, prefer_equipes_fus
     return out
 
 
-def build_players_master(data_dir: str, season_lbl: str, batch: int = 250, dry_run: bool = True) -> dict:
+def build_players_master(
+    data_dir: str,
+    season_lbl: str,
+    batch_size: int = 250,
+    dry_run: bool = True,
+    prefer_equipes_fused: bool = True,
+    read_team_csvs: bool = True,
+    **_ignored_kwargs,
+) -> dict:
     """Construit data/players_master.csv (source de vérité) à partir de:
     - hockey.players.csv / hockey_players.csv (infos joueurs)
     - *.csv (1 par équipe) (rosters Fantrax) -> ownership + disponibilité
