@@ -1515,7 +1515,7 @@ def render(ctx: dict) -> None:
         st.warning("Accès admin requis.")
         return
 
-    DATA_DIR = str(ctx.get("DATA_DIR") or "Data")
+    DATA_DIR = str(ctx.get("DATA_DIR") or ("data" if os.path.isdir("data") else "Data"))
     os.makedirs(DATA_DIR, exist_ok=True)
 
     season_lbl = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
@@ -1606,16 +1606,14 @@ def render(ctx: dict) -> None:
             status_ph = st.empty()
             status_ph.info("Fusion en cours…")
 
-            def _cb(p, msg=""):
-                try:
-                    prog.progress(min(1.0, max(0.0, float(p))))
-                except Exception:
-                    pass
-                if msg:
-                    try:
-            st.caption(msg)
-                    except Exception:
-                        pass
+            def _cb(msg: str, i: int = 0, total: int = 0):
+                # Progress callback (no nested expanders / no st.status)
+                if total and total > 0:
+                    pct = min(1.0, max(0.0, float(i) / float(total)))
+                    prog.progress(pct)
+                    prog_lbl.caption(f"{msg} ({i}/{total})")
+                else:
+                    prog_lbl.caption(msg)
 
             try:
                 res = build_players_master(
