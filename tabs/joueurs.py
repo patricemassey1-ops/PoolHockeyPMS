@@ -13,6 +13,7 @@
 
 import os
 import re
+import hashlib
 import ast
 import difflib
 import datetime
@@ -22,7 +23,13 @@ import requests
 import pandas as pd
 import streamlit as st
 
-DATA_DIR = "data"
+def _first_existing_dir(cands):
+    for d in cands:
+        if d and os.path.isdir(d):
+            return d
+    return cands[0] if cands else "data"
+
+DATA_DIR = _first_existing_dir(["data","Data"])
 PLAYERS_PATH = os.path.join(DATA_DIR, "hockey.players.csv")
 
 CURRENT_CTX: dict | None = None
@@ -76,7 +83,30 @@ def _discover_pms_team_files(data_dir: str) -> list[str]:
     return out
 
 
-# ----------------------------
+def owned_index_nonce(data_dir: str) -> str:
+    """Clé de cache basée sur le contenu (mtime) des fichiers d'équipes + fichier unifié.
+    Permet de rafraîchir automatiquement l'index quand tu modifies /data/*.csv sur Streamlit Cloud.
+    """
+    try:
+        parts = []
+        # fichiers équipes
+        for f in _discover_pms_team_files(data_dir):
+            fp = os.path.join(data_dir, f)
+            if os.path.exists(fp):
+                parts.append(f"{f}:{os.path.getmtime(fp):.0f}")
+        # fichier unifié
+        if data_dir and os.path.isdir(data_dir):
+            for f in os.listdir(data_dir):
+                if f.lower().startswith("equipes_joueurs_") and f.lower().endswith(".csv"):
+                    fp = os.path.join(data_dir, f)
+                    parts.append(f"{f}:{os.path.getmtime(fp):.0f}")
+        raw = "|".join(sorted(parts)).encode("utf-8")
+        return hashlib.md5(raw).hexdigest()
+    except Exception:
+        return str(time.time())
+
+
+# -------------------------------------------
 # Helpers (position / name / formatting)
 # ----------------------------
 
@@ -530,7 +560,7 @@ def render_team_with_logo(team_abbrev: str):
 # Load local players DB
 # ----------------------------
 @st.cache_data(show_spinner=False)
-def load_players_db(path: str, nonce: str = "") -> pd.DataFrame:
+def load_players_db(path: str, mtime: float = 0.0) -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame()
 
@@ -812,7 +842,7 @@ def audit_pool_vs_availability(players_df: pd.DataFrame, data_dir: str) -> dict:
                 continue
             for _, rr in tdf.iterrows():
                 raw_name = str(rr.get(pcol, '') or '').strip()
-                pkey = _norm_player_key(raw_name)
+                pkey = _norm_player_key(clean_player_name(raw_name))
                 if not pkey:
                     continue
                 ent = pool_map.setdefault(pkey, {"teams": set(), "samples": set(), "files": set()})
@@ -1232,12 +1262,12 @@ def render_tab_joueurs(ctx: dict | None = None):
     _ctx = ctx or CURRENT_CTX or {}
     show_admin_tools = bool(_ctx.get("is_admin") or st.session_state.get("is_admin"))
 
-    df = load_players_db(PLAYERS_PATH, st.session_state.get('players_db_nonce',''))
+    df = load_players_db(PLAYERS_PATH, os.path.getmtime(PLAYERS_PATH) if os.path.exists(PLAYERS_PATH) else 0.0)
     if df.empty:
         st.error("❌ data/hockey.players.csv introuvable ou vide.")
         return
 
-    owned_idx = load_owned_index(DATA_DIR, st.session_state.get('owned_idx_nonce',''))
+    owned_idx = load_owned_index(DATA_DIR, owned_index_nonce(DATA_DIR))
 
     # ---- Filtres (4)
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
@@ -1247,7 +1277,7 @@ def render_tab_joueurs(ctx: dict | None = None):
         team_pick = st.selectbox("Équipe NHL", ["Toutes"] + teams, index=0)
 
     with c2:
-        pos_pick = st.selectbox("Position", ["Toutes", "F", "D", "G", "Forward", "Defense", "Goalie"], index=0)
+        pos_pick = st.selectbox("Position", ["Toutes", "Forward", "Defense", "Goalie"], index=0)
 
     with c3:
         level_pick = st.selectbox("Level", ["Tous", "ELC", "STD"], index=0)
@@ -1260,12 +1290,7 @@ def render_tab_joueurs(ctx: dict | None = None):
     if team_pick != "Toutes":
         filt = filt[filt["Team"].astype(str) == team_pick]
     if pos_pick != "Toutes":
-        # Support filtres simples F/D/G + labels bucket
-        if pos_pick in ("F","D","G"):
-            bucket = {"F":"Forward","D":"Defense","G":"Goalie"}[pos_pick]
-        else:
-            bucket = pos_pick
-        filt = filt[filt["PosBucket"] == bucket]
+        filt = filt[filt["PosBucket"] == pos_pick]
     if level_pick != "Tous":
         filt = filt[filt["Level"].astype(str).str.upper() == level_pick]
     if country_pick != "Tous":
@@ -1364,8 +1389,11 @@ def render_tab_joueurs(ctx: dict | None = None):
         info_cols[2].metric("Poids", safe_str(r.get("W(lbs)")))
         info_cols[3].metric("Statut", format_contract_status(r.get("Status")))
 
-        st.markdown("### 📊 Stats (PRO — CSV)")
-        render_local_pro_panel(row)
+        stats_mode = st.radio("📈 Statistiques", ["Les deux", "PRO (CSV)", "NHL LIVE (API)"], horizontal=True)
+
+        if stats_mode in ("Les deux", "PRO (CSV)"):
+            st.markdown("### 📊 Stats (PRO — CSV)")
+            render_local_pro_panel(row)
 
     # ---- Associer NHL_ID (centré et plus étroit) si manquant
     if show_admin_tools and missing_nhl:
@@ -1472,7 +1500,7 @@ def render_tab_joueurs(ctx: dict | None = None):
                     st.success("✅ Aucun problème détecté: tout ce qui est dans le pool est reconnu comme non-disponible.")
     
         # ---- API PRO TABLE (seulement si nhl_id présent)
-        if pd.notna(nhl_id):
+        if pd.notna(nhl_id) and stats_mode in ("Les deux", "NHL LIVE (API)"):
             st.markdown("### ⚡ Stats NHL LIVE (API — table pro)")
             try:
                 landing = nhl_player_landing(int(nhl_id))
