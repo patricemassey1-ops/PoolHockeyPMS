@@ -727,8 +727,7 @@ def load_owned_index(data_dir: str, nonce: str = "") -> dict:
         except Exception:
             pass
 
-        if idx:
-            return idx
+        # NOTE: ne pas 'return' ici — on fusionne aussi les fichiers par équipe (whalers.csv, etc.)
 
     # --- (2) fallback fichiers par équipe
     for fname in _discover_pms_team_files(data_dir):
@@ -1248,7 +1247,7 @@ def render_tab_joueurs(ctx: dict | None = None):
         team_pick = st.selectbox("Équipe NHL", ["Toutes"] + teams, index=0)
 
     with c2:
-        pos_pick = st.selectbox("Position", ["Toutes", "Forward", "Defense", "Goalie"], index=0)
+        pos_pick = st.selectbox("Position", ["Toutes", "F", "D", "G", "Forward", "Defense", "Goalie"], index=0)
 
     with c3:
         level_pick = st.selectbox("Level", ["Tous", "ELC", "STD"], index=0)
@@ -1261,7 +1260,12 @@ def render_tab_joueurs(ctx: dict | None = None):
     if team_pick != "Toutes":
         filt = filt[filt["Team"].astype(str) == team_pick]
     if pos_pick != "Toutes":
-        filt = filt[filt["PosBucket"] == pos_pick]
+        # Support filtres simples F/D/G + labels bucket
+        if pos_pick in ("F","D","G"):
+            bucket = {"F":"Forward","D":"Defense","G":"Goalie"}[pos_pick]
+        else:
+            bucket = pos_pick
+        filt = filt[filt["PosBucket"] == bucket]
     if level_pick != "Tous":
         filt = filt[filt["Level"].astype(str).str.upper() == level_pick]
     if country_pick != "Tous":
