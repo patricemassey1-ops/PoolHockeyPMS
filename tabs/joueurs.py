@@ -13,208 +13,29 @@
 
 import os
 import re
-import hashlib
-import ast
-import difflib
-import datetime
-import time
-import urllib.parse
 import requests
 import pandas as pd
 import streamlit as st
 
-def _first_existing_dir(cands):
-    for d in cands:
-        if d and os.path.isdir(d):
-            return d
-    return cands[0] if cands else "data"
-
-DATA_DIR = _first_existing_dir(["data","Data"])
+DATA_DIR = "data"
+# support Data/ (Linux case-sensitive)
+if not os.path.isdir(DATA_DIR) and os.path.isdir("Data"):
+    DATA_DIR = "Data"
 PLAYERS_PATH = os.path.join(DATA_DIR, "hockey.players.csv")
 
-CURRENT_CTX: dict | None = None
-
-
-
-EQUIPES_JOUEURS_FILES = [
-    "equipes_joueurs_2025-2026.csv",
-    "equipes_joueurs_2025_2026.csv",
-    "equipes_joueurs_2025-2026.csv".replace("-","_"),
+PMS_TEAM_FILES = [
+    "Whalers.csv",
+    "Red_Wings.csv",
+    "Predateurs.csv",
+    "Nordiques.csv",
+    "Cracheurs.csv",
+    "Canadiens.csv",
 ]
 
 
-PMS_TEAM_NAMES = ["Whalers", "Red_Wings", "Predateurs", "Nordiques", "Cracheurs", "Canadiens"]
-
-def _discover_pms_team_files(data_dir: str) -> list[str]:
-    """
-    Retourne la liste des fichiers CSV d'équipes du pool présents dans data_dir.
-    Supporte la casse (Whalers.csv vs whalers.csv), underscores/espaces, etc.
-    """
-    if not data_dir:
-        return []
-    try:
-        files = [f for f in os.listdir(data_dir) if f.lower().endswith(".csv")]
-    except Exception:
-        return []
-
-    # index des fichiers par nom normalisé (sans extension)
-    norm = lambda s: re.sub(r"[^a-z0-9]+", "", str(s or "").lower())
-    want = {norm(n): n for n in PMS_TEAM_NAMES}
-
-    picked = []
-    for f in files:
-        stem = os.path.splitext(f)[0]
-        k = norm(stem)
-        if k in want:
-            picked.append(f)
-
-    # fallback: si rien trouvé, on garde les noms "classiques" (au cas où)
-    if not picked:
-        for n in PMS_TEAM_NAMES:
-            picked.append(f"{n}.csv")
-            picked.append(f"{n.lower()}.csv")
-    # unique en préservant l'ordre
-    out = []
-    seen = set()
-    for f in picked:
-        if f not in seen:
-            out.append(f)
-            seen.add(f)
-    return out
-
-
-def owned_index_nonce(data_dir: str) -> str:
-    """Clé de cache basée sur le contenu (mtime) des fichiers d'équipes + fichier unifié.
-    Permet de rafraîchir automatiquement l'index quand tu modifies /data/*.csv sur Streamlit Cloud.
-    """
-    try:
-        parts = []
-        # fichiers équipes
-        for f in _discover_pms_team_files(data_dir):
-            fp = os.path.join(data_dir, f)
-            if os.path.exists(fp):
-                parts.append(f"{f}:{os.path.getmtime(fp):.0f}")
-        # fichier unifié
-        if data_dir and os.path.isdir(data_dir):
-            for f in os.listdir(data_dir):
-                if f.lower().startswith("equipes_joueurs_") and f.lower().endswith(".csv"):
-                    fp = os.path.join(data_dir, f)
-                    parts.append(f"{f}:{os.path.getmtime(fp):.0f}")
-        raw = "|".join(sorted(parts)).encode("utf-8")
-        return hashlib.md5(raw).hexdigest()
-    except Exception:
-        return str(time.time())
-
-
-# -------------------------------------------
+# ----------------------------
 # Helpers (position / name / formatting)
 # ----------------------------
-
-
-def pms_team_files_report(data_dir: str) -> list[dict]:
-    """Rapport santé des fichiers équipes PMS détectés dans data_dir.
-    - case-insensitive (whalers.csv / Whalers.csv)
-    - détecte colonne joueur + scope si présent
-    """
-    rows: list[dict] = []
-    for fname in _discover_pms_team_files(data_dir):
-        fp = os.path.join(data_dir, fname)
-        team = _team_name_from_filename(fname)
-        try:
-            df = pd.read_csv(fp, low_memory=False)
-            df.columns = [str(c).strip() for c in df.columns]
-            pcol = _detect_player_column(df) or ""
-            scol = _detect_scope_column(df) or ""
-            rows.append({
-                "Fichier": fname,
-                "Équipe (pool)": team,
-                "Lignes": int(len(df)),
-                "Colonne joueur": pcol,
-                "Colonne scope": scol,
-                "OK": "✅" if pcol else "⚠️",
-            })
-        except Exception as e:
-            rows.append({
-                "Fichier": fname,
-                "Équipe (pool)": team,
-                "Lignes": 0,
-                "Colonne joueur": "",
-                "Colonne scope": "",
-                "OK": "❌",
-                "Erreur": str(e)[:180],
-            })
-    return rows
-
-
-
-def nhl_results_to_labels(results):
-    """Convert NHL search results list into UI labels + mapping.
-    Works with various NHL API payload shapes.
-    Returns (labels, id_map) where id_map[label] -> nhl_id (int).
-    """
-    labels = []
-    id_map = {}
-    if not results:
-        return labels, id_map
-
-    for r in results:
-        if not isinstance(r, dict):
-            continue
-        # NHL id
-        rid = r.get("id") or r.get("playerId") or r.get("nhlId") or r.get("nhl_id")
-        try:
-            rid_int = int(rid) if rid is not None and str(rid).strip() != "" else None
-        except Exception:
-            rid_int = None
-
-        # name
-        name = (
-            r.get("fullName")
-            or r.get("name")
-            or r.get("displayName")
-            or (f"{r.get('firstName','')} {r.get('lastName','')}".strip() or None)
-        ) or "Unknown"
-
-        # team
-        team = ""
-        t = r.get("currentTeam") or r.get("team") or {}
-        if isinstance(t, dict):
-            team = t.get("abbrev") or t.get("triCode") or t.get("name") or ""
-        elif isinstance(t, str):
-            team = t
-        team = str(team).strip()
-
-        # position
-        pos = ""
-        p = r.get("primaryPosition") or r.get("position") or {}
-        if isinstance(p, dict):
-            pos = p.get("abbrev") or p.get("code") or p.get("name") or ""
-        elif isinstance(p, str):
-            pos = p
-        pos = str(pos).strip()
-
-        # birthdate / age hint
-        b = r.get("birthDate") or r.get("birthdate") or ""
-        b = str(b).strip()
-
-        parts = [name]
-        if team:
-            parts.append(team)
-        if pos:
-            parts.append(pos)
-        if b and b != "nan":
-            parts.append(b)
-
-        label = " — ".join(parts)
-        if rid_int is None:
-            # still allow selection, but mark unknown id
-            label = f"{label} (id?)"
-        labels.append(label)
-        id_map[label] = rid_int
-
-    return labels, id_map
-
-
 def _pos_bucket(pos_raw: str) -> str:
     """
     Mappe Position brute vers: Forward / Defense / Goalie
@@ -251,53 +72,34 @@ def safe_str(x) -> str:
     return s
 
 
-def format_contract_status(x) -> str:
-    """Affichage du champ 'Statut' côté UI (contrat).
-    Si la valeur ressemble à un code d'équipe/ligue (ex: HAR, MTL), on affiche '—'.
-    On garde les formats type 'Yr 3 of 8', '2 yrs', 'ELC', etc.
-    """
-    s = "" if x is None else str(x)
-    s = s.strip()
-    if not s or s.upper() == "NAN":
-        return "—"
-
-    # Si c'est un code court en majuscule (2-4 lettres) -> probablement équipe/ligue, pas un statut contrat
-    if re.fullmatch(r"[A-Z]{2,4}", s):
-        return "—"
-
-    # Sinon on garde tel quel
-    return s
-
-
-def clean_player_name(name: str) -> str:
-    """Nettoie un nom joueur provenant de labels UI.
-    Ex: 'Michael Hage | Michael Hage|' -> 'Michael Hage'
-    """
-    s = str(name or '').strip()
-    if not s:
-        return ''
-    # si le label contient des pipes, on garde le premier segment non vide
-    if '|' in s:
-        parts = [p.strip() for p in s.split('|') if p.strip()]
-        if parts:
-            s = parts[0]
-    # enlève doublon simple 'X X'
-    toks = s.split()
-    if len(toks) >= 4 and toks[:2] == toks[2:4]:
-        s = ' '.join(toks[:2])
-    return s
-
-
-
 def _norm_player_key(name: str) -> str:
     """
-    Normalisation robuste pour matcher les joueurs entre fichiers:
-    - 'Zucker, Jason' -> 'jason zucker'
-    - enlève ponctuation
+    Normalisation très robuste pour matcher les joueurs entre fichiers (players vs rosters).
+
+    Gère les variantes fréquentes:
+      - 'Caufield, Cole' / 'Cole Caufield'
+      - 'Cole Caufield (RW)' / 'Cole Caufield - MTL' / 'Cole Caufield | ...'
+      - supprime ponctuation, doubles espaces
     """
-    s = player_last_first_to_first_last(str(name or ""))
+    s = str(name or "").strip()
+
+    # si "A | B" -> garder A
+    if "|" in s:
+        s = s.split("|", 1)[0].strip()
+
+    # enlever contenu entre parenthèses "(RW)" etc.
+    s = re.sub(r"\([^)]*\)", " ", s)
+
+    # enlever segments après ' - ' (ex: 'Name - MTL')
+    if " - " in s:
+        s = s.split(" - ", 1)[0].strip()
+
+    # convertir "Last, First" -> "First Last"
+    s = player_last_first_to_first_last(s)
+
+    # nettoyer caractères
     s = s.lower().strip()
-    s = re.sub(r"[^a-z0-9\s\-]", " ", s)
+    s = re.sub(r"[^a-z0-9\s\-']", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -355,170 +157,6 @@ def _get_first_present(r: pd.Series, keys: list[str], default=None):
     return default
 
 
-
-# ----------------------------
-# NHL Search (associer NHL_ID)
-# ----------------------------
-def nhl_search_players(query: str, limit: int = 25) -> list[dict]:
-    """Recherche des joueurs dans l'index NHL (pour retrouver nhl_id)."""
-    q = str(query or "").strip()
-    if not q:
-        return []
-    try:
-        url = (
-            "https://search.d3.nhle.com/api/v1/search/player"
-            f"?culture=en-us&limit={int(limit)}&q={urllib.parse.quote(q)}"
-        )
-        r = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        data = r.json()
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def _norm_name(s: str) -> str:
-    s = str(s or "").lower().strip()
-    s = re.sub(r"[^a-z\s\-']", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def _seq_ratio(a: str, b: str) -> float:
-    a = _norm_name(a)
-    b = _norm_name(b)
-    if not a or not b:
-        return 0.0
-    return difflib.SequenceMatcher(None, a, b).ratio()
-
-def _auto_pick_nhl_id(player_name: str, team_abbrev: str, pos_bucket: str, age, results: list[dict]):
-    """Retourne (best_id, best_label, ranked_labels, id_map, confident_bool)."""
-    team_abbrev = str(team_abbrev or "").strip().upper()
-    pos_bucket = str(pos_bucket or "").strip()
-
-    birth_year_target = None
-    try:
-        if pd.notna(age):
-            birth_year_target = int(datetime.date.today().year) - int(float(age))
-    except Exception:
-        birth_year_target = None
-
-    scored = []
-    for it in (results or []):
-        pid = it.get("playerId") or it.get("player_id") or it.get("id")
-        if not pid:
-            continue
-        first = it.get("firstName", "") or ""
-        last = it.get("lastName", "") or ""
-        full = (f"{first} {last}").strip() or str(it.get("name") or "").strip()
-
-        team = (it.get("teamAbbrev") or it.get("team") or "").strip().upper()
-        pos = (it.get("position") or it.get("positionCode") or "").strip().upper()
-        bd = (it.get("birthDate") or it.get("birthdate") or "").strip()
-
-        name_score = _seq_ratio(full, player_name)
-        team_score = 0.08 if (team_abbrev and team and team_abbrev == team) else 0.0
-
-        # Position: map NHL position letters to bucket
-        pos_score = 0.0
-        if pos_bucket:
-            if pos == "G" and pos_bucket == "Goalie":
-                pos_score = 0.06
-            elif pos in {"D"} and pos_bucket == "Defense":
-                pos_score = 0.06
-            elif pos in {"C","L","R","LW","RW","F"} and pos_bucket == "Forward":
-                pos_score = 0.06
-
-        birth_score = 0.0
-        if birth_year_target and bd and len(bd) >= 4:
-            try:
-                by = int(bd[:4])
-                if abs(by - birth_year_target) <= 1:
-                    birth_score = 0.06
-            except Exception:
-                pass
-
-        total = name_score + team_score + pos_score + birth_score
-
-        lbl = f"{full} — {team} {pos} — {bd} — ID {pid}".strip()
-        scored.append((total, name_score, lbl, int(pid)))
-
-    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-
-    id_map = {}
-    labels = []
-    for total, name_score, lbl, pid in scored:
-        labels.append(lbl)
-        id_map[lbl] = pid
-
-    if not scored:
-        return None, None, [], {}, False
-
-    best_total, best_name, best_lbl, best_id = scored[0]
-    second_total = scored[1][0] if len(scored) > 1 else 0.0
-
-    # Heuristique confiance: nom très proche OU score total fort + marge
-    confident = (best_name >= 0.86) or (best_total >= 0.92 and (best_total - second_total) >= 0.06)
-
-    return best_id, best_lbl, labels, id_map, confident
-
-
-
-def save_players_db(df: pd.DataFrame, path: str) -> None:
-    """Sauvegarde hockey.players.csv en retirant les colonnes calculées (écriture atomique + bust cache)."""
-    if df is None or df.empty:
-        return
-
-    out = df.copy()
-
-    # Colonnes internes à ne pas écrire
-    drop_cols = {"PosBucket", "__pkey", "__display", "__alt", "__opt", "__rowid"}
-    for c in list(drop_cols):
-        if c in out.columns:
-            out = out.drop(columns=[c])
-
-    # nhl_id -> entier nullable
-    if "nhl_id" in out.columns:
-        out["nhl_id"] = pd.to_numeric(out["nhl_id"], errors="coerce").astype("Int64")
-
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-
-    tmp = path + ".tmp"
-    out.to_csv(tmp, index=False, na_rep="", encoding="utf-8")
-    os.replace(tmp, path)
-
-    # IMPORTANT: sans ça, Streamlit peut resservir l'ancien DF en cache
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
-    st.session_state["players_db_nonce"] = str(time.time())
-
-
-
-def _ensure_rowid(df: pd.DataFrame) -> pd.DataFrame:
-    """Ajoute une colonne __rowid (volatile) si absente, pour pouvoir cibler la ligne sélectionnée."""
-    if df is None or df.empty:
-        return df
-    if "__rowid" not in df.columns:
-        df = df.copy()
-        df["__rowid"] = range(len(df))
-    return df
-
-
-def _set_nhl_id_by_rowid(df: pd.DataFrame, rowid: int, nhl_id_val) -> pd.DataFrame:
-    """Set nhl_id sur la ligne __rowid == rowid (en ajoutant __rowid si nécessaire)."""
-    df = _ensure_rowid(df)
-    if df is None or df.empty:
-        return df
-    try:
-        nhl_int = int(nhl_id_val) if nhl_id_val not in (None, "") else None
-    except Exception:
-        nhl_int = None
-    if nhl_int is None:
-        return df
-    df.loc[df["__rowid"] == int(rowid), "nhl_id"] = nhl_int
-    return df
-
 # ----------------------------
 # NHL Images
 # ----------------------------
@@ -560,7 +198,7 @@ def render_team_with_logo(team_abbrev: str):
 # Load local players DB
 # ----------------------------
 @st.cache_data(show_spinner=False)
-def load_players_db(path: str, mtime: float = 0.0) -> pd.DataFrame:
+def load_players_db(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame()
 
@@ -586,10 +224,7 @@ def load_players_db(path: str, mtime: float = 0.0) -> pd.DataFrame:
     for c in ["Team", "Country", "Flag", "Cap Hit", "Status"]:
         df[c] = df[c].replace({"nan": "", "NaN": "", "NAN": ""})
 
-    df["__pkey"] = df["Player"].apply(clean_player_name).apply(_norm_player_key)
-    # volatile row id to target updates (nhl_id association)
-    if "__rowid" not in df.columns:
-        df["__rowid"] = range(len(df))
+    df["__pkey"] = df["Player"].apply(_norm_player_key)
     return df
 
 
@@ -603,236 +238,72 @@ def _team_name_from_filename(fname: str) -> str:
 
 def _detect_player_column(df: pd.DataFrame) -> str | None:
     """
-    Détecte la colonne joueur dans un roster CSV (case-insensitive).
-    Priorités: Joueur/Player/Name/Nom + variantes.
+    Détecte la colonne joueur dans un roster CSV.
+    On essaie des noms fréquents; sinon, si une colonne contient des valeurs "Last, First" on la choisit.
     """
-    if df is None or df.empty:
-        return None
+    cols = [c.strip() for c in df.columns]
+    for c in ["Joueur", "Player", "Nom", "Name"]:
+        if c in cols:
+            return c
 
-    # map lower->original
-    cols = [str(c).strip() for c in df.columns]
-    low_map = {c.lower(): c for c in cols if c}
+    # Heuristique: première colonne qui ressemble à des noms
+    for c in cols[:5]:
+        s = df[c].dropna().astype(str)
+        if s.empty:
+            continue
+        # si plusieurs valeurs contiennent une virgule (Last, First)
+        sample = s.head(30).tolist()
+        comma_hits = sum(1 for x in sample if "," in str(x))
+        if comma_hits >= 5:
+            return c
 
-    preferred = ["joueur","player","nom","name","player_name","playername","full_name","fullname","skater","goalie"]
-    for k in preferred:
-        if k in low_map:
-            return low_map[k]
-
-    # Heuristique: première colonne qui ressemble fortement à des noms (contient espace, lettres) et pas trop numérique
-    best = None
-    best_score = -1
-    for c in cols:
-        s = df[c].astype(str).fillna("")
-        # score: proportion de lignes avec au moins une lettre et un espace (prénom nom)
-        has_letter = s.str.contains(r"[A-Za-zÀ-ÿ]", regex=True)
-        has_space = s.str.contains(r"\s", regex=True)
-        not_num = ~s.str.fullmatch(r"\d+", na=False)
-        score = float(((has_letter & has_space & not_num).mean()) * 100)
-        if score > best_score:
-            best_score = score
-            best = c
-
-    return best if (best_score >= 30) else None
+    # fallback: première colonne
+    return cols[0] if cols else None
 
 
-
-def _looks_like_nhl_abbrev_series(s: pd.Series) -> float:
-    """Retourne la proportion de valeurs qui ressemblent à des abréviations NHL (2-3 lettres majuscules)."""
-    if s is None:
-        return 0.0
-    vals = [str(x).strip() for x in s.dropna().astype(str).tolist()]
-    vals = [v for v in vals if v and v.upper() != "NAN"]
-    if not vals:
-        return 0.0
-    hits = 0
-    for v in vals[:400]:
-        vv = v.strip()
-        if re.fullmatch(r"[A-Z]{2,3}", vv):
-            hits += 1
-    return hits / max(1, min(len(vals), 400))
-
-
-def _pick_pool_team_column(dfu: pd.DataFrame) -> str | None:
-    """Choisit la colonne qui correspond à l'équipe du pool (Whalers, etc.) dans le fichier unifié.
-
-    On évite les colonnes ambiguës (ex: 'Team' = souvent NHL).
-    Heuristiques:
-      - Priorité aux colonnes explicitement pool: Owner/GM/EquipePMS/TeamPMS/Equipe Pool...
-      - Si une colonne ressemble majoritairement à des abréviations NHL (MTL, BOS, etc.), on la rejette.
-      - Si une colonne contient des valeurs qui matchent nos équipes PMS connues, on la favorise.
-    """
-    if dfu is None or dfu.empty:
-        return None
-
-    # Liste d'équipes pool connues (on compare en normalisant)
-    known_pool = set([_team_name_from_filename(x + ".csv").lower() for x in [
-        "Whalers","Red_Wings","Predateurs","Nordiques","Cracheurs","Canadiens"
-    ]])
-    known_pool |= set([k.replace("_"," ").lower() for k in known_pool])
-
-    candidates = []
-    preferred = [
-        "EquipePMS","ÉquipePMS","TeamPMS","Team PMS","Equipe Pool","Équipe Pool",
-        "EquipePool","ÉquipePool","TeamPool","Team Pool",
-        "Owner","GM","PMS Team","PMS_Team",
-    ]
-    # 'Equipe' / 'Team' sont ambigus, on les garde mais en dernier
-    ambiguous = ["Equipe","Équipe","Team"]
-
-    for c in preferred + ambiguous:
-        if c in dfu.columns:
-            candidates.append(c)
-
-    if not candidates:
-        return None
-
-    best = None
-    best_score = -1e9
-
-    for c in candidates:
-        s = dfu[c]
-        # score de base: préféré > ambigu
-        base = 2.0 if c in preferred else 0.5
-        nhl_like = _looks_like_nhl_abbrev_series(s)
-        # pénalité si ça ressemble à des abréviations NHL
-        penalty = 3.0 * nhl_like
-
-        # bonus si on voit des noms d'équipes pool connues
-        vals = [str(x).strip() for x in s.dropna().astype(str).tolist()][:400]
-        vals_norm = [v.replace("_"," ").lower() for v in vals if v and v.upper() != "NAN"]
-        pool_hits = sum(1 for v in vals_norm if v in known_pool)
-        bonus = 1.5 * (pool_hits / max(1, len(vals_norm))) if vals_norm else 0.0
-
-        score = base + bonus - penalty
-        if score > best_score:
-            best_score = score
-            best = c
-
-    # si meilleur candidat est trop "NHL-like", on refuse
-    if best is None:
-        return None
-    if _looks_like_nhl_abbrev_series(dfu[best]) >= 0.6 and best in ambiguous:
-        return None
-
-    return best
+def _detect_scope_column(df: pd.DataFrame) -> str | None:
+    for c in ["Scope", "Club", "GC/CE", "GC_CE", "Type", "Roster", "Slot", "Statut", "Status"]:
+        if c in df.columns:
+            return c
+    return None
 
 
 @st.cache_data(show_spinner=False)
-def load_owned_index(data_dir: str, nonce: str = "") -> dict:
-    """Index des joueurs appartenant déjà au pool (SOURCE DE VÉRITÉ = rosters par équipe).
-
+def load_owned_index_from_team_files(data_dir: str) -> dict:
+    """
     Retour: pkey -> {"team_pms": "...", "scope": "...", "source": "..."}
-    - On ignore volontairement toute colonne "Equipe Pool" dans hockey.players.csv.
-    - On ignore volontairement tout fichier "equipes_joueurs_*.csv" : ça crée des divergences.
-    - On lit seulement les rosters d'équipes (whalers.csv, nordiques.csv, ...)
-
-    Robustesse:
-    - data_dir supporte data/ et Data/ (Linux case-sensitive)
-    - détection colonne joueur: Player/Joueur/Nom/Name + fallback sur colonnes contenant 'player'/'joueur'/'name'
-    - scope/slot: Slot/Scope/Statut/Status/Roster/Type (optionnel)
     """
     idx: dict[str, dict] = {}
 
-    # --- resolve data_dir (data vs Data)
-    data_dir = str(data_dir or "")
-    if data_dir and not os.path.isdir(data_dir):
-        base = os.path.dirname(data_dir)
-        cand = os.path.join(base, "data")
-        cand2 = os.path.join(base, "Data")
-        if os.path.isdir(cand):
-            data_dir = cand
-        elif os.path.isdir(cand2):
-            data_dir = cand2
-    if not data_dir or not os.path.isdir(data_dir):
-        return idx
-
-    # --- known pool teams (for filename matching)
-    POOL_TEAMS = [
-        "Whalers", "Nordiques", "Predateurs", "Prédateurs",
-        "Red_Wings", "Red Wings", "Canadiens", "Cracheurs"
-    ]
-    team_keys = {re.sub(r"[^a-z0-9]+", "", t.lower()): t for t in POOL_TEAMS}
-
-    def _team_from_filename(fname: str) -> str:
-        base = os.path.splitext(os.path.basename(fname))[0]
-        key = re.sub(r"[^a-z0-9]+", "", base.lower())
-        # direct match
-        if key in team_keys:
-            return team_keys[key]
-        # partial match (e.g. 'equipes_whalers_2025')
-        for k, t in team_keys.items():
-            if k and k in key:
-                return t
-        return ""
-
-    # --- scan candidate roster CSVs
-    ignore_prefixes = (
-        "hockey.players", "puckpedia", "pro_stats", "transactions",
-        "backup", "trade_market", "settings", "plafond", "caps",
-        "equipes_joueurs", "_nhl_id_", "nhl_id_"
-    )
-    csv_files = []
-    for fn in os.listdir(data_dir):
-        if not fn.lower().endswith(".csv"):
+    for fname in PMS_TEAM_FILES:
+        fp = os.path.join(data_dir, fname)
+        if not os.path.exists(fp):
             continue
-        low = fn.lower()
-        if low.startswith(ignore_prefixes):
-            continue
-        # keep only likely team rosters
-        team_pms = _team_from_filename(fn)
-        if not team_pms:
-            continue
-        csv_files.append((fn, team_pms))
 
-    # deterministic order for audit/debug
-    csv_files.sort(key=lambda x: x[0].lower())
+        team_pms = _team_name_from_filename(fname)
 
-    def _detect_player_col(df: pd.DataFrame) -> str:
-        cols = list(df.columns)
-        lower = {c.lower(): c for c in cols}
-        for c in ["player", "joueur", "nom", "name", "full name", "fullname"]:
-            if c in lower:
-                return lower[c]
-        # fallback: any column containing keywords
-        for c in cols:
-            cl = c.lower()
-            if "joueur" in cl or "player" in cl or ("name" in cl and "team" not in cl):
-                return c
-        return ""
-
-    def _detect_scope_col(df: pd.DataFrame) -> str:
-        cols = list(df.columns)
-        lower = {c.lower(): c for c in cols}
-        for c in ["slot", "scope", "statut", "status", "roster", "type"]:
-            if c in lower:
-                return lower[c]
-        return ""
-
-    # --- build index from rosters
-    for fname, team_pms in csv_files:
-        fpath = os.path.join(data_dir, fname)
         try:
-            rdf = pd.read_csv(fpath, low_memory=False)
-            if rdf is None or rdf.empty:
-                continue
-            pcol = _detect_player_col(rdf)
+            df = pd.read_csv(fp, low_memory=False)
+            df.columns = [c.strip() for c in df.columns]
+
+            pcol = _detect_player_column(df)
             if not pcol:
                 continue
-            scol = _detect_scope_col(rdf)
 
-            for _, r in rdf.iterrows():
-                raw = r.get(pcol, "")
-                pkey = _norm_player_key(clean_player_name(raw))
+            scol = _detect_scope_column(df)
+
+            for _, r in df.iterrows():
+                pkey = _norm_player_key(r.get(pcol, ""))
                 if not pkey:
                     continue
-                # first win (avoid flip-flop if duplicates across files)
                 if pkey in idx:
                     continue
                 scope_val = str(r.get(scol, "")).strip() if scol else ""
-                # hide nan
-                if scope_val.lower() == "nan":
-                    scope_val = ""
-                idx[pkey] = {"team_pms": team_pms, "scope": scope_val, "source": fname}
+                idx[pkey] = {
+                    "team_pms": team_pms,
+                    "scope": scope_val,
+                    "source": fname,
+                }
         except Exception:
             continue
 
@@ -842,7 +313,7 @@ def load_owned_index(data_dir: str, nonce: str = "") -> dict:
 def render_owned_badge(pkey: str, owned_idx: dict):
     info = owned_idx.get(pkey)
     if not info:
-        st.markdown("🟢 **Disponible**")
+        st.markdown("🟩 **Disponible**")
         return
 
     team_pms = info.get("team_pms") or "Équipe"
@@ -850,122 +321,8 @@ def render_owned_badge(pkey: str, owned_idx: dict):
     src = info.get("source") or ""
     extra = f" — {scope}" if scope and scope.upper() != "NAN" else ""
     src_txt = f" (source: {src})" if src else ""
-    st.markdown(f"🔴 **Non disponible** — dans **{team_pms}{extra}**{src_txt}")
+    st.markdown(f"🟥 **Non disponible — dans {team_pms}{extra}**{src_txt}")
 
-
-
-# ----------------------------
-# 🧪 Audit (sanity check)
-#   Détecte les joueurs du pool qui pourraient encore apparaître "Disponible"
-#   à cause d'un mismatch de normalisation ou d'une source de vérité divergente.
-# ----------------------------
-def _detect_pool_team_columns(df: pd.DataFrame) -> list[str]:
-    """Colonnes possibles indiquant l'équipe/owner du pool dans hockey.players.csv."""
-    candidates = [
-        "EquipePool", "ÉquipePool", "Equipe Pool", "Équipe Pool",
-        "TeamPool", "Team Pool", "Owner", "GM", "EquipePMS", "ÉquipePMS",
-        "PMS Team", "TeamPMS", "Team PMS", "PMS_Team",
-    ]
-    return [c for c in candidates if c in df.columns]
-
-
-@st.cache_data(show_spinner=False)
-def audit_pool_vs_availability(players_df: pd.DataFrame, data_dir: str) -> dict:
-    """
-    Retourne un dict avec:
-      - dupes: joueurs présents dans >1 équipe (via fichiers équipes)
-      - missing_in_players_db: joueurs présents dans fichiers équipes mais introuvables dans hockey.players.csv (pkey mismatch)
-      - players_db_pool_but_available: joueurs marqués avec une équipe/owner dans hockey.players.csv mais non trouvés dans fichiers équipes (ils risquent d'apparaître 'Disponible')
-    """
-    # --- build raw pool map from team files with duplicates
-    pool_map: dict[str, dict] = {}  # pkey -> {"teams": set, "samples": set}
-    for fname in _discover_pms_team_files(data_dir):
-        fp = os.path.join(data_dir, fname)
-        if not os.path.exists(fp):
-            continue
-        team_pms = _team_name_from_filename(fname)
-        try:
-            tdf = pd.read_csv(fp, low_memory=False)
-            tdf.columns = [c.strip() for c in tdf.columns]
-            pcol = _detect_player_column(tdf)
-            if not pcol:
-                continue
-            for _, rr in tdf.iterrows():
-                raw_name = str(rr.get(pcol, '') or '').strip()
-                pkey = _norm_player_key(clean_player_name(raw_name))
-                if not pkey:
-                    continue
-                ent = pool_map.setdefault(pkey, {"teams": set(), "samples": set(), "files": set()})
-                ent["teams"].add(team_pms)
-                ent["files"].add(fname)
-                if raw_name:
-                    ent["samples"].add(raw_name)
-        except Exception:
-            continue
-
-    dupes = []
-    for pkey, ent in pool_map.items():
-        teams = sorted(ent["teams"])
-        if len(teams) > 1:
-            dupes.append({
-                "PlayerKey": pkey,
-                "Teams": ", ".join(teams),
-                "Examples": ", ".join(sorted(list(ent["samples"]))[:2]),
-            })
-
-    # --- players db keys
-    pdf = players_df.copy()
-    if "__pkey" not in pdf.columns:
-        # best effort: try Player column
-        pcol = "Player" if "Player" in pdf.columns else None
-        if pcol:
-            pdf["__pkey"] = pdf[pcol].astype(str).apply(_norm_player_key)
-        else:
-            pdf["__pkey"] = ""
-
-    pkeys_db = set([k for k in pdf["__pkey"].astype(str).tolist() if k])
-
-    missing_in_players_db = []
-    for pkey, ent in pool_map.items():
-        if pkey not in pkeys_db:
-            missing_in_players_db.append({
-                "PlayerKey": pkey,
-                "Team": ", ".join(sorted(ent["teams"])),
-                "ExampleFromTeamCSV": ", ".join(sorted(list(ent["samples"]))[:2]),
-            })
-
-    # --- players db "pool team" columns vs team files
-    pool_cols = _detect_pool_team_columns(pdf)
-    players_db_pool_but_available = []
-    if pool_cols:
-        # any non-empty value in any pool col
-        def _pool_team_for_row(row):
-            for c in pool_cols:
-                v = str(row.get(c, '') or '').strip()
-                if v and v.upper() != "NAN":
-                    return v
-            return ""
-
-        pdf["__pool_team_hint"] = pdf.apply(_pool_team_for_row, axis=1)
-        hinted = pdf[pdf["__pool_team_hint"].astype(str).str.strip() != ""].copy()
-        # availability in UI is based on team files index (owned_idx) -> so if not in pool_map, it's "Disponible"
-        for _, rr in hinted.iterrows():
-            pkey = str(rr.get("__pkey") or "")
-            if not pkey:
-                continue
-            if pkey not in pool_map:
-                players_db_pool_but_available.append({
-                    "Player": safe_str(rr.get("Player")),
-                    "PoolTeamInPlayersDB": rr.get("__pool_team_hint", ""),
-                    "Note": "Présent dans hockey.players.csv mais absent des fichiers équipes (/data/*) — risque d'apparaitre 'Disponible'",
-                })
-
-    return {
-        "dupes": dupes,
-        "missing_in_players_db": missing_in_players_db,
-        "players_db_pool_but_available": players_db_pool_but_available,
-        "pool_cols_detected": pool_cols,
-    }
 
 # ----------------------------
 # NHL API (landing)
@@ -1125,42 +482,6 @@ def _map_goalie_row(it: dict) -> dict:
 def _format_api_table(df: pd.DataFrame, goalie: bool) -> pd.DataFrame:
     df2 = df.copy()
 
-    def _season_fmt(x):
-        s = str(x or "").strip()
-        # 20252026 -> 2025-2026
-        if re.fullmatch(r"\d{8}", s):
-            return f"{s[:4]}-{s[4:]}"
-        # 2025-2026 / 2025_2026 -> normalize dash
-        m = re.fullmatch(r"(\d{4})[^0-9]?(\d{4})", s)
-        if m:
-            return f"{m.group(1)}-{m.group(2)}"
-        return s
-
-    def _team_fmt(x):
-        # dict -> take 'default' or first string-ish
-        if isinstance(x, dict):
-            if "default" in x and x["default"]:
-                return str(x["default"])
-            for v in x.values():
-                if v:
-                    return str(v)
-            return ""
-        s = str(x or "").strip()
-        # string that looks like a dict: "{'default': 'Univ...'}"
-        if s.startswith("{") and "default" in s:
-            try:
-                d = ast.literal_eval(s)
-                if isinstance(d, dict):
-                    return str(d.get("default") or next(iter(d.values()), "") or "")
-            except Exception:
-                pass
-        return s
-
-    if "Season" in df2.columns:
-        df2["Season"] = df2["Season"].apply(_season_fmt)
-    if "Team" in df2.columns:
-        df2["Team"] = df2["Team"].apply(_team_fmt)
-
     def _type_norm(x):
         s = str(x or "").strip().upper()
         if s in ["R", "RS", "REG", "REGULAR", "2"]:
@@ -1247,7 +568,6 @@ def render_api_pro_tables(landing: dict, goalie: bool):
 # ----------------------------
 def render_local_pro_panel(row: pd.DataFrame):
     r = row.iloc[0]
-    rowid = int(r.get("__rowid", 0))
     goalie = _is_goalie(r)
 
     gp = _get_first_present(r, ["nhl_gp", "NHL GP", "GP"], default=None)
@@ -1304,20 +624,15 @@ def render_local_pro_panel(row: pd.DataFrame):
 # ----------------------------
 # Main render for tab
 # ----------------------------
-def render_tab_joueurs(ctx: dict | None = None):
+def render_tab_joueurs():
     st.header("🏒 Joueurs")
 
-    # Outils admin (associer NHL_ID, audit) — idéalement dans Gestion Admin
-    # On les affiche seulement si admin.
-    _ctx = ctx or CURRENT_CTX or {}
-    show_admin_tools = bool(_ctx.get("is_admin") or st.session_state.get("is_admin"))
-
-    df = load_players_db(PLAYERS_PATH, os.path.getmtime(PLAYERS_PATH) if os.path.exists(PLAYERS_PATH) else 0.0)
+    df = load_players_db(PLAYERS_PATH)
     if df.empty:
         st.error("❌ data/hockey.players.csv introuvable ou vide.")
         return
 
-    owned_idx = load_owned_index(DATA_DIR, owned_index_nonce(DATA_DIR))
+    owned_idx = load_owned_index_from_team_files(DATA_DIR)
 
     # ---- Filtres (4)
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
@@ -1370,14 +685,11 @@ def render_tab_joueurs(ctx: dict | None = None):
         return
 
     r = row.iloc[0]
-    rowid = int(r.get("__rowid", 0))
     goalie = _is_goalie(r)
 
     # ---- Titre joueur
-    raw_name = r.get("Player") or r.get("Joueur") or r.get("Nom") or r.get("Name") or ""
-    player_name_clean = clean_player_name(raw_name) or str(raw_name or "").strip()
-    player_name = safe_str(player_name_clean)
-    player_name_alt = safe_str(player_last_first_to_first_last(player_name_clean))
+    player_name = safe_str(r.get("Player"))
+    player_name_alt = safe_str(player_last_first_to_first_last(player_name))
     st.subheader(player_name_alt if player_name_alt != "—" else player_name)
 
     # ---- Owned badge
@@ -1403,174 +715,47 @@ def render_tab_joueurs(ctx: dict | None = None):
     left, right = st.columns([1, 2])
     nhl_id = r.get("nhl_id")
     flag_url = str(r.get("Flag") or "").strip()
-    missing_nhl = False
-
 
     with left:
         if pd.notna(nhl_id):
-            pid = int(nhl_id)
-            # Plusieurs sources possibles (certains prospects n'ont pas de mug)
-            urls = [
-                headshot_url(pid, size=168),
-                f"https://nhl.bamcontent.com/images/headshots/current/168x168/{pid}.jpg",
-                f"https://nhl.bamcontent.com/images/headshots/current/260x260/{pid}.jpg",
-            ]
-            shown = False
-            for u in urls:
-                try:
-                    resp = requests.get(u, timeout=4)
-                    if resp.status_code == 200 and resp.content:
-                        st.image(u, use_container_width=True)
-                        shown = True
-                        break
-                except Exception:
-                    continue
-            if not shown:
-                st.warning("Photo NHL indisponible pour ce joueur (aucun headshot trouvé).")
-            st.caption(f"NHL ID: {pid}")
+            st.image(headshot_url(int(nhl_id), size=168), use_container_width=True)
+            st.caption(f"NHL ID: {int(nhl_id)}")
         else:
             st.info("Photo NHL et stats live indisponibles (nhl_id manquant).")
-            missing_nhl = True
+
+        if flag_url.startswith("http"):
+            st.image(flag_url, caption=safe_str(r.get("Country")), width=90)
 
     with right:
         info_cols = st.columns(4)
         info_cols[0].metric("Jersey#", safe_str(r.get("Jersey#")))
         info_cols[1].metric("Taille", safe_str(r.get("H(f)")))
         info_cols[2].metric("Poids", safe_str(r.get("W(lbs)")))
-        info_cols[3].metric("Statut", format_contract_status(r.get("Status")))
+        info_cols[3].metric("Statut", safe_str(r.get("Status")))
 
-        stats_mode = st.radio("📈 Statistiques", ["Les deux", "PRO (CSV)", "NHL LIVE (API)"], horizontal=True)
+        st.markdown("### 📊 Stats (PRO — CSV)")
+        render_local_pro_panel(row)
 
-        if stats_mode in ("Les deux", "PRO (CSV)"):
-            st.markdown("### 📊 Stats (PRO — CSV)")
-            render_local_pro_panel(row)
+    # ---- API PRO TABLE (seulement si nhl_id présent)
+    if pd.notna(nhl_id):
+        st.markdown("### ⚡ Stats NHL LIVE (API — table pro)")
+        try:
+            landing = nhl_player_landing(int(nhl_id))
 
-    # ---- Associer NHL_ID (centré et plus étroit) si manquant
-    if show_admin_tools and missing_nhl:
-        cL, cM, cR = st.columns([1, 1.15, 1])
-        with cM:
-            with st.expander("🔗 Associer NHL_ID (activer photo + stats live)", expanded=False):
-                default_q = player_last_first_to_first_last(player_name)
-                q = st.text_input(
-                    "Recherche NHL (nom / prénom)",
-                    value=default_q if default_q != "—" else str(player_name or "").strip(),
-                    key=f"nhl_q__{rowid}",
-                )
+            top = st.columns(4)
+            top[0].metric("Prénom", safe_str(landing.get("firstName", {}).get("default")))
+            top[1].metric("Nom", safe_str(landing.get("lastName", {}).get("default")))
+            top[2].metric("Tire", safe_str(landing.get("shootsCatches")))
+            top[3].metric("Numéro", safe_str(landing.get("sweaterNumber")))
 
-                # --- Auto association (best effort)
-                if st.button("🤖 Associer automatiquement", key=f"nhl_auto__{rowid}"):
-                    auto_results = nhl_search_players(default_q, limit=25)
-                    if not auto_results:
-                        st.warning("Aucun résultat NHL trouvé (endpoint de recherche vide). Essaie 🔎 Chercher dans la NHL avec un nom complet.")
-                    best_id, best_lbl, labels, id_map, confident = _auto_pick_nhl_id(
-                        player_name=default_q,
-                        team_abbrev=r.get("Team"),
-                        pos_bucket=_pos_bucket(r.get("Position")),
-                        age=r.get("Age"),
-                        results=auto_results,
-                    )
-                    if best_id and confident:
-                        df = _set_nhl_id_by_rowid(df, rowid, best_id)
-                        save_players_db(df, PLAYERS_PATH)
-                        load_players_db.clear()
-                        st.success(f"✅ NHL_ID auto-associé: {best_id} ({best_lbl})")
-                        st.rerun()
-                    elif labels:
-                        st.session_state[f"nhl_results__{rowid}"] = auto_results
-                        st.warning("Match automatique incertain — sélectionne le bon joueur ci-dessous 👇")
-                        st.session_state[f"nhl_pick__{rowid}"] = best_lbl
-                    else:
-                        st.warning("Aucun match trouvé automatiquement. Essaie la recherche manuelle.")
+            render_api_pro_tables(landing, goalie=goalie)
 
-                if st.button("🔎 Chercher dans la NHL", key=f"nhl_search__{rowid}"):
-                    st.session_state[f"nhl_results__{rowid}"] = nhl_search_players(q, limit=25)
-
-                results = st.session_state.get(f"nhl_results__{rowid}", [])
-                if results:
-                    labels, id_map = nhl_results_to_labels(results)
-                    pick = st.radio(
-                        "Résultats",
-                        options=labels,
-                        index=labels.index(st.session_state.get(f"nhl_pick__{rowid}", labels[0])) if labels else 0,
-                        key=f"nhl_pick__{rowid}",
-                    )
-                    if st.button("✅ Enregistrer NHL_ID", key=f"nhl_save__{rowid}"):
-                        chosen_id = id_map.get(pick)
-                        if chosen_id:
-                            df = _set_nhl_id_by_rowid(df, rowid, chosen_id)
-                            save_players_db(df, PLAYERS_PATH)
-                            load_players_db.clear()
-                            st.success(f"✅ NHL_ID enregistré: {chosen_id} ({pick})")
-                            st.rerun()
-                else:
-                    st.caption("Astuce: tape le nom complet (ex: 'Michael Hage') puis lance la recherche.")
+        except Exception as e:
+            st.warning(f"API NHL indisponible (ID {int(nhl_id)}). Détail: {e}")
 
 
-
-    # ---- 🧪 Audit automatique (sanity check) — même largeur que l’associateur NHL_ID
-    if show_admin_tools:
-        cAL, cAM, cAR = st.columns([1, 1.15, 1])
-        with cAM:
-            with st.expander("🧪 Audit automatique — sanity check (pool vs Disponible)", expanded=False):
-                # 📁 Vérifier que les fichiers d'équipes (data/*.csv) sont bien détectés
-                rep = pms_team_files_report(DATA_DIR)
-                if rep:
-                    st.markdown("#### 📁 Fichiers équipes détectés (dossier data/)")
-                    st.dataframe(pd.DataFrame(rep), use_container_width=True, hide_index=True)
-                else:
-                    st.warning("Aucun fichier d'équipe PMS détecté dans data/. Vérifie que whalers.csv, canadiens.csv, etc. existent dans /data/.")
-
-                audit = audit_pool_vs_availability(df, DATA_DIR)
-    
-                dupes = audit.get("dupes", [])
-                missing = audit.get("missing_in_players_db", [])
-                risky = audit.get("players_db_pool_but_available", [])
-    
-                cols = st.columns(3)
-                cols[0].metric("Doublons (2 équipes+)", len(dupes))
-                cols[1].metric("Pool introuvable dans players DB", len(missing))
-                cols[2].metric("Risque: marqué pool mais 'Disponible'", len(risky))
-    
-                if audit.get("pool_cols_detected"):
-                    st.caption("Colonnes détectées dans hockey.players.csv pour l’équipe/owner pool: " + ", ".join(audit["pool_cols_detected"]))
-    
-                if dupes:
-                    st.markdown("#### ⚠️ Joueurs présents dans plusieurs équipes (à corriger)")
-                    st.dataframe(pd.DataFrame(dupes), use_container_width=True, hide_index=True)
-    
-                if missing:
-                    st.markdown("#### ⚠️ Joueurs dans les fichiers équipes mais introuvables dans hockey.players.csv (mismatch nom / normalisation)")
-                    st.dataframe(pd.DataFrame(missing), use_container_width=True, hide_index=True)
-    
-                if risky:
-                    st.markdown("#### ⚠️ Joueurs marqués dans une équipe (hockey.players.csv) mais non détectés dans les fichiers équipes — ils peuvent apparaître 'Disponible'")
-                    st.dataframe(pd.DataFrame(risky), use_container_width=True, hide_index=True)
-    
-                if (not dupes) and (not missing) and (not risky):
-                    st.success("✅ Aucun problème détecté: tout ce qui est dans le pool est reconnu comme non-disponible.")
-    
-        # ---- API PRO TABLE (seulement si nhl_id présent)
-        if pd.notna(nhl_id) and stats_mode in ("Les deux", "NHL LIVE (API)"):
-            st.markdown("### ⚡ Stats NHL LIVE (API — table pro)")
-            try:
-                landing = nhl_player_landing(int(nhl_id))
-    
-                top = st.columns(4)
-                top[0].metric("Prénom", safe_str(landing.get("firstName", {}).get("default")))
-                top[1].metric("Nom", safe_str(landing.get("lastName", {}).get("default")))
-                top[2].metric("Tire", safe_str(landing.get("shootsCatches")))
-                top[3].metric("Numéro", safe_str(landing.get("sweaterNumber")))
-    
-                render_api_pro_tables(landing, goalie=goalie)
-    
-            except Exception as e:
-                st.warning(f"API NHL indisponible (ID {int(nhl_id)}). Détail: {e}")
-    
-    
-    # =====================================================
-    # Entry point attendu: joueurs.render(ctx)
-    # =====================================================
+# =====================================================
+# Entry point attendu: joueurs.render(ctx)
+# =====================================================
 def render(ctx: dict):
-    global CURRENT_CTX
-    CURRENT_CTX = ctx or {}
-    render_tab_joueurs(ctx)
+    render_tab_joueurs()
