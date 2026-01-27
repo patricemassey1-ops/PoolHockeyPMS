@@ -15,6 +15,143 @@ import os
 import re
 import requests
 import pandas as pd
+
+# =====================================================
+# ROSTERS (pool teams) — robust reader for Fantrax-like CSV exports
+#   Goal: reliably locate the header row (with 'Player') even if file has
+#   extra junk lines or multi-row headers, and detect delimiter.
+# =====================================================
+
+def _guess_delimiter(sample: str) -> str:
+    sample = sample or ""
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=[",",";","\t","|"])
+        return dialect.delimiter
+    except Exception:
+        # fallback: choose delimiter with most columns
+        best = ","
+        best_n = 0
+        for d in [",",";","\t","|"]:
+            n = sample.count(d)
+            if n > best_n:
+                best_n = n
+                best = d
+        return best
+
+def _find_header_line(lines):
+    """Return index of the line most likely to be the header."""
+    best_i = None
+    best_score = -1
+    for i, ln in enumerate(lines[:200]):  # scan first 200 lines max
+        l = ln.strip()
+        if not l:
+            continue
+        low = l.lower()
+        # must contain 'player' to be considered
+        if "player" not in low:
+            continue
+        score = 0
+        for tok in ["pos","team","eligible","status","age","salary","contract","gp","g","a","pts"]:
+            if tok in low:
+                score += 1
+        # prefer lines that look like delimited headers (have commas/; or tabs)
+        if any(d in l for d in [",",";","\t","|"]):
+            score += 2
+        if score > best_score:
+            best_score = score
+            best_i = i
+    return best_i
+
+def read_roster_csv_robust(path: str) -> pd.DataFrame:
+    """Read a roster CSV robustly (Fantrax exports often include extra header rows)."""
+    try:
+        raw = open(path, "r", encoding="utf-8", errors="ignore").read()
+    except Exception:
+        return pd.DataFrame()
+
+    lines = raw.splitlines()
+    hi = _find_header_line(lines)
+    if hi is None:
+        # fallback: try normal read with delimiter guessing on first non-empty chunk
+        sample = "\n".join([ln for ln in lines[:50] if ln.strip()][:10])
+        delim = _guess_delimiter(sample)
+        try:
+            return pd.read_csv(path, sep=delim, engine="python", on_bad_lines="skip", dtype=str)
+        except Exception:
+            try:
+                return pd.read_csv(path, sep=None, engine="python", on_bad_lines="skip", dtype=str)
+            except Exception:
+                return pd.DataFrame()
+
+    # Build a new CSV text starting at header line
+    trimmed = "\n".join(lines[hi:])
+    # delimiter guess from header+first rows
+    sample = "\n".join(lines[hi:hi+5])
+    delim = _guess_delimiter(sample)
+
+    try:
+        df = pd.read_csv(io.StringIO(trimmed), sep=delim, engine="python", on_bad_lines="skip", dtype=str)
+    except Exception:
+        try:
+            df = pd.read_csv(io.StringIO(trimmed), sep=None, engine="python", on_bad_lines="skip", dtype=str)
+        except Exception:
+            return pd.DataFrame()
+
+    # drop fully empty columns
+    df = df.loc[:, [c for c in df.columns if str(c).strip() and not str(c).startswith("Unnamed")]]
+    return df
+
+def _pool_team_from_filename(path: str) -> str:
+    base = os.path.basename(path)
+    name = os.path.splitext(base)[0]
+    name = name.replace("_", " ").strip()
+    # normalize common casing
+    return name
+
+def build_owned_index_from_rosters(data_dir: str) -> dict:
+    """Return dict: norm_player_key -> pool_team_name, by scanning roster csv files in data_dir."""
+    owned = {}
+    if not data_dir or not os.path.isdir(data_dir):
+        return owned
+
+    for fn in os.listdir(data_dir):
+        if not fn.lower().endswith(".csv"):
+            continue
+        # ignore non-roster files
+        low = fn.lower()
+        if low in {"hockey.players.csv","hockey_players.csv","(rosters csv)","equipes_joueurs_2025_2026.csv","backup_history.csv","event_log_2025-2026.csv"}:
+            continue
+        if "puckpedia" in low:
+            continue
+        # Treat team rosters as the 6 pool teams (Canadiens, Whalers, etc.)
+        path = os.path.join(data_dir, fn)
+        df = read_roster_csv_robust(path)
+        if df is None or df.empty:
+            continue
+
+        # locate player column
+        col = None
+        for cand in ["Player","Joueur","Nom","Nom du joueur","Player Name","Name","Nom complet"]:
+            if cand in df.columns:
+                col = cand
+                break
+        if col is None:
+            # try fuzzy
+            for c in df.columns:
+                if "player" in str(c).lower():
+                    col = c
+                    break
+        if col is None:
+            continue
+
+        team_name = _pool_team_from_filename(fn)
+        for v in df[col].dropna().astype(str).tolist():
+            k = _norm_player_key(v)
+            if not k:
+                continue
+            owned[k] = team_name
+    return owned
+
 import streamlit as st
 
 DATA_DIR = "data"
