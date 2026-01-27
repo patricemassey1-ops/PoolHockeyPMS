@@ -423,6 +423,135 @@ def _detect_scope_column(df: pd.DataFrame) -> str | None:
 
 
 @st.cache_data(show_spinner=False)
+
+def _read_csv_loose(path: str) -> pd.DataFrame:
+    """Read CSV with very loose settings (delimiter sniff + bad lines skip)."""
+    try:
+        raw = open(path, "r", encoding="utf-8", errors="ignore").read()
+    except Exception:
+        return pd.DataFrame()
+    lines = raw.splitlines()
+    # find header line containing player/joueur
+    hi = None
+    best = -1
+    for i, ln in enumerate(lines[:400]):
+        l = ln.strip()
+        if not l:
+            continue
+        low = l.lower()
+        if ("player" not in low) and ("joueur" not in low):
+            continue
+        score = 0
+        for tok in ["propri", "owner", "equipe", "team", "slot", "pos", "status"]:
+            if tok in low:
+                score += 1
+        if any(d in l for d in [",", ";", "\t", "|"]):
+            score += 2
+        if score > best:
+            best = score
+            hi = i
+    if hi is None:
+        hi = 0
+    trimmed = "\n".join(lines[hi:])
+    sample = "\n".join(lines[hi:hi+5])
+    delim = _guess_delimiter(sample)
+    try:
+        return pd.read_csv(io.StringIO(trimmed), sep=delim, engine="python", on_bad_lines="skip", dtype=str)
+    except Exception:
+        try:
+            return pd.read_csv(io.StringIO(trimmed), sep=None, engine="python", on_bad_lines="skip", dtype=str)
+        except Exception:
+            return pd.DataFrame()
+
+def load_owned_index(data_dir: str, season_lbl: str | None = None) -> dict:
+    """
+    Index des joueurs déjà dans une équipe du pool (pour "Disponible / Non disponible").
+
+    Priorité (source de vérité):
+      1) data/equipes_joueurs_<season>.csv si présent
+      2) sinon, fallback: fichiers d'équipes dans /data (Whalers.csv, Canadiens.csv, etc.)
+    Retour: pkey -> {"team_pms": <équipe_pool>, "scope": <slot>, "source": <fichier>}
+    """
+    idx: dict[str, dict] = {}
+    if not data_dir or not os.path.isdir(data_dir):
+        return idx
+
+    # --- 1) Fichier fusion (le plus fiable)
+    season_lbl = str(season_lbl or "").strip()
+    candidates = []
+    if season_lbl:
+        candidates += [
+            f"equipes_joueurs_{season_lbl}.csv",
+            f"equipes_joueurs_{season_lbl.replace('-', '_')}.csv",
+        ]
+    # fallback hard-coded common season
+    candidates += [
+        "equipes_joueurs_2025-2026.csv",
+        "equipes_joueurs_2025_2026.csv",
+        "equipes_joueurs.csv",
+    ]
+
+    for fn in candidates:
+        path = os.path.join(data_dir, fn)
+        if not os.path.exists(path):
+            continue
+        df = _read_csv_loose(path)
+        if df is None or df.empty:
+            continue
+
+        # player col
+        pcol = None
+        for cand in ["Joueur", "Player", "Nom", "Nom complet", "Player Name", "Name"]:
+            if cand in df.columns:
+                pcol = cand
+                break
+        if pcol is None:
+            for c in df.columns:
+                if "joueur" in str(c).lower() or "player" in str(c).lower():
+                    pcol = c
+                    break
+        if pcol is None:
+            continue
+
+        # team/owner col
+        tcol = None
+        for cand in ["Propriétaire", "Proprietaire", "Owner", "Équipe", "Equipe", "Team", "Equipe Pool", "Équipe Pool", "team_pms"]:
+            if cand in df.columns:
+                tcol = cand
+                break
+        if tcol is None:
+            # sometimes exported as first unnamed col
+            for c in df.columns:
+                low = str(c).lower()
+                if "propri" in low or "owner" in low or ("equipe" in low and "nhl" not in low):
+                    tcol = c
+                    break
+
+        # slot col (Actif / Mineur / IR etc.)
+        scol = None
+        for cand in ["Slot", "Statut", "Status", "Rôle", "Role", "Type"]:
+            if cand in df.columns:
+                scol = cand
+                break
+
+        for _, r in df.iterrows():
+            name = r.get(pcol, "")
+            k = _norm_player_key(name)
+            if not k:
+                continue
+            team_pms = ""
+            if tcol:
+                team_pms = str(r.get(tcol, "") or "").strip()
+            scope = ""
+            if scol:
+                scope = str(r.get(scol, "") or "").strip()
+            if team_pms:
+                idx[k] = {"team_pms": team_pms, "scope": scope or "Actif", "source": fn}
+        if idx:
+            return idx  # done if we got something
+
+    # --- 2) Fallback: fichiers d'équipes
+    return load_owned_index_from_team_files(data_dir)
 def load_owned_index_from_team_files(data_dir: str) -> dict:
     """Index des joueurs déjà dans une équipe du pool.
 
@@ -481,6 +610,14 @@ def render_owned_badge(pkey: str, owned_idx: dict):
     if not info:
         st.markdown("🟩 **Disponible**")
         return
+
+    team_pms = str(info.get("team_pms") or "Équipe").strip()
+    scope = str(info.get("scope") or "").strip()
+    src = str(info.get("source") or "").strip()
+    extra_scope = f" — {scope}" if scope and scope.lower() not in {"nan", "none"} else ""
+    extra_src = f" (source: {src})" if src else ""
+    st.markdown(f"🔴 **Non disponible — dans {team_pms}{extra_scope}{extra_src}**")
+    return
 
     team_pms = info.get("team_pms") or "Équipe"
     scope = str(info.get("scope") or "").strip()
@@ -798,7 +935,7 @@ def render_tab_joueurs():
         st.error("❌ data/hockey.players.csv introuvable ou vide.")
         return
 
-    owned_idx = load_owned_index_from_team_files(DATA_DIR)
+    owned_idx = load_owned_index(DATA_DIR, st.session_state.get('season_lbl') or st.session_state.get('season') or '')
 
     # Filtres (1 ligne)
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
