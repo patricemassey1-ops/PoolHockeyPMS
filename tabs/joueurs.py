@@ -424,45 +424,57 @@ def _detect_scope_column(df: pd.DataFrame) -> str | None:
 
 @st.cache_data(show_spinner=False)
 def load_owned_index_from_team_files(data_dir: str) -> dict:
-    """
-    Retour: pkey -> {"team_pms": "...", "scope": "...", "source": "..."}
+    """Index des joueurs déjà dans une équipe du pool.
+
+    Source de vérité: fichiers d'équipes dans /data (Whalers.csv, Canadiens.csv, etc.).
+    Lecture robuste (exports Fantrax) via read_roster_csv_robust().
+    Retour: pkey -> {"team_pms": <équipe_pool>, "scope": "Actif", "source": <fichier>}
     """
     idx: dict[str, dict] = {}
+    if not data_dir or not os.path.isdir(data_dir):
+        return idx
 
-    for fname in PMS_TEAM_FILES:
-        fp = os.path.join(data_dir, fname)
-        if not os.path.exists(fp):
-            continue
-
-        team_pms = _team_name_from_filename(fname)
-
-        try:
-            df = _read_csv_auto(fp)
-            df.columns = [c.strip() for c in df.columns]
-
-            pcol = _detect_player_column(df)
-            if not pcol:
+    # build: pkey -> team_name
+    owned = {}
+    try:
+        # map includes file name to keep "source"
+        for fn in os.listdir(data_dir):
+            if not fn.lower().endswith(".csv"):
+                continue
+            low = fn.lower()
+            if low in {"hockey.players.csv","hockey_players.csv","equipes_joueurs_2025-2026.csv","equipes_joueurs_2025_2026.csv","backup_history.csv","event_log_2025-2026.csv"}:
+                continue
+            if "puckpedia" in low:
+                continue
+            path = os.path.join(data_dir, fn)
+            df = read_roster_csv_robust(path)
+            if df is None or df.empty:
+                continue
+            # locate player column
+            pcol = None
+            for cand in ["Player","Joueur","Nom","Nom du joueur","Player Name","Name","Nom complet"]:
+                if cand in df.columns:
+                    pcol = cand
+                    break
+            if pcol is None:
+                for c in df.columns:
+                    if "player" in str(c).lower():
+                        pcol = c
+                        break
+            if pcol is None:
                 continue
 
-            scol = _detect_scope_column(df)
+            team_name = _pool_team_from_filename(fn)  # "Whalers"
+            for v in df[pcol].dropna().astype(str).tolist():
+                k = _norm_player_key(v)
+                if k:
+                    owned[k] = (team_name, fn)
+    except Exception:
+        return idx
 
-            for _, r in df.iterrows():
-                pkey = _norm_player_key(r.get(pcol, ""))
-                if not pkey:
-                    continue
-                if pkey in idx:
-                    continue
-                scope_val = str(r.get(scol, "")).strip() if scol else ""
-                idx[pkey] = {
-                    "team_pms": team_pms,
-                    "scope": scope_val,
-                    "source": fname,
-                }
-        except Exception:
-            continue
-
+    for k, (team_name, fn) in owned.items():
+        idx[k] = {"team_pms": team_name, "scope": "Actif", "source": fn}
     return idx
-
 
 def render_owned_badge(pkey: str, owned_idx: dict):
     info = owned_idx.get(pkey)
@@ -787,6 +799,29 @@ def render_tab_joueurs():
         return
 
     owned_idx = load_owned_index_from_team_files(DATA_DIR)
+
+# -----------------------------------------------------
+# 🧪 Debug (Whalers / admin) — pourquoi un joueur est "Disponible"
+# -----------------------------------------------------
+_owner = str(st.session_state.get("selected_team") or st.session_state.get("align_owner") or st.session_state.get("owner") or "").strip()
+_is_dbg = (_owner.lower() == "whalers") or bool(st.session_state.get("is_admin"))
+if _is_dbg:
+    with st.expander("🧪 Debug disponibilité (rosters → owned_idx)", expanded=False):
+        st.write({"DATA_DIR": DATA_DIR, "owned_idx_size": int(len(owned_idx))})
+        try:
+            files = sorted([f for f in os.listdir(DATA_DIR) if f.lower().endswith(".csv")])
+        except Exception:
+            files = []
+        st.write({"csv_files_in_data": files})
+        if owned_idx:
+            # show whether Caufield is detected
+            _test_names = ["Cole Caufield", "Caufield, Cole", "Michael Hage", "Hage, Michael"]
+            _tests = {}
+            for nm in _test_names:
+                k = _norm_player_key(nm)
+                _tests[nm] = owned_idx.get(k)
+            st.write({"lookup_tests": _tests})
+        st.caption("Si owned_idx_size == 0: rosters non parsés (header/délimiteur). Si lookup_tests est vide: mismatch de nom.")
 
     # ---- Filtres (4)
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
