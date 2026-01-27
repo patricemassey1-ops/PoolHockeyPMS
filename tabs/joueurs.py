@@ -16,6 +16,7 @@ import re
 import ast
 import difflib
 import datetime
+import time
 import urllib.parse
 import requests
 import pandas as pd
@@ -220,6 +221,24 @@ def safe_str(x) -> str:
     return s
 
 
+def format_contract_status(x) -> str:
+    """Affichage du champ 'Statut' côté UI (contrat).
+    Si la valeur ressemble à un code d'équipe/ligue (ex: HAR, MTL), on affiche '—'.
+    On garde les formats type 'Yr 3 of 8', '2 yrs', 'ELC', etc.
+    """
+    s = "" if x is None else str(x)
+    s = s.strip()
+    if not s or s.upper() == "NAN":
+        return "—"
+
+    # Si c'est un code court en majuscule (2-4 lettres) -> probablement équipe/ligue, pas un statut contrat
+    if re.fullmatch(r"[A-Z]{2,4}", s):
+        return "—"
+
+    # Sinon on garde tel quel
+    return s
+
+
 def clean_player_name(name: str) -> str:
     """Nettoie un nom joueur provenant de labels UI.
     Ex: 'Michael Hage | Michael Hage|' -> 'Michael Hage'
@@ -415,7 +434,7 @@ def _auto_pick_nhl_id(player_name: str, team_abbrev: str, pos_bucket: str, age, 
 
 
 def save_players_db(df: pd.DataFrame, path: str) -> None:
-    """Sauvegarde hockey.players.csv en retirant les colonnes calculées."""
+    """Sauvegarde hockey.players.csv en retirant les colonnes calculées (écriture atomique + bust cache)."""
     if df is None or df.empty:
         return
 
@@ -432,7 +451,18 @@ def save_players_db(df: pd.DataFrame, path: str) -> None:
         out["nhl_id"] = pd.to_numeric(out["nhl_id"], errors="coerce").astype("Int64")
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    out.to_csv(path, index=False, na_rep="")
+
+    tmp = path + ".tmp"
+    out.to_csv(tmp, index=False, na_rep="", encoding="utf-8")
+    os.replace(tmp, path)
+
+    # IMPORTANT: sans ça, Streamlit peut resservir l'ancien DF en cache
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+    st.session_state["players_db_nonce"] = str(time.time())
+
 
 
 def _ensure_rowid(df: pd.DataFrame) -> pd.DataFrame:
@@ -500,7 +530,7 @@ def render_team_with_logo(team_abbrev: str):
 # Load local players DB
 # ----------------------------
 @st.cache_data(show_spinner=False)
-def load_players_db(path: str) -> pd.DataFrame:
+def load_players_db(path: str, nonce: str = "") -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame()
 
@@ -543,34 +573,36 @@ def _team_name_from_filename(fname: str) -> str:
 
 def _detect_player_column(df: pd.DataFrame) -> str | None:
     """
-    Détecte la colonne joueur dans un roster CSV.
-    On essaie des noms fréquents; sinon, si une colonne contient des valeurs "Last, First" on la choisit.
+    Détecte la colonne joueur dans un roster CSV (case-insensitive).
+    Priorités: Joueur/Player/Name/Nom + variantes.
     """
-    cols = [c.strip() for c in df.columns]
-    for c in ["Joueur", "Player", "Nom", "Name"]:
-        if c in cols:
-            return c
+    if df is None or df.empty:
+        return None
 
-    # Heuristique: première colonne qui ressemble à des noms
-    for c in cols[:5]:
-        s = df[c].dropna().astype(str)
-        if s.empty:
-            continue
-        # si plusieurs valeurs contiennent une virgule (Last, First)
-        sample = s.head(30).tolist()
-        comma_hits = sum(1 for x in sample if "," in str(x))
-        if comma_hits >= 5:
-            return c
+    # map lower->original
+    cols = [str(c).strip() for c in df.columns]
+    low_map = {c.lower(): c for c in cols if c}
 
-    # fallback: première colonne
-    return cols[0] if cols else None
+    preferred = ["joueur","player","nom","name","player_name","playername","full_name","fullname","skater","goalie"]
+    for k in preferred:
+        if k in low_map:
+            return low_map[k]
 
+    # Heuristique: première colonne qui ressemble fortement à des noms (contient espace, lettres) et pas trop numérique
+    best = None
+    best_score = -1
+    for c in cols:
+        s = df[c].astype(str).fillna("")
+        # score: proportion de lignes avec au moins une lettre et un espace (prénom nom)
+        has_letter = s.str.contains(r"[A-Za-zÀ-ÿ]", regex=True)
+        has_space = s.str.contains(r"\s", regex=True)
+        not_num = ~s.str.fullmatch(r"\d+", na=False)
+        score = float(((has_letter & has_space & not_num).mean()) * 100)
+        if score > best_score:
+            best_score = score
+            best = c
 
-def _detect_scope_column(df: pd.DataFrame) -> str | None:
-    for c in ["Scope", "Club", "GC/CE", "GC_CE", "Type", "Roster", "Slot", "Statut", "Status"]:
-        if c in df.columns:
-            return c
-    return None
+    return best if (best_score >= 30) else None
 
 
 
@@ -656,7 +688,7 @@ def _pick_pool_team_column(dfu: pd.DataFrame) -> str | None:
 
 
 @st.cache_data(show_spinner=False)
-def load_owned_index(data_dir: str) -> dict:
+def load_owned_index(data_dir: str, nonce: str = "") -> dict:
     """Index des joueurs appartenant déjà au pool.
 
     Retour: pkey -> {"team_pms": "...", "scope": "...", "source": "..."}
@@ -684,7 +716,7 @@ def load_owned_index(data_dir: str) -> dict:
                 continue
 
             for _, r in dfu.iterrows():
-                pkey = _norm_player_key(r.get(pcol, ""))
+                pkey = _norm_player_key(clean_player_name(r.get(pcol, "")))
                 if not pkey or pkey in idx:
                     continue
                 team_pms = str(r.get(tcol, "")).strip()
@@ -717,7 +749,7 @@ def load_owned_index(data_dir: str) -> dict:
             scol = _detect_scope_column(df)
 
             for _, r in df.iterrows():
-                pkey = _norm_player_key(r.get(pcol, ""))
+                pkey = _norm_player_key(clean_player_name(r.get(pcol, "")))
                 if not pkey or pkey in idx:
                     continue
                 scope_val = str(r.get(scol, "")).strip() if scol else ""
@@ -1201,12 +1233,12 @@ def render_tab_joueurs(ctx: dict | None = None):
     _ctx = ctx or CURRENT_CTX or {}
     show_admin_tools = bool(_ctx.get("is_admin") or st.session_state.get("is_admin"))
 
-    df = load_players_db(PLAYERS_PATH)
+    df = load_players_db(PLAYERS_PATH, st.session_state.get('players_db_nonce',''))
     if df.empty:
         st.error("❌ data/hockey.players.csv introuvable ou vide.")
         return
 
-    owned_idx = load_owned_index(DATA_DIR)
+    owned_idx = load_owned_index(DATA_DIR, st.session_state.get('owned_idx_nonce',''))
 
     # ---- Filtres (4)
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
@@ -1326,7 +1358,7 @@ def render_tab_joueurs(ctx: dict | None = None):
         info_cols[0].metric("Jersey#", safe_str(r.get("Jersey#")))
         info_cols[1].metric("Taille", safe_str(r.get("H(f)")))
         info_cols[2].metric("Poids", safe_str(r.get("W(lbs)")))
-        info_cols[3].metric("Statut", safe_str(r.get("Status")))
+        info_cols[3].metric("Statut", format_contract_status(r.get("Status")))
 
         st.markdown("### 📊 Stats (PRO — CSV)")
         render_local_pro_panel(row)
