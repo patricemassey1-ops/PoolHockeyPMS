@@ -19,6 +19,8 @@ from __future__ import annotations
 import io
 import os
 import re
+import json
+import time
 import zipfile
 from pathlib import Path
 from datetime import datetime
@@ -892,139 +894,44 @@ def enrich_df_from_nhl(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# ============================================================
-# MAIN RENDER
-# ============================================================
 
 # ============================================================
+# BULK NHL_ID (AUTO) — safe, checkpoint, dry-run, manual resolver
+#   - Batch par 250 (configurable)
+#   - Checkpoint pour reprise après crash
+#   - Dry-run (ne rien écrire)
+#   - Resolver manuel pour les cas ambigus
+# ============================================================
 
-# =====================================================
-# 🆔 BULK NHL_ID (AUTO) — par coup de 250 + checkpoint
-#   - Safe: n'écrit que si match très confiant
-#   - Sauvegarde atomique + cache bust
-#   - Reprise via checkpoint (json)
-# =====================================================
+def _players_csv_path(DATA_DIR: str) -> str:
+    # support data/ et Data/ déjà géré par ctx, mais on garde robuste
+    return os.path.join(str(DATA_DIR), "hockey.players.csv")
+
+
+def _ckpt_path(DATA_DIR: str, season_lbl: str) -> str:
+    season_lbl = str(season_lbl or "season").strip() or "season"
+    return os.path.join(str(DATA_DIR), f"_nhl_id_bulk_checkpoint__{season_lbl}.json")
+
 
 def _atomic_save_csv(df: pd.DataFrame, path: str) -> None:
-    """Écriture atomique (évite fichiers partiels si crash)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     df.to_csv(tmp, index=False, encoding="utf-8")
     os.replace(tmp, path)
 
 
-def _pms_norm_name(s: Any) -> str:
-    s = "" if s is None else str(s)
-    s = s.strip()
-    if not s:
-        return ""
-    # 'A | A|' -> garder le 1er segment
-    if "|" in s:
-        parts = [p.strip() for p in s.split("|") if p.strip()]
-        if parts:
-            s = parts[0]
-    s = s.replace(",", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    s = re.sub(r"[^A-Za-zÀ-ÿ'\- ]+", "", s).strip()
-    s = re.sub(r"\s+", " ", s).strip()
-    return s.lower()
-
-
-def _split_first_last(name: str) -> Tuple[str, str]:
-    n = _pms_norm_name(name)
-    if not n:
-        return "", ""
-    parts = n.split()
-    if len(parts) == 1:
-        return parts[0], ""
-    return parts[0], parts[-1]
-
-
-def _nhl_search_players(query: str, limit: int = 15) -> List[Dict[str, Any]]:
-    """Recherche joueurs via l'index public NHL (rapide)."""
-    import requests  # local import (évite dépendance au top)
-
-    q = (query or "").strip()
-    if not q:
-        return []
-    url = "https://search.d3.nhle.com/api/v1/search/player"
-    params = {"culture": "en-us", "limit": str(limit), "q": q}
-    try:
-        r = requests.get(url, params=params, timeout=12)
-        if r.status_code != 200:
-            return []
-        data = r.json()
-        if isinstance(data, dict) and isinstance(data.get("items"), list):
-            return data["items"]
-        if isinstance(data, list):
-            return data
-        return []
-    except Exception:
-        return []
-
-
-def _extract_nhl_id(item: Dict[str, Any]) -> Optional[int]:
-    for k in ("playerId", "player_id", "id", "nhlId", "nhl_id"):
-        if k in item and item[k] not in (None, ""):
-            try:
-                return int(str(item[k]).strip())
-            except Exception:
-                pass
-    return None
-
-
-def _extract_full_name(item: Dict[str, Any]) -> str:
-    for k in ("name", "fullName", "full_name", "playerName"):
-        if k in item and item[k]:
-            return str(item[k])
-    fn = item.get("firstName") or item.get("first_name") or ""
-    ln = item.get("lastName") or item.get("last_name") or ""
-    return f"{fn} {ln}".strip()
-
-
-def _confidence_match(target_name: str, item: Dict[str, Any]) -> Tuple[bool, float]:
-    """Match SAFE. ok=True seulement si score très élevé."""
-    t = _pms_norm_name(target_name)
-    if not t:
-        return False, 0.0
-    full = _pms_norm_name(_extract_full_name(item))
-    if not full:
-        return False, 0.0
-
-    if full == t:
-        return True, 1.0
-
-    tf, tl = _split_first_last(t)
-    ff, fl = _split_first_last(full)
-
-    score = 0.0
-    if tl and fl and tl == fl:
-        score += 0.55
-    if tf and ff and tf == ff:
-        score += 0.35
-    if tl and tl in full.split():
-        score += 0.10
-
-    return (score >= 0.90), score
-
-
-def _ckpt_path(DATA_DIR: str, season_lbl: str) -> str:
-    return os.path.join(DATA_DIR, f"_nhl_id_bulk_checkpoint_{season_lbl}.json")
-
-
-def _load_ckpt(path: str) -> Dict[str, Any]:
+def _load_ckpt(path: str) -> dict:
     if not os.path.exists(path):
         return {}
     try:
-        import json
-        return json.loads(open(path, "r", encoding="utf-8").read())
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
         return {}
 
 
-def _save_ckpt(path: str, payload: Dict[str, Any]) -> None:
+def _save_ckpt(path: str, payload: dict) -> None:
     try:
-        import json
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
     except Exception:
@@ -1039,84 +946,257 @@ def _clear_ckpt(path: str) -> None:
         pass
 
 
+def _clean_name_for_search(name: str) -> str:
+    s = str(name or "").strip()
+    if "|" in s:
+        parts = [p.strip() for p in s.split("|") if p.strip()]
+        if parts:
+            s = parts[0]
+    s = s.replace(",", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _norm_name(name: str) -> str:
+    s = _clean_name_for_search(name).lower()
+    s = re.sub(r"[^a-zà-ÿ'\- ]+", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _split_first_last(name: str) -> tuple[str, str]:
+    n = _norm_name(name)
+    if not n:
+        return "", ""
+    parts = n.split()
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], parts[-1]
+
+
+def _nhl_search_players(query: str, limit: int = 15) -> list[dict]:
+    if requests is None:
+        return []
+    q = _clean_name_for_search(query)
+    if not q:
+        return []
+    url = "https://search.d3.nhle.com/api/v1/search/player"
+    params = {"culture": "en-us", "limit": str(limit), "q": q}
+    try:
+        r = requests.get(url, params=params, timeout=12)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        # parfois {"items":[...]}
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            return data["items"]
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception:
+        return []
+
+
+def _extract_nhl_id(item: dict) -> Optional[int]:
+    for k in ("playerId", "player_id", "id", "nhlId", "nhl_id"):
+        if k in item and item.get(k) is not None:
+            try:
+                return int(str(item.get(k)).strip())
+            except Exception:
+                pass
+    return None
+
+
+def _extract_full_name(item: dict) -> str:
+    for k in ("name", "fullName", "full_name", "playerName"):
+        v = item.get(k)
+        if v:
+            return str(v)
+    fn = item.get("firstName") or item.get("first_name") or ""
+    ln = item.get("lastName") or item.get("last_name") or ""
+    return (f"{fn} {ln}").strip()
+
+
+def _match_confidence(target_name: str, item: dict) -> tuple[bool, float]:
+    t = _norm_name(target_name)
+    full = _norm_name(_extract_full_name(item))
+    if not t or not full:
+        return (False, 0.0)
+    if t == full:
+        return (True, 1.0)
+    tf, tl = _split_first_last(t)
+    ff, fl = _split_first_last(full)
+    score = 0.0
+    if tl and fl and tl == fl:
+        score += 0.60
+    if tf and ff and tf == ff:
+        score += 0.35
+    if tl and tl in full.split():
+        score += 0.05
+    return (score >= 0.92, score)
+
+
+def _ensure_rowid(df: pd.DataFrame) -> pd.DataFrame:
+    if "__rowid" not in df.columns:
+        df = df.copy()
+        df["__rowid"] = range(len(df))
+    return df
+
+
+def _resolve_player_name_col(df: pd.DataFrame) -> str:
+    # essaye de trouver la colonne du nom dans hockey.players.csv
+    for c in ("Player", "Joueur", "Nom", "Name", "player", "joueur", "nom", "name"):
+        if c in df.columns:
+            return c
+    # fallback: première colonne non-numerique
+    return df.columns[0] if len(df.columns) else "Player"
+
+
 def render_bulk_nhl_id_admin(DATA_DIR: str, season_lbl: str, is_admin: bool) -> None:
-    """Section Admin: associer automatiquement les NHL_ID manquants par batch (250)."""
     if not is_admin:
         st.warning("Accès admin requis.")
         return
 
-    players_path = os.path.join(DATA_DIR, PLAYERS_DB_FILENAME)
+    players_path = _players_csv_path(DATA_DIR)
     if not os.path.exists(players_path):
         st.error(f"Fichier introuvable: {players_path}")
         return
 
-    df = load_players_db(players_path)
-    if df is None or df.empty:
-        st.warning("Players DB vide.")
-        return
+    ckpt_file = _ckpt_path(DATA_DIR, season_lbl)
 
-    if "__rowid" not in df.columns:
-        df["__rowid"] = range(len(df))
+    st.markdown("### 🆔 Associer NHL_ID manquants (AUTO) — batch 250 + checkpoint")
+    st.caption("Mode SAFE: écrit un NHL_ID uniquement si le match est **très confiant**. Les cas ambigus vont dans le resolver manuel.")
+
+    df = pd.read_csv(players_path, low_memory=False)
+    df = _ensure_rowid(df)
+
     if "nhl_id" not in df.columns:
         df["nhl_id"] = ""
 
-    missing = df[df["nhl_id"].astype(str).str.strip().eq("")]
+    name_col = _resolve_player_name_col(df)
 
-    st.markdown("### 🆔 Bulk NHL_ID (AUTO) — par 250")
-    st.caption("Safe: n’écrit un NHL_ID que si le match est très confiant. Sauvegarde + checkpoint pour reprise.")
+    missing_mask = df["nhl_id"].astype(str).str.strip().eq("")
+    missing = df.loc[missing_mask].copy()
 
-    ckpt_file = _ckpt_path(DATA_DIR, season_lbl)
-    ckpt = _load_ckpt(ckpt_file)
-
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
     with c1:
-        st.metric("Total joueurs", len(df))
+        st.metric("Total", len(df))
     with c2:
-        st.metric("NHL_ID manquants", int(missing.shape[0]))
+        st.metric("NHL_ID manquants", int(missing_mask.sum()))
     with c3:
-        st.metric("Checkpoint", "Oui" if bool(ckpt) else "Non")
+        st.metric("Checkpoint", "Oui" if os.path.exists(ckpt_file) else "Non")
+    with c4:
+        try:
+            st.caption(f"Fichier: `{players_path}` • mtime: {datetime.fromtimestamp(os.path.getmtime(players_path))}")
+        except Exception:
+            st.caption(f"Fichier: `{players_path}`")
 
-    if ckpt:
-        with st.expander("Voir checkpoint", expanded=False):
-            st.json(ckpt)
+    if requests is None:
+        st.error("Le module `requests` n'est pas disponible. Ajoute `requests` dans requirements.txt.")
+        return
 
+    # ---- Controls
     colA, colB, colC, colD = st.columns([1, 1, 1, 1])
     with colA:
-        batch_size = st.number_input("Batch (associations)", 50, 500, 250, step=50)
+        batch_size = st.number_input("Batch (associations max)", min_value=50, max_value=500, value=250, step=50)
     with colB:
-        max_requests = st.number_input("Max requêtes NHL/run", 50, 5000, 750, step=50)
+        max_requests = st.number_input("Max requêtes NHL / run", min_value=50, max_value=5000, value=1200, step=50)
     with colC:
-        allow_exact_only = st.checkbox("Mode strict (exact seulement)", value=False)
+        dry_run = st.checkbox("🧪 Dry-run (ne rien écrire)", value=True)
     with colD:
-        dry_run = st.checkbox("Dry run (pas de sauvegarde)", value=False)
+        min_conf = st.slider("Seuil confiance", min_value=0.80, max_value=0.99, value=0.92, step=0.01)
 
+    # ---- Buttons
     b1, b2, b3 = st.columns([1, 1, 2])
     with b1:
-        do_run = st.button("🚀 Lancer / Reprendre", use_container_width=True, key="adm_bulk_nhl_run")
+        run_btn = st.button("🚀 Lancer / Reprendre", use_container_width=True)
     with b2:
-        do_reset = st.button("🧹 Reset checkpoint", use_container_width=True, key="adm_bulk_nhl_reset")
+        reset_btn = st.button("🧹 Reset checkpoint", use_container_width=True)
     with b3:
         st.write("")
 
-    if do_reset:
+    if reset_btn:
         _clear_ckpt(ckpt_file)
         st.success("✅ Checkpoint supprimé.")
         st.rerun()
 
-    if not do_run:
-        st.info("Clique **Lancer / Reprendre** pour associer automatiquement (250 par run).")
+    ckpt = _load_ckpt(ckpt_file)
+    next_rowid = ckpt.get("next_rowid")
+    amb_store = ckpt.get("ambiguous", []) if isinstance(ckpt.get("ambiguous"), list) else []
+
+    if next_rowid:
+        st.warning(f"Checkpoint actif: reprise à rowid={next_rowid}")
+
+    # ---- Manual resolver (always available)
+    with st.expander("🛠️ Resolver manuel — cas ambigus", expanded=bool(amb_store)):
+        if not amb_store:
+            st.info("Aucun cas ambigu en attente.")
+        else:
+            st.caption("Choisis le bon joueur NHL pour chaque entrée ambiguë, puis clique **Appliquer**.")
+            # Build UI rows
+            to_apply = []
+            for k, item in enumerate(amb_store[:300]):  # cap UI
+                rowid = item.get("rowid")
+                pname = item.get("name")
+                candidates = item.get("candidates") or []
+                # labels
+                options = ["— Laisser vide —"]
+                id_map = {"— Laisser vide —": None}
+                for cand in candidates[:20]:
+                    pid = cand.get("nhl_id")
+                    nm = cand.get("name") or ""
+                    extra = cand.get("extra") or ""
+                    label = f"{nm} — {pid}" + (f" ({extra})" if extra else "")
+                    options.append(label)
+                    id_map[label] = pid
+                pick = st.selectbox(f"{pname}  (rowid={rowid})", options, index=0, key=f"adm_resolve_{rowid}_{k}")
+                to_apply.append((rowid, id_map.get(pick)))
+            apply_btn = st.button("✅ Appliquer les choix", use_container_width=True, key="adm_apply_resolver")
+
+            if apply_btn:
+                df2 = df.copy()
+                applied = 0
+                for rowid, pid in to_apply:
+                    if pid is None:
+                        continue
+                    df2.loc[df2["__rowid"] == rowid, "nhl_id"] = int(pid)
+                    applied += 1
+
+                if applied == 0:
+                    st.info("Aucun changement (tout laissé vide).")
+                else:
+                    if dry_run:
+                        st.warning(f"🧪 Dry-run: {applied} changements simulés (non écrits).")
+                    else:
+                        _atomic_save_csv(df2, players_path)
+                        st.cache_data.clear()
+                        st.session_state["players_db_nonce"] = str(time.time())
+                        st.success(f"✅ {applied} NHL_ID appliqués et sauvegardés.")
+
+                # remove resolved items
+                new_amb = []
+                for item in amb_store:
+                    rid = item.get("rowid")
+                    chosen = next((pid for r, pid in to_apply if r == rid), None)
+                    if chosen is None:
+                        new_amb.append(item)
+                ckpt["ambiguous"] = new_amb
+                _save_ckpt(ckpt_file, ckpt)
+                st.rerun()
+
+    if not run_btn:
         return
 
-    # Resume
-    work_ids = df[df["nhl_id"].astype(str).str.strip().eq("")]["__rowid"].tolist()
-    next_rowid = ckpt.get("next_rowid") if ckpt else None
-    if next_rowid in work_ids:
-        work_ids = work_ids[work_ids.index(next_rowid):]
-
+    # ---- Build worklist (rowid list) after checkpoint
+    work_ids = df.loc[df["nhl_id"].astype(str).str.strip().eq(""), "__rowid"].tolist()
     if not work_ids:
-        st.success("✅ Rien à faire.")
+        st.success("✅ Tout est déjà associé (aucun NHL_ID manquant).")
         _clear_ckpt(ckpt_file)
         return
+
+    if next_rowid in work_ids:
+        start_i = work_ids.index(next_rowid)
+        work_ids = work_ids[start_i:]
 
     prog = st.progress(0)
     status = st.empty()
@@ -1126,7 +1206,9 @@ def render_bulk_nhl_id_admin(DATA_DIR: str, season_lbl: str, is_admin: bool) -> 
     notfound = 0
     req_count = 0
 
-    # Loop rows until we hit batch_size updates
+    proposals = []  # for dry-run reporting
+
+    # process rows until batch_size updates (not rows) OR max_requests
     for i, rowid in enumerate(work_ids):
         if req_count >= int(max_requests):
             status.warning("⏸️ Arrêt (max requêtes atteint). Relance pour continuer.")
@@ -1136,81 +1218,108 @@ def render_bulk_nhl_id_admin(DATA_DIR: str, season_lbl: str, is_admin: bool) -> 
             break
 
         row = df.loc[df["__rowid"] == rowid].iloc[0]
-        # name field variants
-        name_raw = row.get("Player") or row.get("Joueur") or row.get("Nom") or row.get("name") or ""
-        name = str(name_raw or "").strip()
-        if not name:
+        pname = _clean_name_for_search(row.get(name_col, ""))
+
+        if not pname:
             notfound += 1
             continue
 
-        results = _nhl_search_players(name, limit=15)
+        res = _nhl_search_players(pname, limit=15)
         req_count += 1
 
-        best_id = None
-        best_score = 0.0
-
-        if results:
-            for it in results:
+        if not res:
+            notfound += 1
+        else:
+            # candidate list with confidence scores
+            cand_rows = []
+            best_id = None
+            best_score = 0.0
+            for it in res:
                 pid = _extract_nhl_id(it)
+                nm = _extract_full_name(it)
                 if pid is None:
                     continue
-                full = _pms_norm_name(_extract_full_name(it))
-                t = _pms_norm_name(name)
-                if allow_exact_only:
-                    ok = (full == t)
-                    score = 1.0 if ok else 0.0
-                else:
-                    ok, score = _confidence_match(name, it)
-                if ok and score >= best_score:
+                ok, score = _match_confidence(pname, it)
+                # allow tunable threshold
+                if score >= best_score:
                     best_score = score
-                    best_id = pid
+                    best_id = pid if score >= float(min_conf) else None
+                cand_rows.append({
+                    "nhl_id": pid,
+                    "name": nm,
+                    "score": round(score, 3),
+                    "extra": it.get("teamAbbrev") or it.get("team") or ""
+                })
 
-        if best_id is None:
-            if results:
+            # write only if confident
+            if best_id is None:
                 ambiguous += 1
+                # store top candidates for resolver
+                cand_rows_sorted = sorted(cand_rows, key=lambda x: x.get("score", 0), reverse=True)[:8]
+                amb_store.append({
+                    "rowid": int(rowid),
+                    "name": pname,
+                    "candidates": [{"nhl_id": c["nhl_id"], "name": c["name"], "extra": c.get("extra",""), "score": c.get("score",0)} for c in cand_rows_sorted],
+                })
             else:
-                notfound += 1
-        else:
-            df.loc[df["__rowid"] == rowid, "nhl_id"] = int(best_id)
-            updated += 1
+                updated += 1
+                proposals.append({"rowid": int(rowid), "name": pname, "nhl_id": int(best_id), "score": round(best_score, 3)})
+                if not dry_run:
+                    df.loc[df["__rowid"] == rowid, "nhl_id"] = int(best_id)
 
         pct = int((i + 1) / max(1, len(work_ids)) * 100)
         prog.progress(min(100, pct))
         status.write(
-            f"rowid={rowid} | req={req_count} | ✅ associés={updated} | ⚠️ ambigus={ambiguous} | ❌ introuvables={notfound}"
+            f"Traitement… rowid={rowid} | req={req_count} | "
+            f"✅ associés={updated} | ⚠️ ambigus={ambiguous} | ❌ introuvables={notfound}"
         )
 
-    # Save
-    if updated > 0 and not dry_run:
-        _atomic_save_csv(df.drop(columns=["__pkey"], errors="ignore"), players_path)
-        st.cache_data.clear()
-        st.session_state["players_db_nonce"] = str(time.time())
-        st.success(f"✅ Sauvegardé: {updated} NHL_ID ajoutés dans {PLAYERS_DB_FILENAME}")
-    elif updated > 0 and dry_run:
-        st.warning(f"Dry run: {updated} associations trouvées, aucune sauvegarde.")
+    # ---- Save / report
+    if proposals:
+        st.markdown("#### 🧾 Propositions (cette run)")
+        st.dataframe(pd.DataFrame(proposals).head(400), use_container_width=True)
 
-    # Next checkpoint
-    next_rowid_out = None
-    if 'i' in locals() and (i + 1) < len(work_ids):
-        next_rowid_out = work_ids[i + 1]
+    if dry_run:
+        st.warning("🧪 Dry-run activé: aucune écriture dans hockey.players.csv.")
+    else:
+        if updated > 0:
+            # Keep your file as-is (do not remove columns). We keep __rowid too; harmless.
+            _atomic_save_csv(df, players_path)
+            st.cache_data.clear()
+            st.session_state["players_db_nonce"] = str(time.time())
+            st.success(f"✅ Sauvegardé: {updated} NHL_ID ajoutés.")
 
-    if next_rowid_out is not None:
-        _save_ckpt(ckpt_file, {
-            "next_rowid": next_rowid_out,
-            "ts": time.time(),
-            "batch_size": int(batch_size),
-            "max_requests": int(max_requests),
-        })
-        st.warning("Checkpoint écrit — relance pour continuer.")
+    # ---- checkpoint next
+    next_rowid2 = None
+    # i exists if loop executed at least once
+    if "i" in locals():
+        if (i + 1) < len(work_ids):
+            next_rowid2 = work_ids[i + 1]
+
+    ckpt_out = {
+        "next_rowid": int(next_rowid2) if next_rowid2 is not None else None,
+        "ts": time.time(),
+        "dry_run": bool(dry_run),
+        "batch_size": int(batch_size),
+        "max_requests": int(max_requests),
+        "ambiguous": amb_store[-800:],  # cap file size
+    }
+    if next_rowid2 is not None or amb_store:
+        _save_ckpt(ckpt_file, ckpt_out)
+        st.warning("Checkpoint écrit. Relance pour continuer.")
     else:
         _clear_ckpt(ckpt_file)
-        st.success("🎉 Terminé — il ne reste que des cas ambigus / introuvables.")
+        st.success("🎉 Terminé. (Il peut rester seulement des joueurs introuvables.)")
 
-    st.markdown("#### Résumé")
-    st.write({"associés": updated, "ambigus": ambiguous, "introuvables": notfound, "requêtes": req_count})
 
+# ============================================================
+# MAIN RENDER
+# ============================================================
+
+# ============================================================
 def render(ctx: dict) -> None:
-    if not ctx.get("is_admin"):
+    is_admin = bool(ctx.get("is_admin"))
+    if not is_admin:
         st.warning("Accès admin requis.")
         return
 
@@ -1851,12 +1960,6 @@ def render(ctx: dict) -> None:
     # =====================================================
     # 📋 HISTORIQUE ADMIN
     # =====================================================
-    # =====================================================
-    # 🆔 BULK NHL_ID (AUTO) — par 250 (checkpoint)
-    # =====================================================
-    with st.expander("🆔 Bulk NHL_ID (AUTO) — par 250", expanded=False):
-        render_bulk_nhl_id_admin(DATA_DIR, season_lbl, is_admin)
-
     with st.expander("📋 Historique admin (ADD/REMOVE/MOVE/IMPORT)", expanded=False):
         if not os.path.exists(log_path):
             st.info("Aucun historique pour l’instant.")
