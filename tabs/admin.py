@@ -26,6 +26,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+
+
+ADMIN_VERSION = "ADMIN_PANEL_V5_NO_STATUS_2026-01-27"
+
 import pathlib
 import time
 import shutil
@@ -1599,7 +1603,8 @@ def render(ctx: dict) -> None:
         run = st.button("🧬 Lancer la fusion (players_master.csv)", use_container_width=True, key="run_fusion_master")
         if run:
             prog = st.progress(0.0)
-            status = st.status("Fusion en cours…", expanded=True)
+            status_ph = st.empty()
+            status_ph.info("Fusion en cours…")
 
             def _cb(p, msg=""):
                 try:
@@ -1608,7 +1613,7 @@ def render(ctx: dict) -> None:
                     pass
                 if msg:
                     try:
-                        status.write(msg)
+            st.caption(msg)
                     except Exception:
                         pass
 
@@ -1627,7 +1632,7 @@ def render(ctx: dict) -> None:
                 n_rows = int(res.get("rows_out") or 0)
                 issues = res.get("issues") or []
                 if ok:
-                    status.update(label=f"✅ Fusion OK — {n_rows} lignes", state="complete")
+                    status_ph.success(f"✅ Fusion OK — {n_rows} lignes")
                     st.success(f"✅ Fusion OK — {n_rows} lignes → {out_path or 'players_master.csv'}")
                     if issues:
                         with st.expander("⚠️ Notes / issues détectés", expanded=False):
@@ -1635,11 +1640,11 @@ def render(ctx: dict) -> None:
                                 st.write("•", it)
                     st.session_state["admin_panel"] = "Fusion"
                 else:
-                    status.update(label="❌ Fusion échouée", state="error")
+                    status_ph.error("❌ Fusion échouée")
                     st.error("❌ Fusion échouée. Voir détails ci-dessous.")
                     st.json(res)
             except Exception as e:
-                status.update(label="❌ Fusion — exception", state="error")
+                status_ph.error("❌ Fusion — exception")
                 st.exception(e)
 
     # =====================================================
