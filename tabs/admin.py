@@ -28,19 +28,95 @@ import pandas as pd
 import streamlit as st
 
 
+# ============================================================
+# Helpers (anti-NameError) — normalisation & lecture CSV
+# ============================================================
 
-
-def _first_existing_col(df, candidates):
-    """Return the first column name that exists in df among candidates (case-sensitive),
-    else ''.
-    """
-    if df is None or df.empty:
+def _clean_str(x: Any) -> str:
+    try:
+        if x is None:
+            return ""
+        s = str(x)
+        if s.lower() in {"nan", "none"}:
+            return ""
+        return s.strip()
+    except Exception:
         return ""
-    cols = set(map(str, df.columns))
+
+def _to_int(x: Any, default: int = 0) -> int:
+    try:
+        s = _clean_str(x)
+        if not s:
+            return default
+        s = re.sub(r"[^0-9\-]", "", s)
+        if s in {"", "-"}:
+            return default
+        return int(s)
+    except Exception:
+        return default
+
+def _to_float(x: Any, default: float = 0.0) -> float:
+    try:
+        s = _clean_str(x)
+        if not s:
+            return default
+        s = s.replace(",", ".")
+        s = re.sub(r"[^0-9\.\-]", "", s)
+        if s in {"", "-", ".", "-."}:
+            return default
+        return float(s)
+    except Exception:
+        return default
+
+def _first_existing_col(df: pd.DataFrame, candidates: List[str]) -> str:
+    cols = list(df.columns)
+    low = {c.lower(): c for c in cols}
     for c in candidates:
         if c in cols:
             return c
+        lc = str(c).lower()
+        if lc in low:
+            return low[lc]
     return ""
+
+def _norm_player_key(name: Any) -> str:
+    """Normalise un nom joueur pour matcher entre fichiers (robuste aux virgules/accents)."""
+    s = _clean_str(name).lower()
+    if not s:
+        return ""
+    # enlever accents de base (sans dépendances externes)
+    s = (
+        s.replace("é","e").replace("è","e").replace("ê","e").replace("ë","e")
+         .replace("à","a").replace("á","a").replace("â","a").replace("ä","a")
+         .replace("î","i").replace("ï","i").replace("ì","i").replace("í","i")
+         .replace("ô","o").replace("ö","o").replace("ò","o").replace("ó","o")
+         .replace("û","u").replace("ü","u").replace("ù","u").replace("ú","u")
+         .replace("ç","c")
+    )
+    s = s.replace("\u2019","'").replace("’","'").replace("`","'")
+    s = re.sub(r"\s+", " ", s)
+    # "Nom, Prenom" -> "prenom nom"
+    if "," in s:
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        if len(parts) >= 2:
+            s = " ".join(parts[1:] + parts[:1])
+    s = re.sub(r"[^a-z0-9\s\-']", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def _read_csv_loose(path: str) -> pd.DataFrame:
+    """Lecture CSV tolérante (évite dtypewarning et lignes brisées)."""
+    try:
+        return pd.read_csv(path, low_memory=False, on_bad_lines="skip")
+    except TypeError:
+        # pandas plus vieux: on_bad_lines peut ne pas exister
+        return pd.read_csv(path, low_memory=False)
+    except Exception:
+        try:
+            return pd.read_csv(path, low_memory=False, sep=None, engine="python", on_bad_lines="skip")
+        except Exception:
+            return pd.DataFrame()
+
 
 ADMIN_VERSION = "ADMIN_PANEL_V5_NO_STATUS_2026-01-27"
 
