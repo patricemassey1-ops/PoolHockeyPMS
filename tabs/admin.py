@@ -1380,6 +1380,7 @@ def build_players_master(
     prefer_equipes_fused: bool = True,
     read_team_csvs: bool = True,
     batch_size: int = 250,
+    progress_cb=None,
 ) -> dict:
     data_dir = str(data_dir or "data")
     season_lbl = str(season_lbl or "2025-2026").strip() or "2025-2026"
@@ -1466,9 +1467,20 @@ def build_players_master(
 
         n = len(out)
         bs = max(1, int(batch_size) if batch_size else 250)
-        for i in range(0, n, bs):
+        total_batches = (n + bs - 1) // bs
+        for b, i in enumerate(range(0, n, bs), start=1):
+            if callable(progress_cb):
+                try:
+                    progress_cb((b - 1) / max(1, total_batches), f"Écriture players_master.csv — batch {b}/{total_batches}")
+                except Exception:
+                    pass
             chunk = out.iloc[i:i+bs]
             chunk.to_csv(tmp, mode="a", header=(i == 0), index=False)
+        if callable(progress_cb):
+            try:
+                progress_cb(1.0, f"Écriture players_master.csv — terminé ({total_batches} batches)")
+            except Exception:
+                pass
         try:
             os.replace(tmp, master)
         except Exception:
@@ -1510,6 +1522,16 @@ def render(ctx: dict) -> None:
 
     st.subheader("🛠️ Gestion Admin")
 
+    # Panel (persistant) pour éviter de "retomber" sur Import après un rerun
+    panel = st.radio(
+        "Panel",
+        ["Fusion", "Import", "Autres"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="admin_panel",
+    )
+
+
     # ---- OAuth UI (si ton projet l'avait déjà)
     with st.expander("🔐 Connexion Google Drive (OAuth)", expanded=False):
         if callable(_oauth_ui):
@@ -1529,7 +1551,7 @@ def render(ctx: dict) -> None:
     st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
     st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
-    with st.expander("🧪 Vérification cap (live) + barres", expanded=True):
+    with st.expander("🧪 Vérification cap (live) + barres", expanded=(panel == "Autres")):
         c1, c2, c3 = st.columns([1, 1, 2])
         with c1:
             st.session_state["CAP_GC"] = st.number_input("Cap GC", min_value=0, value=int(st.session_state["CAP_GC"]), step=500000)
@@ -1555,9 +1577,80 @@ def render(ctx: dict) -> None:
     df = load_equipes(e_path)
 
     # =====================================================
-    # 🔄 IMPORT ÉQUIPES (Drive)
+    
     # =====================================================
-    with st.expander("🔄 Import équipes depuis Drive (OAuth)", expanded=False):
+    # 🧬 FUSION — construire un players_master.csv unique (et fiable)
+    #   Objectif: arrêter de courir après 6 CSV + un CSV fusion.
+    #   → crée/maj: data/players_master.csv
+    #   - lit hockey.players.csv + equipes_joueurs_{season}.csv + (option) CSV équipes
+    #   - unifie colonnes + positions + level + disponibilité
+    #   - écriture en batch (250) + progression visible
+    # =====================================================
+    with st.expander("🧬 Fusion (master) — construire players_master.csv", expanded=(panel == "Fusion")):
+        st.caption("Crée un fichier **unique** `players_master.csv` qui sert de source de vérité (disponibilité / équipes pool / NHL_ID / stats pro).")
+        colA, colB, colC = st.columns([1,1,2])
+        with colA:
+            dry_run = st.toggle("Dry run", value=True, help="Ne rien écrire, seulement analyser.")
+        with colB:
+            bs = st.number_input("Batch", min_value=50, max_value=1000, value=250, step=50)
+        with colC:
+            st.markdown("<div class='muted'>Astuce: commence en <b>dry run</b>, puis décoche pour écrire.</div>", unsafe_allow_html=True)
+
+        run = st.button("🧬 Lancer la fusion (players_master.csv)", use_container_width=True, key="run_fusion_master")
+        if run:
+            prog = st.progress(0.0)
+            status = st.status("Fusion en cours…", expanded=True)
+
+            def _cb(p, msg=""):
+                try:
+                    prog.progress(min(1.0, max(0.0, float(p))))
+                except Exception:
+                    pass
+                if msg:
+                    try:
+                        status.write(msg)
+                    except Exception:
+                        pass
+
+            try:
+                res = build_players_master(
+                    data_dir=DATA_DIR,
+                    season_lbl=season_lbl,
+                    dry_run=bool(dry_run),
+                    prefer_equipes_fused=True,
+                    read_team_csvs=True,
+                    batch_size=int(bs),
+                    progress_cb=_cb,
+                )
+                ok = bool(res.get("ok"))
+                out_path = res.get("out_path") or ""
+                n_rows = int(res.get("rows_out") or 0)
+                issues = res.get("issues") or []
+                if ok:
+                    status.update(label=f"✅ Fusion OK — {n_rows} lignes", state="complete")
+                    st.success(f"✅ Fusion OK — {n_rows} lignes → {out_path or 'players_master.csv'}")
+                    if issues:
+                        with st.expander("⚠️ Notes / issues détectés", expanded=False):
+                            for it in issues[:200]:
+                                st.write("•", it)
+                    st.session_state["admin_panel"] = "Fusion"
+                else:
+                    status.update(label="❌ Fusion échouée", state="error")
+                    st.error("❌ Fusion échouée. Voir détails ci-dessous.")
+                    st.json(res)
+            except Exception as e:
+                status.update(label="❌ Fusion — exception", state="error")
+                st.exception(e)
+
+    # =====================================================
+    # 🔗 NHL_ID — bulk association (AUTO 250/batch) + manuel
+    # =====================================================
+    with st.expander("🔗 Associer NHL_ID manquants (AUTO — 250 par run)", expanded=(panel == "Fusion")):
+        render_bulk_nhl_id_admin(DATA_DIR, season_lbl, is_admin)
+
+# 🔄 IMPORT ÉQUIPES (Drive)
+    # =====================================================
+    with st.expander("🔄 Import équipes depuis Drive (OAuth)", expanded=(panel == "Import")):
         st.caption("Lister/télécharger les CSV dans ton folder_id. Si ça ne marche pas, utilise Import local (fallback).")
         st.write(f"folder_id (ctx): `{folder_id or ''}`")
 
@@ -1641,7 +1734,7 @@ def render(ctx: dict) -> None:
     #   - Mode: append ou remplacer l’équipe
     #   - Backup local par équipe avant modification
     # =====================================================
-    with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=True):
+    with st.expander("📥 Import local (fallback) — multi-upload CSV équipes", expanded=(panel == "Import")):
         st.caption("Upload plusieurs CSV (1 par équipe). Auto-assign via `Propriétaire` (si unique) ou via le nom du fichier (ex: `Whalers.csv`).")
         st.code(f"Destination locale (fusion): {e_path}", language="text")
         # Options lecture/normalisation
