@@ -79,6 +79,43 @@ def _discover_pms_team_files(data_dir: str) -> list[str]:
 # Helpers (position / name / formatting)
 # ----------------------------
 
+
+def pms_team_files_report(data_dir: str) -> list[dict]:
+    """Rapport santé des fichiers équipes PMS détectés dans data_dir.
+    - case-insensitive (whalers.csv / Whalers.csv)
+    - détecte colonne joueur + scope si présent
+    """
+    rows: list[dict] = []
+    for fname in _discover_pms_team_files(data_dir):
+        fp = os.path.join(data_dir, fname)
+        team = _team_name_from_filename(fname)
+        try:
+            df = pd.read_csv(fp, low_memory=False)
+            df.columns = [str(c).strip() for c in df.columns]
+            pcol = _detect_player_column(df) or ""
+            scol = _detect_scope_column(df) or ""
+            rows.append({
+                "Fichier": fname,
+                "Équipe (pool)": team,
+                "Lignes": int(len(df)),
+                "Colonne joueur": pcol,
+                "Colonne scope": scol,
+                "OK": "✅" if pcol else "⚠️",
+            })
+        except Exception as e:
+            rows.append({
+                "Fichier": fname,
+                "Équipe (pool)": team,
+                "Lignes": 0,
+                "Colonne joueur": "",
+                "Colonne scope": "",
+                "OK": "❌",
+                "Erreur": str(e)[:180],
+            })
+    return rows
+
+
+
 def nhl_results_to_labels(results):
     """Convert NHL search results list into UI labels + mapping.
     Works with various NHL API payload shapes.
@@ -1361,6 +1398,14 @@ def render_tab_joueurs(ctx: dict | None = None):
         cAL, cAM, cAR = st.columns([1, 1.15, 1])
         with cAM:
             with st.expander("🧪 Audit automatique — sanity check (pool vs Disponible)", expanded=False):
+                # 📁 Vérifier que les fichiers d'équipes (data/*.csv) sont bien détectés
+                rep = pms_team_files_report(DATA_DIR)
+                if rep:
+                    st.markdown("#### 📁 Fichiers équipes détectés (dossier data/)")
+                    st.dataframe(pd.DataFrame(rep), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("Aucun fichier d'équipe PMS détecté dans data/. Vérifie que whalers.csv, canadiens.csv, etc. existent dans /data/.")
+
                 audit = audit_pool_vs_availability(df, DATA_DIR)
     
                 dupes = audit.get("dupes", [])
