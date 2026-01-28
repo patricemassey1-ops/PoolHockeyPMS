@@ -2334,3 +2334,19 @@ def build_players_index(players_db: "pd.DataFrame") -> dict:
             # fallback minimal
             idx[k] = {name_col: n}
     return idx
+
+# ============================================================
+# CSV helpers
+# ============================================================
+def _pick_col(df: "pd.DataFrame", candidates: list) -> str:
+    """Retourne le premier nom de colonne présent dans df parmi candidates (case-insensitive)."""
+    if df is None or not hasattr(df, "columns"):
+        return ""
+    cols = list(df.columns)
+    low = {str(c).strip().lower(): c for c in cols}
+    for cand in candidates:
+        k = str(cand).strip().lower()
+        if k in low:
+            return low[k]
+    return ""
+
