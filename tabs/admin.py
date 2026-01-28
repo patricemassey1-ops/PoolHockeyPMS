@@ -2350,3 +2350,24 @@ def _pick_col(df: "pd.DataFrame", candidates: list) -> str:
             return low[k]
     return ""
 
+
+# ============================================================
+# Slot helper — déduit Slot à partir du Statut (Actif/Banc/IR/Mineur)
+# ============================================================
+def auto_slot_for_statut(statut: str) -> str:
+    """Mappe un statut vers un slot. Permissif, retourne 'Actif' par défaut."""
+    s = str(statut or "").strip().lower()
+    if not s:
+        return "Actif"
+    # IR
+    if "ir" in s or "inj" in s or "bless" in s:
+        return "IR"
+    # Mineur
+    if "mine" in s or "ahl" in s or "jun" in s or "prospect" in s:
+        return "Mineur"
+    # Banc
+    if "banc" in s or "bench" in s or "reserve" in s:
+        return "Banc"
+    # Actif
+    return "Actif"
+
