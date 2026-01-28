@@ -2371,3 +2371,4 @@ def auto_slot_for_statut(statut: str) -> str:
     # Actif
     return "Actif"
 
+
