@@ -1850,10 +1850,12 @@ def render(ctx: dict) -> None:
             st.info("Aucun fichier équipes local. Importe depuis Drive ou import local.")
         else:
             df_qc, stats = apply_quality(df, players_idx)
+        if not isinstance(stats, dict):
+            stats = {}
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Lignes", stats["rows"])
-            c2.metric("Level auto", stats["level_autofilled"])
-            c3.metric("⚠️ IR mismatch", stats["ir_mismatch"])
+            c1.metric("Lignes", stats.get("rows", stats.get("rows_out", stats.get("rows_in", 0))))
+            c2.metric("Level auto", stats.get("level_autofilled", 0))
+            c3.metric("⚠️ IR mismatch", stats.get("ir_mismatch", 0))
             c4.metric("⚠️ Salaire/Level", stats["salary_level_suspect"])
             try:
                 st.dataframe(df_qc.head(140).style.apply(_preview_style_row, axis=1), use_container_width=True)
@@ -2442,8 +2444,8 @@ def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
 
     df = df.copy()
     stats["rows_in"] = int(len(df))
-    stats["rows"] = int(len(df))
-    stats["cols"] = int(getattr(df, "shape", (0, 0))[1])
+    stats.get("rows", stats.get("rows_out", stats.get("rows_in", 0))) = int(len(df))
+    stats.get("cols", 0) = int(getattr(df, "shape", (0, 0))[1])
 
     # Ensure required columns exist
     schema = []
@@ -2486,12 +2488,11 @@ def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
 
     # Level autofilled (approx): nombre de lignes avec Level non vide
     if "Level" in df.columns:
-        stats["level_autofilled"] = int((df["Level"].astype(str).str.strip() != "").sum())
+        stats.get("level_autofilled", 0) = int((df["Level"].astype(str).str.strip() != "").sum())
 
     stats["rows_out"] = int(len(df))
-    stats["rows"] = int(len(df))
-    stats["cols"] = int(getattr(df, "shape", (0, 0))[1])
+    stats.get("rows", stats.get("rows_out", stats.get("rows_in", 0))) = int(len(df))
+    stats.get("cols", 0) = int(getattr(df, "shape", (0, 0))[1])
     return (df, stats)
-
 
 
