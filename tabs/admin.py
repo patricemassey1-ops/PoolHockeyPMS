@@ -2421,11 +2421,12 @@ def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
     - Normalise quelques champs (Pos/Equipe)
     - Ajoute colonnes manquantes du schéma EQUIPES_COLUMNS
     - Calcule des stats QC (counts)
+
     Retourne: (df_qc, stats_dict)
     """
     stats = {
-            "rows": 0,
-            "cols": 0,
+        "rows": 0,
+        "cols": 0,
         "rows_in": 0,
         "rows_out": 0,
         "missing_player_match": 0,
@@ -2434,19 +2435,22 @@ def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
         "missing_salary": 0,
         "duplicates_player": 0,
     }
+
     if df is None or (hasattr(df, "empty") and df.empty):
         return (pd.DataFrame(), stats)
 
     df = df.copy()
-    stats["rows_in"] = len(df)
-        stats["rows"] = len(df)
-        stats["cols"] = int(getattr(df, "shape", (0,0))[1])
+    stats["rows_in"] = int(len(df))
+    stats["rows"] = int(len(df))
+    stats["cols"] = int(getattr(df, "shape", (0, 0))[1])
 
     # Ensure required columns exist
+    schema = []
     try:
         schema = list(EQUIPES_COLUMNS)
     except Exception:
         schema = []
+
     for c in schema:
         if c not in df.columns:
             df[c] = ""
@@ -2476,10 +2480,11 @@ def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
     # Players DB match (soft)
     if players_idx and "Joueur" in df.columns:
         norm = df["Joueur"].map(_norm_player_key)
-        stats["missing_player_match"] = int((~norm.isin(set(players_idx.keys()))).sum())
+        keys = set(players_idx.keys())
+        stats["missing_player_match"] = int((~norm.isin(keys)).sum())
 
-    stats["rows_out"] = len(df)
-        stats["rows"] = len(df)
-        stats["cols"] = int(getattr(df, "shape", (0,0))[1])
-        return (df, stats)
+    stats["rows_out"] = int(len(df))
+    stats["rows"] = int(len(df))
+    stats["cols"] = int(getattr(df, "shape", (0, 0))[1])
+    return (df, stats)
 
