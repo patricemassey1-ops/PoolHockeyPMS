@@ -27,6 +27,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
+# ============================================================
+# Defaults (Caps)
+# ============================================================
+# Valeurs par défaut si settings/csv non disponibles.
+# NHL cap ~ 88M (2025-2026 approximatif). Ajuste au besoin.
+DEFAULT_CAP_GC = 88_000_000
+DEFAULT_CAP_CE = 10_000_000
+
 
 ADMIN_VERSION = "ADMIN_PANEL_V5_NO_STATUS_2026-01-27"
 
