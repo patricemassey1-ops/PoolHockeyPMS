@@ -145,21 +145,38 @@ _oauth_ui = None
 _oauth_enabled = None
 _oauth_get_service = None
 
-for _mod, _fn_ui, _fn_enabled, _fn_service in [
-    ("services.gdrive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
-    ("services.gdrive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
-    ("services.drive_oauth", "render_oauth_connect_ui", "oauth_drive_enabled", "get_drive_service"),
-    ("services.drive_oauth", "render_oauth_ui", "oauth_drive_enabled", "drive_get_service"),
-]:
+
+# On essaie plusieurs noms possibles, sans casser si absent.
+_oauth_ui = None
+_oauth_enabled = None
+_oauth_get_service = None
+
+# ⚠️ Pas d'import dynamique (__import__/importlib) : Streamlit Cloud peut lever
+# "Importing a module script failed" dans certains contextes de rerun/callback.
+try:
+    # Nouveau nom recommandé (si présent)
+    from services.gdrive_oauth import render_oauth_ui as _oauth_ui  # type: ignore
+    from services.gdrive_oauth import oauth_drive_enabled as _oauth_enabled  # type: ignore
+    from services.gdrive_oauth import drive_get_service as _oauth_get_service  # type: ignore
+except Exception:
     try:
-        m = __import__(_mod, fromlist=[_fn_ui, _fn_enabled, _fn_service])
-        _oauth_ui = getattr(m, _fn_ui, None) or _oauth_ui
-        _oauth_enabled = getattr(m, _fn_enabled, None) or _oauth_enabled
-        _oauth_get_service = getattr(m, _fn_service, None) or _oauth_get_service
+        # Compat: ancien nom/fonctions
+        from services.gdrive_oauth import render_oauth_connect_ui as _oauth_ui  # type: ignore
+        from services.gdrive_oauth import oauth_drive_enabled as _oauth_enabled  # type: ignore
+        from services.gdrive_oauth import get_drive_service as _oauth_get_service  # type: ignore
     except Exception:
-        pass
-
-
+        try:
+            # Autre module possible
+            from services.drive_oauth import render_oauth_ui as _oauth_ui  # type: ignore
+            from services.drive_oauth import oauth_drive_enabled as _oauth_enabled  # type: ignore
+            from services.drive_oauth import drive_get_service as _oauth_get_service  # type: ignore
+        except Exception:
+            try:
+                from services.drive_oauth import render_oauth_connect_ui as _oauth_ui  # type: ignore
+                from services.drive_oauth import oauth_drive_enabled as _oauth_enabled  # type: ignore
+                from services.drive_oauth import get_drive_service as _oauth_get_service  # type: ignore
+            except Exception:
+                pass
 
 # ---- Optional: OAuth Flow fallback (self-contained) — nécessite google-auth-oauthlib
 try:
