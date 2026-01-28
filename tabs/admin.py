@@ -1300,20 +1300,13 @@ def render(ctx: dict) -> None:
     st.session_state.setdefault("CAP_GC", DEFAULT_CAP_GC)
     st.session_state.setdefault("CAP_CE", DEFAULT_CAP_CE)
 
-    with st.expander("🧪 Vérification cap (live) + barres", expanded=(panel == "Autres")):
-        c1, c2, c3 = st.columns([1, 1, 2])
+    with st.expander("🧢 Paramètres de cap (GC / CE)", expanded=False):
+        st.caption("Modifie les caps (l\'affichage des barres est dans Home).")
+        c1, c2 = st.columns(2)
         with c1:
-            st.session_state["CAP_GC"] = st.number_input("Cap GC", min_value=0, value=int(st.session_state["CAP_GC"]), step=500000)
+            st.number_input("Cap GC", min_value=0, step=100000, key="CAP_GC")
         with c2:
-            st.session_state["CAP_CE"] = st.number_input("Cap CE", min_value=0, value=int(st.session_state["CAP_CE"]), step=250000)
-        with c3:
-            st.caption("Caps utilisés ici pour affichage & alertes.")
-        df_eq = load_equipes(e_path)
-        if df_eq.empty:
-            st.info("Aucun fichier équipes local trouvé (importe depuis Drive ou local).")
-        else:
-            _render_caps_bars(df_eq, int(st.session_state["CAP_GC"]), int(st.session_state["CAP_CE"]))
-
+            st.number_input("Cap CE", min_value=0, step=100000, key="CAP_CE")
     # ---- Players DB index
     players_db = load_players_db(resolve_players_db_path(DATA_DIR))
     players_idx = build_players_index(players_db)
@@ -2123,6 +2116,43 @@ def resolve_players_db_path(data_dir: str) -> str:
 # ============================================================
 # Equipes (rosters) — lecture / écriture
 # ============================================================
+
+# ============================================================
+# Players DB — lecture
+# ============================================================
+def load_players_db(path: str) -> "pd.DataFrame":
+    """Charge hockey.players.csv (Players DB). Retourne DF vide si absent/illisible.
+    Lecture robuste: delimiter auto + encodings + lignes brisées.
+    """
+    try:
+        if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+    last_err = None
+    for enc in ("utf-8-sig", "utf-8", "latin1"):
+        try:
+            df = pd.read_csv(
+                path,
+                sep=None,
+                engine="python",
+                on_bad_lines="skip",
+                encoding=enc,
+            )
+            if isinstance(df, pd.DataFrame):
+                return df
+        except Exception as e:
+            last_err = e
+            continue
+
+    try:
+        import streamlit as st
+        st.warning(f"⚠️ Lecture Players DB impossible: {last_err}")
+    except Exception:
+        pass
+    return pd.DataFrame()
+
 def load_equipes(path: str) -> "pd.DataFrame":
     """Charge le fichier equipes_joueurs_*.csv. Retourne DF vide si absent/illisible.
     On reste permissif (delimiter auto + lignes brisées) pour éviter les crashes.
@@ -2162,92 +2192,6 @@ def load_equipes(path: str) -> "pd.DataFrame":
 # ============================================================
 # UI — Cap bars (GC/CE)
 # ============================================================
-def _render_caps_bars(df_eq: "pd.DataFrame", cap_gc: int, cap_ce: int) -> None:
-    """Affiche des barres de cap (GC/CE) par équipe si possible.
-    Fonction permissive: si colonnes manquantes, affiche un message simple sans planter.
-    """
-    import streamlit as st
-
-    if df_eq is None or (hasattr(df_eq, "empty") and df_eq.empty):
-        st.info("Aucun fichier d'équipes chargé (equipes_joueurs_*.csv). Les barres cap seront disponibles après import.")
-        return
-
-    # Colonnes possibles
-    owner_col = None
-    for c in ["Proprietaire", "Propriétaire", "Owner", "Equipe", "Équipe", "Team"]:
-        if c in df_eq.columns:
-            owner_col = c
-            break
-
-    scope_col = None
-    for c in ["Scope", "Club", "Type", "Roster", "Categorie", "Catégorie"]:
-        if c in df_eq.columns:
-            scope_col = c
-            break
-
-    sal_col = None
-    for c in ["Salaire", "Salary", "Cap Hit", "CapHit", "CapHitAAV", "AAV", "cap_hit"]:
-        if c in df_eq.columns:
-            sal_col = c
-            break
-
-    if owner_col is None or sal_col is None:
-        st.warning("Colonnes insuffisantes pour les barres cap (besoin d'une colonne équipe + salaire).")
-        st.caption(f"Colonnes détectées: {list(df_eq.columns)[:30]}")
-        return
-
-    def _to_num(x):
-        try:
-            if pd.isna(x):
-                return 0.0
-        except Exception:
-            pass
-        s = str(x).strip().replace("$","").replace(" ", "").replace(",", "")
-        try:
-            return float(s)
-        except Exception:
-            return 0.0
-
-    d = df_eq.copy()
-
-    # Normalise Scope
-    if scope_col is None:
-        d["_scope"] = "GC"
-    else:
-        def _norm_scope(v):
-            s = str(v or "").strip().upper()
-            if "CE" in s or "ECO" in s or "ÉCO" in s or "ECOLE" in s:
-                return "CE"
-            if "GC" in s or "GRAND" in s:
-                return "GC"
-            # fallback: si vide -> GC
-            return "GC"
-        d["_scope"] = d[scope_col].map(_norm_scope)
-
-    d["_sal"] = d[sal_col].map(_to_num)
-
-    # Totaux par équipe
-    owners = [o for o in d[owner_col].dropna().astype(str).unique().tolist() if str(o).strip()]
-    owners = sorted(owners)
-
-    st.markdown("#### 💰 Barres de cap (GC / CE) par équipe")
-    for o in owners:
-        dd = d[d[owner_col].astype(str) == str(o)]
-        tot_gc = float(dd.loc[dd["_scope"]=="GC", "_sal"].sum())
-        tot_ce = float(dd.loc[dd["_scope"]=="CE", "_sal"].sum())
-
-        # ratios
-        rgc = 0.0 if not cap_gc else min(1.0, tot_gc / float(cap_gc))
-        rce = 0.0 if not cap_ce else min(1.0, tot_ce / float(cap_ce))
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.caption(f"**{o} — GC**  ({int(tot_gc):,}$ / {int(cap_gc):,}$)".replace(",", " "))
-            st.progress(rgc)
-        with c2:
-            st.caption(f"**{o} — CE**  ({int(tot_ce):,}$ / {int(cap_ce):,}$)".replace(",", " "))
-            st.progress(rce)
-
 def save_equipes(df: "pd.DataFrame", path: str) -> bool:
     """Sauvegarde le fichier equipes_joueurs_*.csv (UTF-8-SIG)."""
     try:
@@ -2259,4 +2203,3 @@ def save_equipes(df: "pd.DataFrame", path: str) -> bool:
         return True
     except Exception:
         return False
-
