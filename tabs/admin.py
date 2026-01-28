@@ -2063,3 +2063,37 @@ def render(ctx: dict) -> None:
                 st.error(f"Erreur fusion master: {e}")
 
     st.caption("✅ Admin: OAuth Drive / Import local • Add/Remove/Move • Caps bars • Log • QC/Level auto")
+
+# ============================================================
+# Paths — admin log + players db (hockey.players.csv)
+# ============================================================
+def admin_log_path(data_dir: str, season_lbl: str) -> str:
+    """Chemin du log admin pour une saison."""
+    season_lbl = str(season_lbl or "").strip() or "season"
+    return os.path.join(str(data_dir), f"admin_log_{season_lbl}.csv")
+
+
+def resolve_players_db_path(data_dir: str) -> str:
+    """Résout le chemin du fichier 'hockey.players.csv' (Players DB)."""
+    dd = str(data_dir or "").strip() or "data"
+    candidates = [
+        os.path.join(dd, "hockey.players.csv"),
+        os.path.join(dd, "Hockey.Players.csv"),
+        os.path.join(dd, "Hockey.Players.CSV"),
+        os.path.join(dd, "players_db.csv"),
+        os.path.join(dd, "players.csv"),
+        # fallbacks relatifs (repo)
+        os.path.join("data", "hockey.players.csv"),
+        os.path.join("Data", "hockey.players.csv"),
+        os.path.join("data", "Hockey.Players.csv"),
+        os.path.join("Data", "Hockey.Players.csv"),
+    ]
+    for p in candidates:
+        try:
+            if p and os.path.exists(p) and os.path.getsize(p) > 0:
+                return p
+        except Exception:
+            continue
+    # dernier recours: même si absent (pour afficher un message clair côté UI)
+    return candidates[0]
+
