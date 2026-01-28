@@ -2424,6 +2424,8 @@ def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
     Retourne: (df_qc, stats_dict)
     """
     stats = {
+            "rows": 0,
+            "cols": 0,
         "rows_in": 0,
         "rows_out": 0,
         "missing_player_match": 0,
@@ -2437,6 +2439,8 @@ def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
 
     df = df.copy()
     stats["rows_in"] = len(df)
+        stats["rows"] = len(df)
+        stats["cols"] = int(getattr(df, "shape", (0,0))[1])
 
     # Ensure required columns exist
     try:
@@ -2475,5 +2479,7 @@ def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
         stats["missing_player_match"] = int((~norm.isin(set(players_idx.keys()))).sum())
 
     stats["rows_out"] = len(df)
-    return (df, stats)
+        stats["rows"] = len(df)
+        stats["cols"] = int(getattr(df, "shape", (0,0))[1])
+        return (df, stats)
 
