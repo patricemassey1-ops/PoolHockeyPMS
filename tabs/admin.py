@@ -483,7 +483,6 @@ def load_players_db(path: str) -> pd.DataFrame:
         try:
             df = pd.read_csv(
                 path,
-                low_memory=False,
                 dtype=str,
                 on_bad_lines='skip',
                 **kw,
@@ -1293,12 +1292,11 @@ def render_bulk_nhl_id_admin(DATA_DIR: str, season_lbl: str, is_admin: bool) -> 
         st.caption(
             f"Chemin détecté: `{players_path}` | exists={info.get('exists')} | size={info.get('size')} | rows={info.get('rows')} | cols={len(info.get('cols') or [])}"
         )
-        with st.expander("🔎 Diagnostic hockey.players.csv (aperçu brut + colonnes)", expanded=False):
+        show_diag = st.checkbox("🔎 Afficher diagnostic hockey.players.csv", value=False, key="adm_diag_players_db")
+        if show_diag:
             if info.get('raw_head'):
                 st.code(info.get('raw_head'), language="text")
             st.write({k: info.get(k) for k in ['delimiter','rows','cols','error']})
-
-        st.caption(f"Chemin détecté: `{players_path}` (size={os.path.getsize(players_path) if os.path.exists(players_path) else 'NA'})")
         pm = os.path.join(DATA_DIR, "players_master.csv")
         if os.path.exists(pm):
             st.info("`players_master.csv` existe. Tu peux générer une Players DB minimale pour débloquer l’outil NHL_ID.")
