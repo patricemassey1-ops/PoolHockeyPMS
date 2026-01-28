@@ -2119,3 +2119,55 @@ def resolve_players_db_path(data_dir: str) -> str:
     # dernier recours: même si absent (pour afficher un message clair côté UI)
     return candidates[0]
 
+
+# ============================================================
+# Equipes (rosters) — lecture / écriture
+# ============================================================
+def load_equipes(path: str) -> "pd.DataFrame":
+    """Charge le fichier equipes_joueurs_*.csv. Retourne DF vide si absent/illisible.
+    On reste permissif (delimiter auto + lignes brisées) pour éviter les crashes.
+    """
+    try:
+        if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+    # lecture robuste
+    last_err = None
+    for enc in ("utf-8-sig", "utf-8", "latin1"):
+        try:
+            df = pd.read_csv(
+                path,
+                sep=None,
+                engine="python",
+                on_bad_lines="skip",
+                encoding=enc,
+            )
+            if isinstance(df, pd.DataFrame):
+                return df
+        except Exception as e:
+            last_err = e
+            continue
+
+    # dernier recours
+    try:
+        import streamlit as st
+        st.warning(f"⚠️ Lecture équipes impossible: {last_err}")
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def save_equipes(df: "pd.DataFrame", path: str) -> bool:
+    """Sauvegarde le fichier equipes_joueurs_*.csv (UTF-8-SIG)."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except Exception:
+        pass
+    try:
+        (df if df is not None else pd.DataFrame()).to_csv(path, index=False, encoding="utf-8-sig")
+        return True
+    except Exception:
+        return False
+
