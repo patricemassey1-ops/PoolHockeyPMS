@@ -28,101 +28,106 @@ import pandas as pd
 import streamlit as st
 
 
-# ============================================================
-# Helpers (anti-NameError) — normalisation & lecture CSV
-# ============================================================
-
-def _clean_str(x: Any) -> str:
-    try:
-        if x is None:
-            return ""
-        s = str(x)
-        if s.lower() in {"nan", "none"}:
-            return ""
-        return s.strip()
-    except Exception:
-        return ""
-
-def _to_int(x: Any, default: int = 0) -> int:
-    try:
-        s = _clean_str(x)
-        if not s:
-            return default
-        s = re.sub(r"[^0-9\-]", "", s)
-        if s in {"", "-"}:
-            return default
-        return int(s)
-    except Exception:
-        return default
-
-def _to_float(x: Any, default: float = 0.0) -> float:
-    try:
-        s = _clean_str(x)
-        if not s:
-            return default
-        s = s.replace(",", ".")
-        s = re.sub(r"[^0-9\.\-]", "", s)
-        if s in {"", "-", ".", "-."}:
-            return default
-        return float(s)
-    except Exception:
-        return default
-
-def _first_existing_col(df: pd.DataFrame, candidates: List[str]) -> str:
-    cols = list(df.columns)
-    low = {c.lower(): c for c in cols}
-    for c in candidates:
-        if c in cols:
-            return c
-        lc = str(c).lower()
-        if lc in low:
-            return low[lc]
-    return ""
-
-def _norm_player_key(name: Any) -> str:
-    """Normalise un nom joueur pour matcher entre fichiers (robuste aux virgules/accents)."""
-    s = _clean_str(name).lower()
-    if not s:
-        return ""
-    # enlever accents de base (sans dépendances externes)
-    s = (
-        s.replace("é","e").replace("è","e").replace("ê","e").replace("ë","e")
-         .replace("à","a").replace("á","a").replace("â","a").replace("ä","a")
-         .replace("î","i").replace("ï","i").replace("ì","i").replace("í","i")
-         .replace("ô","o").replace("ö","o").replace("ò","o").replace("ó","o")
-         .replace("û","u").replace("ü","u").replace("ù","u").replace("ú","u")
-         .replace("ç","c")
-    )
-    s = s.replace("\u2019","'").replace("’","'").replace("`","'")
-    s = re.sub(r"\s+", " ", s)
-    # "Nom, Prenom" -> "prenom nom"
-    if "," in s:
-        parts = [p.strip() for p in s.split(",") if p.strip()]
-        if len(parts) >= 2:
-            s = " ".join(parts[1:] + parts[:1])
-    s = re.sub(r"[^a-z0-9\s\-']", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-def _read_csv_loose(path: str) -> pd.DataFrame:
-    """Lecture CSV tolérante (évite dtypewarning et lignes brisées)."""
-    try:
-        return pd.read_csv(path, low_memory=False, on_bad_lines="skip")
-    except TypeError:
-        # pandas plus vieux: on_bad_lines peut ne pas exister
-        return pd.read_csv(path, low_memory=False)
-    except Exception:
-        try:
-            return pd.read_csv(path, low_memory=False, sep=None, engine="python", on_bad_lines="skip")
-        except Exception:
-            return pd.DataFrame()
-
-
 ADMIN_VERSION = "ADMIN_PANEL_V5_NO_STATUS_2026-01-27"
 
 import pathlib
 import time
 import shutil
+
+
+# ============================================================
+# Helpers — robust CSV / name normalization (required by Fusion)
+# ============================================================
+import unicodedata
+
+def _strip_accents(s: str) -> str:
+    try:
+        return "".join(c for c in unicodedata.normalize("NFKD", str(s)) if not unicodedata.combining(c))
+    except Exception:
+        return str(s)
+
+def _clean_str(s: str) -> str:
+    s = "" if s is None else str(s)
+    s = s.replace("\u00a0", " ").replace("\xa0", " ")
+    return s.strip()
+
+def _norm_player_key(name: str) -> str:
+    """Stable key for matching across files (handles 'Last, First' and accents)."""
+    n = _clean_str(name)
+    if not n or n.lower() in {"nan","none","n/a","na"}:
+        return ""
+    # Convert 'Last, First' -> 'First Last'
+    if "," in n:
+        parts = [p.strip() for p in n.split(",") if p.strip()]
+        if len(parts) >= 2:
+            n = " ".join(parts[1:]) + " " + parts[0]
+    n = _strip_accents(n).lower()
+    # Remove non letters/numbers and collapse spaces
+    n = re.sub(r"[^a-z0-9 ]+", " ", n)
+    n = re.sub(r"\s+", " ", n).strip()
+    return n
+
+def _first_existing_col(df, candidates):
+    """Return first column name present in df from candidates (case-sensitive)."""
+    if df is None or getattr(df, "empty", False):
+        return None
+    cols = set(df.columns)
+    for c in candidates:
+        if c in cols:
+            return c
+    # fallback: case-insensitive
+    lower_map = {str(c).lower(): c for c in df.columns}
+    for c in candidates:
+        lc = str(c).lower()
+        if lc in lower_map:
+            return lower_map[lc]
+    return None
+
+def _extract_roster_from_fantrax(df, team_name: str = ""):
+    """Extract pool roster rows from a team CSV (Fantrax export variations).
+
+    Returns a DataFrame with at least:
+      - player_raw, _pkey, team_pool, pos_pool, eligible_pool, salary
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["player_raw","_pkey","team_pool","pos_pool","eligible_pool","salary"])
+
+    name_col = _first_existing_col(df, ["Player","player","Joueur","joueur","Name","name","Nom","nom"])
+    if not name_col:
+        # Some exports store 'First Name'/'Last Name'
+        fn = _first_existing_col(df, ["First","First Name","Prenom","Prénom"])
+        ln = _first_existing_col(df, ["Last","Last Name","Nom de famille"])
+        if fn and ln:
+            df = df.copy()
+            df["_tmp_name"] = df[ln].astype(str).str.strip() + ", " + df[fn].astype(str).str.strip()
+            name_col = "_tmp_name"
+        else:
+            return pd.DataFrame(columns=["player_raw","_pkey","team_pool","pos_pool","eligible_pool","salary"])
+
+    pos_col = _first_existing_col(df, ["Pos","Position","pos","position"])
+    elig_col = _first_existing_col(df, ["Eligible","Elig","eligible","elig"])
+    salary_col = _first_existing_col(df, ["Salary","Cap Hit","CapHit","Cap Hit ($)","CapHit($)","CapHit ($)","Salaire","Cap","AAV","AAV($)"])
+
+    out = pd.DataFrame()
+    out["player_raw"] = df[name_col].astype(str)
+    out["player_raw"] = out["player_raw"].apply(_clean_str)
+    out = out[out["player_raw"].str.len() > 0].copy()
+
+    out["_pkey"] = out["player_raw"].apply(_norm_player_key)
+    out["team_pool"] = team_name or ""
+    out["pos_pool"] = df[pos_col].astype(str).apply(_clean_str) if pos_col else ""
+    out["eligible_pool"] = df[elig_col].astype(str).apply(_clean_str) if elig_col else ""
+    if salary_col:
+        # keep only digits/., convert to float
+        s = df[salary_col].astype(str).str.replace(",", "").str.replace(" ", "")
+        s = s.str.replace("$","", regex=False)
+        out["salary"] = pd.to_numeric(s, errors="coerce")
+    else:
+        out["salary"] = pd.NA
+
+    # Heuristic: drop header-like rows
+    out = out[~out["player_raw"].str.lower().isin({"player","joueur","name","nom"})].copy()
+    return out
 
 # ---- Optional: Google Drive client (if installed)
 try:
