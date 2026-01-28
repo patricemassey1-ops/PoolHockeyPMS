@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import io
 from typing import Dict, List, Tuple
 
 import pandas as pd
@@ -60,6 +61,56 @@ def _read_csv_header_cols(path: str) -> List[str]:
     except Exception:
         return []
 
+
+
+def _uploaded_bytes(fobj) -> bytes:
+    """Get bytes from a Streamlit UploadedFile safely (reset pointer)."""
+    if fobj is None:
+        return b""
+    try:
+        fobj.seek(0)
+    except Exception:
+        pass
+    try:
+        data = fobj.getvalue() if hasattr(fobj, "getvalue") else fobj.read()
+    except Exception:
+        data = b""
+    # Reset again so future reads work
+    try:
+        fobj.seek(0)
+    except Exception:
+        pass
+    return data or b""
+
+
+def _read_uploaded_header_cols(fobj) -> List[str]:
+    data = _uploaded_bytes(fobj)
+    if not data or (not data.strip()):
+        return []
+    try:
+        df0 = pd.read_csv(io.BytesIO(data), nrows=0, sep=None, engine="python")
+        return [str(c).strip() for c in df0.columns.tolist()]
+    except Exception:
+        try:
+            df0 = pd.read_csv(io.BytesIO(data), nrows=0)
+            return [str(c).strip() for c in df0.columns.tolist()]
+        except Exception:
+            return []
+
+
+def _safe_read_uploaded_csv(fobj) -> pd.DataFrame:
+    """Read UploadedFile without crashing when it was already consumed."""
+    data = _uploaded_bytes(fobj)
+    if not data or (not data.strip()):
+        return pd.DataFrame()
+    # Try robust auto-sep first
+    try:
+        return pd.read_csv(io.BytesIO(data), sep=None, engine="python", on_bad_lines="skip")
+    except Exception:
+        try:
+            return pd.read_csv(io.BytesIO(data))
+        except Exception:
+            return pd.DataFrame()
 
 # =====================================================
 # HELPERS — filtering which CSV are TEAM CSVs
@@ -265,7 +316,7 @@ def render(ctx: Dict):
                     cols = _read_csv_header_cols(os.path.join(DATA_DIR, fname))
                 else:
                     fobj = next((f for f in uploaded_files if f.name == fname), None)
-                    cols = list(pd.read_csv(fobj, nrows=0).columns) if fobj is not None else []
+                    cols = _read_uploaded_header_cols(fobj) if fobj is not None else []
                 head = ", ".join([str(c) for c in cols[:10]]) + ("..." if len(cols) > 10 else "")
                 st.caption("Colonnes: " + head)
 
@@ -284,7 +335,7 @@ def render(ctx: Dict):
                     if fobj is None:
                         st.error(f"Fichier manquant en upload: {fname}")
                         return
-                    df = pd.read_csv(fobj)
+                    df = _safe_read_uploaded_csv(fobj)
 
                 try:
                     df_n = normalize_team_import_df(df, equipe)
@@ -310,7 +361,7 @@ def render(ctx: Dict):
                     if fobj is None:
                         st.error(f"Fichier manquant en upload: {fname}")
                         return
-                    df = pd.read_csv(fobj)
+                    df = _safe_read_uploaded_csv(fobj)
 
                 try:
                     df_n = normalize_team_import_df(df, equipe)
