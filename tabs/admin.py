@@ -30,6 +30,20 @@ import streamlit as st
 
 ADMIN_VERSION = "ADMIN_PANEL_V5_NO_STATUS_2026-01-27"
 
+# ============================================================
+# OAuth UI (stub)
+# - v6 inline-only: aucune dépendance Google/Drive chargée.
+# - On conserve l'expander/section sans casser l'app.
+# ============================================================
+def _oauth_ui(*args, **kwargs):
+    """UI OAuth (désactivée en v6). Retourne un dict compatible si utilisé."""
+    try:
+        import streamlit as st
+        st.warning("Drive OAuth désactivé dans cette version (v6 inline-only). Utilise l'import local (fallback).")
+    except Exception:
+        pass
+    return {"drive_ok": False, "folder_id": "", "reason": "oauth_disabled_v6"}
+
 import pathlib
 import time
 import shutil
