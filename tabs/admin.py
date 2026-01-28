@@ -2494,3 +2494,4 @@ def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
     return (df, stats)
 
 
+
