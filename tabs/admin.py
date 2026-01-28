@@ -251,6 +251,27 @@ def render_drive_oauth_connect_ui() -> None:
 # CONFIG
 # ============================================================
 PLAYERS_DB_FILENAME = "hockey.players.csv"
+def resolve_players_db_path(data_dir: str) -> str:
+    """Trouve hockey.players.csv avec fallbacks robustes (data vs Data vs chemins absolus)."""
+    dd = str(data_dir or "").strip() or "data"
+    candidates = [
+        os.path.join(dd, PLAYERS_DB_FILENAME),
+        os.path.join("data", PLAYERS_DB_FILENAME),
+        os.path.join("Data", PLAYERS_DB_FILENAME),
+        PLAYERS_DB_FILENAME,
+        os.path.join("/mount/src/poolhockeypms/data", PLAYERS_DB_FILENAME),
+        os.path.join("/mount/src/poolhockeypms/Data", PLAYERS_DB_FILENAME),
+        os.path.join("/mount/src/poolhockey/data", PLAYERS_DB_FILENAME),
+        os.path.join("/mount/src/poolhockey/Data", PLAYERS_DB_FILENAME),
+    ]
+    for p in candidates:
+        try:
+            if p and os.path.exists(p) and os.path.isfile(p):
+                return p
+        except Exception:
+            continue
+    return os.path.join(dd, PLAYERS_DB_FILENAME)
+
 EQUIPES_COLUMNS = [
     "Propriétaire", "Joueur", "Pos", "Equipe", "Salaire", "Level", "Statut", "Slot", "IR Date"
 ]
@@ -449,6 +470,58 @@ def build_players_index(players: pd.DataFrame) -> dict:
             "Level": _norm_level(r.get(lvl_c, "0")) if lvl_c else "0",
         }
     return idx
+
+
+def bootstrap_players_db_from_master(data_dir: str) -> Tuple[bool, str]:
+    """Crée hockey.players.csv à partir de players_master.csv (bootstrap Players DB).
+    Utile quand hockey.players.csv est manquant mais players_master.csv existe déjà.
+    """
+    dd = str(data_dir or "").strip() or "data"
+    master_path = os.path.join(dd, "players_master.csv")
+    out_path = os.path.join(dd, PLAYERS_DB_FILENAME)
+
+    if not os.path.exists(master_path):
+        return False, "players_master.csv introuvable."
+    try:
+        m = pd.read_csv(master_path, low_memory=False, dtype=str, engine="python", on_bad_lines="skip")
+    except Exception as e:
+        return False, f"Lecture master impossible: {e}"
+    if m is None or m.empty:
+        return False, "players_master.csv est vide."
+
+    df = pd.DataFrame()
+    df["Joueur"] = (m["player"] if "player" in m.columns else (m["Player"] if "Player" in m.columns else (m["Name"] if "Name" in m.columns else ""))).astype(str)
+
+    df["Equipe"] = (m["team"] if "team" in m.columns else (m["Team"] if "Team" in m.columns else "")).astype(str)
+    df["Pos"] = (m["position"] if "position" in m.columns else (m["Pos"] if "Pos" in m.columns else (m["Position"] if "Position" in m.columns else ""))).astype(str)
+
+    if "cap_hit" in m.columns:
+        df["Cap Hit"] = m["cap_hit"].astype(str)
+    elif "Cap Hit" in m.columns:
+        df["Cap Hit"] = m["Cap Hit"].astype(str)
+    else:
+        df["Cap Hit"] = ""
+
+    if "level" in m.columns:
+        df["Level"] = m["level"].astype(str)
+    elif "Level" in m.columns:
+        df["Level"] = m["Level"].astype(str)
+    else:
+        df["Level"] = "0"
+
+    if "nhl_id" in m.columns:
+        df["NHL_ID"] = m["nhl_id"].astype(str)
+    elif "NHL_ID" in m.columns:
+        df["NHL_ID"] = m["NHL_ID"].astype(str)
+    else:
+        df["NHL_ID"] = ""
+
+    df["Level"] = df["Level"].apply(_norm_level)
+
+    os.makedirs(dd, exist_ok=True)
+    df.to_csv(out_path, index=False)
+    return True, f"Créé: {out_path} ({len(df)} lignes)"
+
 
 
 # ============================================================
@@ -1147,7 +1220,7 @@ def render_bulk_nhl_id_admin(DATA_DIR: str, season_lbl: str, is_admin: bool) -> 
         st.warning("Accès admin requis.")
         return
 
-    players_path = os.path.join(DATA_DIR, PLAYERS_DB_FILENAME)
+    players_path = resolve_players_db_path(DATA_DIR)
     if not os.path.exists(players_path):
         st.error(f"Fichier introuvable: {players_path}")
         return
@@ -1155,6 +1228,17 @@ def render_bulk_nhl_id_admin(DATA_DIR: str, season_lbl: str, is_admin: bool) -> 
     df = load_players_db(players_path)
     if df is None or df.empty:
         st.warning("Players DB vide.")
+        st.caption(f"Chemin détecté: `{players_path}` (size={os.path.getsize(players_path) if os.path.exists(players_path) else 'NA'})")
+        pm = os.path.join(DATA_DIR, "players_master.csv")
+        if os.path.exists(pm):
+            st.info("`players_master.csv` existe. Tu peux générer une Players DB minimale pour débloquer l’outil NHL_ID.")
+            if st.button("🧱 Créer hockey.players.csv depuis players_master.csv", use_container_width=True, key="adm_bootstrap_players_db"):
+                okb, msgb = bootstrap_players_db_from_master(DATA_DIR)
+                if okb:
+                    st.success(msgb)
+                    st.rerun()
+                else:
+                    st.error(msgb)
         return
 
     if "__rowid" not in df.columns:
@@ -1802,12 +1886,13 @@ def render(ctx: dict) -> None:
             _render_caps_bars(df_eq, int(st.session_state["CAP_GC"]), int(st.session_state["CAP_CE"]))
 
     # ---- Players DB index
-    players_db = load_players_db(os.path.join(DATA_DIR, PLAYERS_DB_FILENAME))
+    players_db = load_players_db(resolve_players_db_path(DATA_DIR))
     players_idx = build_players_index(players_db)
     if players_idx:
         st.success(f"Players DB détectée: {PLAYERS_DB_FILENAME} (Level auto + infos).")
     else:
         st.warning(f"{PLAYERS_DB_FILENAME} indisponible — fallback Level par Salaire.")
+        st.caption(f"Chemin recherché: `{resolve_players_db_path(DATA_DIR)}` (exists={os.path.exists(resolve_players_db_path(DATA_DIR))})")
 
     # ---- Load équipes
     df = load_equipes(e_path)
