@@ -439,12 +439,70 @@ def save_equipes(df: pd.DataFrame, path: str) -> None:
 
 @st.cache_data(show_spinner=False)
 def load_players_db(path: str) -> pd.DataFrame:
+    """Charge hockey.players.csv de façon robuste.
+
+    - Auto-détecte le delimiter (',' / ';' / '	') via sep=None
+    - Tolère les lignes brisées (on_bad_lines='skip')
+    - Garde tout en str pour éviter les DtypeWarning
+
+    Stocke les infos de lecture dans st.session_state['players_db_load_info'].
+    """
+    info = {
+        'path': path,
+        'exists': bool(path and os.path.exists(path)),
+        'size': os.path.getsize(path) if path and os.path.exists(path) else 0,
+        'error': '',
+        'rows': 0,
+        'cols': [],
+        'delimiter': None,
+    }
+    st.session_state['players_db_load_info'] = info
+
     if not path or not os.path.exists(path):
         return pd.DataFrame()
+
+    # Petit aperçu brut (pour diagnostiquer fichiers bizarres)
     try:
-        return pd.read_csv(path, low_memory=False, dtype=str, engine="python", on_bad_lines="skip")
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            raw = ''.join([next(f) for _ in range(5)])
+        info['raw_head'] = raw
     except Exception:
-        return pd.DataFrame()
+        info['raw_head'] = ''
+
+    # Stratégies de lecture
+    read_attempts = [
+        dict(sep=None, engine='python', encoding='utf-8'),
+        dict(sep=None, engine='python', encoding='utf-8-sig'),
+        dict(sep=';', engine='python', encoding='utf-8'),
+        dict(sep=',', engine='python', encoding='utf-8'),
+        dict(sep=None, engine='python', encoding='latin1'),
+    ]
+
+    last_err = None
+    for kw in read_attempts:
+        try:
+            df = pd.read_csv(
+                path,
+                low_memory=False,
+                dtype=str,
+                on_bad_lines='skip',
+                **kw,
+            )
+            # df peut être vide si fichier contient juste headers
+            info['rows'] = int(len(df))
+            info['cols'] = list(df.columns)
+            info['delimiter'] = kw.get('sep', None)
+            info['error'] = ''
+            st.session_state['players_db_load_info'] = info
+            return df
+        except Exception as e:
+            last_err = e
+            continue
+
+    info['error'] = str(last_err) if last_err else 'Unknown error'
+    st.session_state['players_db_load_info'] = info
+    return pd.DataFrame()
+
 
 def build_players_index(players: pd.DataFrame) -> dict:
     if players is None or players.empty:
@@ -1228,6 +1286,18 @@ def render_bulk_nhl_id_admin(DATA_DIR: str, season_lbl: str, is_admin: bool) -> 
     df = load_players_db(players_path)
     if df is None or df.empty:
         st.warning("Players DB vide.")
+        info = st.session_state.get('players_db_load_info') or {}
+        if info.get('error'):
+            st.error(f"Lecture CSV impossible: {info.get('error')}")
+        # Toujours montrer un mini diagnostic
+        st.caption(
+            f"Chemin détecté: `{players_path}` | exists={info.get('exists')} | size={info.get('size')} | rows={info.get('rows')} | cols={len(info.get('cols') or [])}"
+        )
+        with st.expander("🔎 Diagnostic hockey.players.csv (aperçu brut + colonnes)", expanded=False):
+            if info.get('raw_head'):
+                st.code(info.get('raw_head'), language="text")
+            st.write({k: info.get(k) for k in ['delimiter','rows','cols','error']})
+
         st.caption(f"Chemin détecté: `{players_path}` (size={os.path.getsize(players_path) if os.path.exists(players_path) else 'NA'})")
         pm = os.path.join(DATA_DIR, "players_master.csv")
         if os.path.exists(pm):
