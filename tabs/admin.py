@@ -2235,3 +2235,4 @@ def build_players_index(players_db: "pd.DataFrame") -> dict:
             idx[k] = {name_col: n}
     return idx
 
+
