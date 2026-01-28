@@ -37,7 +37,6 @@ def infer_owner_from_filename(filename: str, owners_choices: list) -> str:
 # ✅ Alertes IR mismatch + Salary/Level suspect + preview colorée
 # ============================================================
 
-from __future__ import annotations
 
 import io
 import os
