@@ -2585,4 +2585,4 @@ def render(ctx: dict) -> None:
 
                 st.error(f"Erreur fusion master: {e}")
 
-    st.caption("✅ Admin: OAuth Drive / Import local • Add/Remove/Move • Caps bars • Log • QC/Level auto")d
+    st.caption("✅ Admin: OAuth Drive / Import local • Add/Remove/Move • Caps bars • Log • QC/Level auto")
