@@ -32,9 +32,13 @@ import streamlit as st
 # ============================================================
 # Valeurs par défaut si settings/csv non disponibles.
 # NHL cap ~ 88M (2025-2026 approximatif). Ajuste au besoin.
+
+# ============================================================
+# Constantes
+# ============================================================
 DEFAULT_CAP_GC = 88_000_000
 DEFAULT_CAP_CE = 10_000_000
-
+PLAYERS_DB_FILENAME = "hockey.players.csv"
 
 ADMIN_VERSION = "ADMIN_PANEL_V5_NO_STATUS_2026-01-27"
 
@@ -1253,6 +1257,102 @@ def build_players_master(
             "team_csvs": team_csvs,
             "issues": issues,
         }
+
+def admin_log_path(data_dir: str, season_lbl: str) -> str:
+    season_lbl = str(season_lbl or "").strip() or "season"
+    return os.path.join(str(data_dir), f"admin_log_{season_lbl}.csv")
+
+def resolve_players_db_path(data_dir: str) -> str:
+    dd = str(data_dir or "").strip() or "data"
+    candidates = [
+        os.path.join(dd, PLAYERS_DB_FILENAME),
+        os.path.join(dd, "Hockey.Players.csv"),
+        os.path.join("data", PLAYERS_DB_FILENAME),
+        os.path.join("Data", PLAYERS_DB_FILENAME),
+    ]
+    for p in candidates:
+        try:
+            if p and os.path.exists(p) and os.path.getsize(p) > 0:
+                return p
+        except Exception:
+            continue
+    return candidates[0]
+
+def load_players_db(path: str) -> "pd.DataFrame":
+    try:
+        if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+    last_err = None
+    for enc in ("utf-8-sig", "utf-8", "latin1"):
+        try:
+            df = pd.read_csv(path, sep=None, engine="python", on_bad_lines="skip", encoding=enc)
+            if isinstance(df, pd.DataFrame):
+                return df
+        except Exception as e:
+            last_err = e
+            continue
+    try:
+        st.warning(f"⚠️ Lecture Players DB impossible: {last_err}")
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+def build_players_index(players_db: "pd.DataFrame") -> dict:
+    idx = {}
+    if players_db is None or (hasattr(players_db, "empty") and players_db.empty):
+        return idx
+    name_col = None
+    for c in ["Player","Joueur","Nom","Name","Full Name","full_name"]:
+        if c in players_db.columns:
+            name_col = c
+            break
+    if name_col is None:
+        return idx
+    for _, row in players_db.iterrows():
+        k = _norm_player_key(row.get(name_col, ""))
+        if not k or k in idx:
+            continue
+        try:
+            idx[k] = row.to_dict()
+        except Exception:
+            idx[k] = {name_col: row.get(name_col, "")}
+    return idx
+
+def load_equipes(path: str) -> "pd.DataFrame":
+    try:
+        if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+    last_err = None
+    for enc in ("utf-8-sig","utf-8","latin1"):
+        try:
+            df = pd.read_csv(path, sep=None, engine="python", on_bad_lines="skip", encoding=enc)
+            if isinstance(df, pd.DataFrame):
+                return df
+        except Exception as e:
+            last_err = e
+            continue
+    try:
+        st.warning(f"⚠️ Lecture équipes impossible: {last_err}")
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+def save_equipes(df: "pd.DataFrame", path: str) -> bool:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except Exception:
+        pass
+    try:
+        (df if df is not None else pd.DataFrame()).to_csv(path, index=False, encoding="utf-8-sig")
+        return True
+    except Exception:
+        return False
+
+
 def render(ctx: dict) -> None:
     # --- Admin guard (source unique: ctx['is_admin'] défini dans app.py)
     is_admin = bool(ctx.get("is_admin"))
@@ -2234,5 +2334,3 @@ def build_players_index(players_db: "pd.DataFrame") -> dict:
             # fallback minimal
             idx[k] = {name_col: n}
     return idx
-
-
