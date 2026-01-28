@@ -2434,6 +2434,7 @@ def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
         "missing_team": 0,
         "missing_salary": 0,
         "duplicates_player": 0,
+        "level_autofilled": 0,
     }
 
     if df is None or (hasattr(df, "empty") and df.empty):
@@ -2483,8 +2484,11 @@ def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
         keys = set(players_idx.keys())
         stats["missing_player_match"] = int((~norm.isin(keys)).sum())
 
+    # Level autofilled (approx): nombre de lignes avec Level non vide
+if "Level" in df.columns:
+    stats["level_autofilled"] = int((df["Level"].astype(str).str.strip() != "").sum())
+
     stats["rows_out"] = int(len(df))
     stats["rows"] = int(len(df))
     stats["cols"] = int(getattr(df, "shape", (0, 0))[1])
     return (df, stats)
-
