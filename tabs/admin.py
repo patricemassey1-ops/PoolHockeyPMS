@@ -2203,3 +2203,35 @@ def save_equipes(df: "pd.DataFrame", path: str) -> bool:
         return True
     except Exception:
         return False
+
+# ============================================================
+# Players DB — index pour lookup rapide
+# ============================================================
+def build_players_index(players_db: "pd.DataFrame") -> dict:
+    """Construit un index {norm_name: row_dict} pour la Players DB."""
+    idx = {}
+    if players_db is None or (hasattr(players_db, "empty") and players_db.empty):
+        return idx
+
+    # colonnes candidates pour le nom
+    name_col = None
+    for c in ["Player", "Joueur", "Nom", "Name", "Full Name", "full_name"]:
+        if c in players_db.columns:
+            name_col = c
+            break
+    if name_col is None:
+        return idx
+
+    # On garde la première occurrence
+    for _, row in players_db.iterrows():
+        n = row.get(name_col, "")
+        k = _norm_player_key(n)
+        if not k or k in idx:
+            continue
+        try:
+            idx[k] = row.to_dict()
+        except Exception:
+            # fallback minimal
+            idx[k] = {name_col: n}
+    return idx
+
