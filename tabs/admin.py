@@ -1,6 +1,6 @@
 # tabs/admin.py
 # =====================================================
-# ADMIN — Import équipes (v7 — filtrage auto des CSV non-équipes)
+# ADMIN — Import équipes (v7b — FIX: pas d'expander imbriqué)
 # =====================================================
 
 from __future__ import annotations
@@ -101,10 +101,7 @@ def _looks_like_team_csv_by_header(path: str) -> bool:
 
 
 def list_team_csv_files_from_data_dir() -> Tuple[List[str], List[str]]:
-    """
-    Returns (team_files, ignored_files) as filenames (not full paths).
-    Uses both filename patterns and header sniffing to avoid false positives.
-    """
+    """Returns (team_files, ignored_files) as filenames (not full paths)."""
     if not os.path.isdir(DATA_DIR):
         return ([], [])
     all_csv = [f for f in os.listdir(DATA_DIR) if f.lower().endswith(".csv")]
@@ -132,7 +129,6 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    # map common variants -> canonical
     rename_map = {
         "PlayerName": "Player",
         "Name": "Player",
@@ -150,7 +146,6 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[dst] = df[src]
 
     if "Player" not in df.columns:
-        # try any column that matches aliases
         for c in df.columns:
             if str(c).strip().lower() in _TEAM_PLAYER_COLS:
                 df["Player"] = df[c]
@@ -230,10 +225,14 @@ def render(ctx: Dict):
 
         if use_existing:
             data_files, ignored_files = list_team_csv_files_from_data_dir()
+
+            # ✅ FIX Streamlit: pas d'expander imbriqué
             if ignored_files:
-                with st.expander("📎 Fichiers ignorés (non-équipes)", expanded=False):
-                    st.caption("Ces fichiers sont détectés comme système/DB/output et ne seront pas importés comme équipes.")
+                show_ignored = st.checkbox("Afficher les fichiers ignorés (non-équipes)", value=False)
+                if show_ignored:
+                    st.caption("Détectés comme système/DB/output ou sans colonne Player/Joueur/Name.")
                     st.write(ignored_files)
+
         else:
             uploaded_files = st.file_uploader(
                 "Uploader des CSV (1 par équipe)",
@@ -262,13 +261,13 @@ def render(ctx: Dict):
                     label_visibility="collapsed",
                 )
             with col3:
-                # preview header only to reassure user
                 if use_existing:
                     cols = _read_csv_header_cols(os.path.join(DATA_DIR, fname))
                 else:
                     fobj = next((f for f in uploaded_files if f.name == fname), None)
                     cols = list(pd.read_csv(fobj, nrows=0).columns) if fobj is not None else []
-                st.caption("Colonnes: " + (", ".join([str(c) for c in cols[:10]]) + ("..." if len(cols) > 10 else "")))
+                head = ", ".join([str(c) for c in cols[:10]]) + ("..." if len(cols) > 10 else "")
+                st.caption("Colonnes: " + head)
 
         # -------------------------------
         # Dry-run
