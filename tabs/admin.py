@@ -2412,3 +2412,68 @@ def auto_slot_for_statut(statut: str) -> str:
     # Actif
     return "Actif"
 
+
+# ============================================================
+# Quality check (QC) — après import
+# ============================================================
+def apply_quality(df: "pd.DataFrame", players_idx: dict) -> tuple:
+    """Applique un QC léger sur un DF d'équipe importé.
+    - Normalise quelques champs (Pos/Equipe)
+    - Ajoute colonnes manquantes du schéma EQUIPES_COLUMNS
+    - Calcule des stats QC (counts)
+    Retourne: (df_qc, stats_dict)
+    """
+    stats = {
+        "rows_in": 0,
+        "rows_out": 0,
+        "missing_player_match": 0,
+        "missing_pos": 0,
+        "missing_team": 0,
+        "missing_salary": 0,
+        "duplicates_player": 0,
+    }
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return (pd.DataFrame(), stats)
+
+    df = df.copy()
+    stats["rows_in"] = len(df)
+
+    # Ensure required columns exist
+    try:
+        schema = list(EQUIPES_COLUMNS)
+    except Exception:
+        schema = []
+    for c in schema:
+        if c not in df.columns:
+            df[c] = ""
+
+    # Basic cleanup
+    if "Joueur" in df.columns:
+        df["Joueur"] = df["Joueur"].astype(str).str.strip()
+    if "Pos" in df.columns:
+        df["Pos"] = df["Pos"].astype(str).str.upper().str.strip()
+    if "Equipe" in df.columns:
+        df["Equipe"] = df["Equipe"].astype(str).str.upper().str.strip()
+
+    # Count missing
+    if "Pos" in df.columns:
+        stats["missing_pos"] = int((df["Pos"].astype(str).str.strip() == "").sum())
+    if "Equipe" in df.columns:
+        stats["missing_team"] = int((df["Equipe"].astype(str).str.strip() == "").sum())
+    if "Salaire" in df.columns:
+        s = df["Salaire"].astype(str).str.strip()
+        stats["missing_salary"] = int((s == "").sum())
+
+    # Duplicate players within team file
+    if "Joueur" in df.columns:
+        norm = df["Joueur"].map(_norm_player_key)
+        stats["duplicates_player"] = int(norm.duplicated().sum())
+
+    # Players DB match (soft)
+    if players_idx and "Joueur" in df.columns:
+        norm = df["Joueur"].map(_norm_player_key)
+        stats["missing_player_match"] = int((~norm.isin(set(players_idx.keys()))).sum())
+
+    stats["rows_out"] = len(df)
+    return (df, stats)
+
