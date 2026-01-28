@@ -40,6 +40,25 @@ DEFAULT_CAP_GC = 88_000_000
 DEFAULT_CAP_CE = 10_000_000
 PLAYERS_DB_FILENAME = "hockey.players.csv"
 
+# ============================================================
+# Schéma attendu — équipes (alignements)
+# ============================================================
+# NB: certaines colonnes peuvent être absentes dans les CSV importés;
+# on les crée au besoin dans normalize_team_import_df().
+EQUIPES_COLUMNS = [
+    "Proprietaire",   # équipe/owner (pool)
+    "Joueur",
+    "Pos",
+    "Equipe",
+    "Slot",           # Actif / Banc / IR / Mineur
+    "Salaire",
+    "Level",          # STD / ELC
+    "NHL_ID",
+    "FantraxID",
+    "IR_Date",
+]
+
+
 ADMIN_VERSION = "ADMIN_PANEL_V5_NO_STATUS_2026-01-27"
 
 # ============================================================
