@@ -36,6 +36,14 @@ import shutil
 
 
 # ============================================================
+# Paths — fichiers locaux (source de vérité / rosters)
+# ============================================================
+def equipes_path(data_dir: str, season_lbl: str) -> str:
+    """Chemin du fichier fusionné des équipes (alignements) pour une saison."""
+    season_lbl = str(season_lbl or "").strip() or "season"
+    return os.path.join(str(data_dir), f"equipes_joueurs_{season_lbl}.csv")
+
+# ============================================================
 # Helpers — robust CSV / name normalization (required by Fusion)
 # ============================================================
 import unicodedata
