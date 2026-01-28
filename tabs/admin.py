@@ -1,3 +1,26 @@
+
+# ============================================================
+# Import helpers — déduction équipe depuis nom de fichier
+# ============================================================
+def infer_owner_from_filename(filename: str, owners_choices: list) -> str:
+    """Tente de déduire le propriétaire/équipe à partir du nom de fichier (Whalers.csv -> Whalers).
+    Retourne "" si non trouvé.
+    """
+    base = os.path.basename(str(filename or ""))
+    name = os.path.splitext(base)[0]
+    key = _norm_player_key(name)  # reuse normalizer
+    if not owners_choices:
+        return name.strip()
+    # map normalized -> original
+    m = { _norm_player_key(o): o for o in owners_choices if str(o).strip() }
+    if key in m:
+        return m[key]
+    # fuzzy: contains
+    for nk, orig in m.items():
+        if nk and (nk in key or key in nk):
+            return orig
+    return ""
+
 # tabs/admin.py
 # ============================================================
 # PMS Pool Hockey — Admin Tab (Streamlit)
