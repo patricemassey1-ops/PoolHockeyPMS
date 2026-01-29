@@ -87,6 +87,19 @@ def _is_missing_id(v: Any) -> bool:
     return False
 
 
+def _resolve_nhl_id_col(df: pd.DataFrame) -> str:
+    """Return the best NHL id column name present in df, otherwise create 'NHL_ID'."""
+    candidates = [
+        "NHL_ID", "nhl_id", "NHLId", "nhlId", "playerId", "player_id",
+        "nhl_player_id", "NHLPlayerId", "NHL_PLAYER_ID",
+    ]
+    for c in candidates:
+        if c in df.columns:
+            return c
+    df["NHL_ID"] = ""
+    return "NHL_ID"
+
+
 def _data_path(data_dir: str, fname: str) -> str:
     return os.path.join(str(data_dir or "data"), fname)
 
@@ -369,19 +382,18 @@ def sync_level(players_path: str, puck_path: str) -> Dict[str, Any]:
 
 
 def audit_nhl_ids(df: pd.DataFrame) -> Dict[str, Any]:
-    if "NHL_ID" not in df.columns:
-        return {"total": len(df), "filled": 0, "missing": len(df), "missing_pct": 100.0, "duplicates": 0}
+    id_col = _resolve_nhl_id_col(df)
 
-    missing_mask = df["NHL_ID"].apply(_is_missing_id)
+    missing_mask = df[id_col].apply(_is_missing_id)
     missing = int(missing_mask.sum())
     total = int(len(df))
     filled = total - missing
     pct = (missing / total * 100.0) if total else 0.0
 
-    ids = df.loc[~missing_mask, "NHL_ID"].astype(str).str.strip()
+    ids = df.loc[~missing_mask, id_col].astype(str).str.strip()
     dup_count = int(ids.duplicated().sum())
 
-    return {"total": total, "filled": filled, "missing": missing, "missing_pct": pct, "duplicates": dup_count}
+    return {"total": total, "filled": filled, "missing": missing, "missing_pct": pct, "duplicates": dup_count, "id_col": id_col}
 
 
 def _nhl_search_player_id(name: str, session, timeout: int = 10) -> int | None:
@@ -416,10 +428,9 @@ def sync_nhl_id(players_path: str, limit: int = 250, dry_run: bool = False) -> D
     if "Player" not in df.columns:
         return {"ok": False, "error": "Colonne 'Player' introuvable", "players_cols": list(df.columns)}
 
-    if "NHL_ID" not in df.columns:
-        df["NHL_ID"] = ""
+    id_col = _resolve_nhl_id_col(df)
 
-    missing_mask = df["NHL_ID"].apply(_is_missing_id)
+    missing_mask = df[id_col].apply(_is_missing_id)
     targets = df[missing_mask].head(int(limit))
     total = int(len(targets))
     if total == 0:
@@ -450,7 +461,7 @@ def sync_nhl_id(players_path: str, limit: int = 250, dry_run: bool = False) -> D
         if pid:
             added += 1
             if not dry_run:
-                df.at[idx, "NHL_ID"] = pid
+                df.at[idx, id_col] = pid
 
         time.sleep(0.05)
 
@@ -815,17 +826,15 @@ def render_tools(data_dir: str, season: str) -> None:
         dry = st.checkbox("Dry-run (ne sauvegarde pas)", value=False)
 
         if st.button("🔎 Vérifier l'état des NHL_ID"):
+            st.caption("Note: si tes IDs sont dans une autre colonne (ex: nhl_id), l’audit l’utilise automatiquement — il ne doit plus te retomber à 100%.")
             df, err = load_csv(players2)
             if err:
                 st.error(err)
             else:
-                if "NHL_ID" not in df.columns:
-                    df["NHL_ID"] = ""
-
                 a = audit_nhl_ids(df)
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Total joueurs", a["total"])
-                c2.metric("Avec NHL_ID", a["filled"])
+                c2.metric(f"Avec ID ({a.get('id_col','NHL_ID')})", a["filled"])
                 c3.metric("Manquants", a["missing"])
                 c4.metric("% manquants", f"{a['missing_pct']:.1f}%")
 
@@ -843,7 +852,8 @@ def render_tools(data_dir: str, season: str) -> None:
                         use_container_width=True,
                     )
                 with ex2:
-                    missing_df = df[df["NHL_ID"].apply(_is_missing_id)].copy()
+                    id_col = a.get('id_col') or _resolve_nhl_id_col(df)
+                    missing_df = df[df[id_col].apply(_is_missing_id)].copy()
                     st.download_button(
                         "⬇️ Exporter la liste des manquants (CSV)",
                         data=missing_df.to_csv(index=False).encode("utf-8"),
