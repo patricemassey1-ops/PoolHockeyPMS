@@ -188,43 +188,13 @@ def detect_name_col(df: pd.DataFrame) -> str | None:
 
 
 def sync_level(players_path: str, puck_path: str) -> Dict[str, Any]:
-    if not os.path.exists(players_path) or not os.path.exists(puck_path):
-        missing = []
+    missing: list[str] = []
     if not os.path.exists(players_path):
         missing.append(players_path)
     if not os.path.exists(puck_path):
         missing.append(puck_path)
-    return {"ok": False, "error": "Fichier introuvable.", "missing": missing}
-
-    pdb = pd.read_csv(players_path)
-    pk = pd.read_csv(puck_path)
-
-    name_pk = detect_name_col(pk)
-    name_pdb = detect_name_col(pdb)
-
-    if not name_pk or not name_pdb:
-        return {"ok": False, "error": "Colonne du nom joueur introuvable.", "players_cols": list(pdb.columns), "puck_cols": list(pk.columns)}
-
-    if "Level" not in pdb.columns:
-        pdb["Level"] = ""
-
-    mp = {}
-    for _, r in pk.iterrows():
-        nm = str(r[name_pk]).strip().lower()
-        lv = str(r.get("Level","")).upper()
-        if lv in ("ELC","STD"):
-            mp[nm] = lv
-
-    updated = 0
-    for i, r in pdb.iterrows():
-        nm = str(r[name_pdb]).strip().lower()
-        if nm in mp and pdb.at[i,"Level"] != mp[nm]:
-            pdb.at[i,"Level"] = mp[nm]
-            updated += 1
-
-    pdb.to_csv(players_path, index=False)
-    return {"ok": True, "updated": updated}
-
+    if missing:
+        return {"ok": False, "error": "Fichier introuvable.", "missing": missing}
 
 def fill_nhl_ids(players_path: str, limit: int, show_progress: bool = True) -> Dict[str, Any]:
     import requests
