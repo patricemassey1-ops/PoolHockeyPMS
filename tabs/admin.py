@@ -381,5 +381,3 @@ def render(ctx: Dict):
 
             st.success(f"✅ Import terminé — {len(df_out)} lignes écrites → `{equipes_path}`")
             st.experimental_rerun()
-
-
