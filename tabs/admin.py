@@ -6,6 +6,7 @@ import io
 import glob
 import zipfile
 import datetime as _dt
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Optional
 
 import streamlit as st
@@ -155,7 +156,7 @@ def _render_backups(data_dir: str, season_lbl: str) -> None:
             if not files:
                 st.error("Aucun fichier à zipper.")
             else:
-                ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                ts = _dt.datetime.now(ZoneInfo("America/Toronto")).strftime("%Y%m%d_%H%M%S")
                 zip_name = f"backup_{season_lbl.replace('/','-')}_{ts}.zip"
                 zip_bytes = _make_zip_bytes(files, data_dir)
 
