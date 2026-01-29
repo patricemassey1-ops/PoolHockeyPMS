@@ -234,6 +234,22 @@ def render_tools(data_dir: str, season: str) -> None:
         puck = st.text_input("Fichier PuckPedia", os.path.join(data_dir, "PuckPedia2025_26.csv"))
         players = st.text_input("Players DB", os.path.join(data_dir, "hockey.players.csv"))
 
+        colp1, colp2 = st.columns([1,1])
+        with colp1:
+            if st.button("👀 Voir colonnes PuckPedia", key="peek_pk_cols"):
+                try:
+                    pk0 = pd.read_csv(puck, nrows=0)
+                    st.write(list(pk0.columns))
+                except Exception as e:
+                    st.error(f"Lecture PuckPedia échouée: {e}")
+        with colp2:
+            if st.button("👀 Voir colonnes Players DB", key="peek_pdb_cols"):
+                try:
+                    pdb0 = pd.read_csv(players, nrows=0)
+                    st.write(list(pdb0.columns))
+                except Exception as e:
+                    st.error(f"Lecture Players DB échouée: {e}")
+
         if st.button("Synchroniser", use_container_width=False):
             res = sync_level(players, puck)
             if not isinstance(res, dict):
@@ -249,7 +265,7 @@ def render_tools(data_dir: str, season: str) -> None:
                     for p in res["missing"]:
                         st.code(p, language="text")
                 if res.get("players_cols") or res.get("puck_cols"):
-                    with st.expander("🔎 Diagnostic colonnes", expanded=False):
+                    st.markdown("**🔎 Diagnostic colonnes**")
                         if res.get("players_cols"):
                             st.write("Players DB colonnes:")
                             st.write(res["players_cols"])
@@ -274,6 +290,12 @@ def render_tools(data_dir: str, season: str) -> None:
 # ============================================================
 # SYNC FUNCTIONS (safe returns)
 # ============================================================
+
+
+def _norm_player(s: str) -> str:
+    s = str(s or "").strip()
+    s = " ".join(s.split())
+    return s
 def sync_level(players_path: str, puck_path: str) -> Dict[str, Any]:
     players_path = str(players_path or "").strip()
     puck_path = str(puck_path or "").strip()
@@ -292,16 +314,27 @@ def sync_level(players_path: str, puck_path: str) -> Dict[str, Any]:
     except Exception as e:
         return {"ok": False, "error": f"Lecture CSV échouée: {e}"}
 
-    # Based on your screenshots: both use column 'Player'
-    name_pdb = "Player" if "Player" in pdb.columns else None
-    name_pk = "Player" if "Player" in pk.columns else None
+    # Detect name columns (players DB vs PuckPedia)
+    name_pdb = None
+    for c in ["Player", "Joueur", "Name", "Nom", "player_name"]:
+        if c in pdb.columns:
+            name_pdb = c
+            break
+
+    name_pk = None
+    for c in ["Skaters", "Player", "Name", "Joueur", "player_name", "Nom"]:
+        if c in pk.columns:
+            name_pk = c
+            break
 
     if not name_pdb or not name_pk:
         return {
             "ok": False,
-            "error": "Colonne 'Player' introuvable dans un des fichiers.",
+            "error": "Colonne nom joueur introuvable dans un des fichiers.",
             "players_cols": list(pdb.columns),
             "puck_cols": list(pk.columns),
+            "name_players_detected": name_pdb,
+            "name_puck_detected": name_pk,
         }
 
     # Level column in puckpedia appears to be 'Level'
@@ -315,20 +348,23 @@ def sync_level(players_path: str, puck_path: str) -> Dict[str, Any]:
     # build mapping Player -> Level (ELC/STD)
     mp: Dict[str, str] = {}
     for _, r in pk.iterrows():
-        nm = str(r.get(name_pk, "") or "").strip()
+        nm_raw = str(r.get(name_pk, "") or "").strip()
+        nm = _norm_player(nm_raw)
         lv = str(r.get(level_pk, "") or "").strip().upper()
         if nm and lv in ("ELC", "STD"):
             mp[nm] = lv
+            mp[nm_raw] = lv  # also keep raw
 
     if not mp:
         return {"ok": False, "error": "Aucun Level ELC/STD trouvé dans PuckPedia.", "puck_cols": list(pk.columns)}
 
     updated = 0
     for i, r in pdb.iterrows():
-        nm = str(r.get(name_pdb, "") or "").strip()
-        if not nm:
+        nm_raw = str(r.get(name_pdb, "") or "").strip()
+        if not nm_raw:
             continue
-        new_lv = mp.get(nm)
+        nm = _norm_player(nm_raw)
+        new_lv = mp.get(nm) or mp.get(nm_raw)
         if not new_lv:
             continue
         old_lv = str(r.get("Level", "") or "").strip().upper()
