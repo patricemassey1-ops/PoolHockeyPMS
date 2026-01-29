@@ -157,7 +157,7 @@ def render_tools(data_dir: str, season: str) -> None:
     st.markdown("### 🧰 Outils")
 
     with st.expander("🧾 Sync PuckPedia → Level (STD/ELC)", expanded=False):
-        puck = st.text_input("Fichier PuckPedia", os.path.join(data_dir, "puckpedia2025_26.csv"))
+        puck = st.text_input("Fichier PuckPedia", os.path.join(data_dir, "PuckPedia2025_26.csv"))
         players = st.text_input("Players DB", os.path.join(data_dir, "hockey.players.csv"))
         if st.button("Synchroniser"):
             res = sync_level(players, puck)
@@ -170,7 +170,7 @@ def render_tools(data_dir: str, season: str) -> None:
         players = st.text_input("Players DB", os.path.join(data_dir, "hockey.players.csv"), key="nhl_players")
         limit = st.number_input("Max par run", 10, 500, 250)
         if st.button("Associer NHL_ID"):
-            res = fill_nhl_ids(players, int(limit))
+            res = fill_nhl_ids(players, int(limit), show_progress=True)
             if res["ok"]:
                 st.success(f"Ajoutés: {res['added']}")
             else:
@@ -189,7 +189,12 @@ def detect_name_col(df: pd.DataFrame) -> str | None:
 
 def sync_level(players_path: str, puck_path: str) -> Dict[str, Any]:
     if not os.path.exists(players_path) or not os.path.exists(puck_path):
-        return {"ok": False, "error": "Fichier manquant."}
+        missing = []
+    if not os.path.exists(players_path):
+        missing.append(players_path)
+    if not os.path.exists(puck_path):
+        missing.append(puck_path)
+    return {"ok": False, "error": "Fichier introuvable.", "missing": missing}
 
     pdb = pd.read_csv(players_path)
     pk = pd.read_csv(puck_path)
@@ -198,7 +203,7 @@ def sync_level(players_path: str, puck_path: str) -> Dict[str, Any]:
     name_pdb = detect_name_col(pdb)
 
     if not name_pk or not name_pdb:
-        return {"ok": False, "error": "Colonne nom joueur introuvable."}
+        return {"ok": False, "error": "Colonne du nom joueur introuvable.", "players_cols": list(pdb.columns), "puck_cols": list(pk.columns)}
 
     if "Level" not in pdb.columns:
         pdb["Level"] = ""
@@ -221,7 +226,7 @@ def sync_level(players_path: str, puck_path: str) -> Dict[str, Any]:
     return {"ok": True, "updated": updated}
 
 
-def fill_nhl_ids(players_path: str, limit: int) -> Dict[str, Any]:
+def fill_nhl_ids(players_path: str, limit: int, show_progress: bool = True) -> Dict[str, Any]:
     import requests
     if not os.path.exists(players_path):
         return {"ok": False, "error": "Players DB introuvable."}
@@ -235,7 +240,15 @@ def fill_nhl_ids(players_path: str, limit: int) -> Dict[str, Any]:
         return {"ok": False, "error": "Colonne nom introuvable."}
 
     added = 0
-    for i, r in df[df["NHL_ID"].isna() | (df["NHL_ID"]=="")].head(limit).iterrows():
+    targets = df[df["NHL_ID"].isna() | (df["NHL_ID"]=="")].head(limit)
+    total = int(len(targets))
+    prog = st.progress(0) if show_progress else None
+    status = st.empty() if show_progress else None
+
+    for idx_num, (i, r) in enumerate(targets.iterrows(), start=1):
+        if show_progress and total:
+            prog.progress(min(1.0, idx_num/total))
+            status.caption(f"Traitement NHL_ID: {idx_num}/{total} — ajoutés: {added}")
         q = requests.utils.quote(str(r[name_col]))
         url = f"https://search.d3.nhle.com/api/v1/search/player?culture=en-us&limit=5&q={q}"
         try:
@@ -247,4 +260,13 @@ def fill_nhl_ids(players_path: str, limit: int) -> Dict[str, Any]:
             pass
 
     df.to_csv(players_path, index=False)
-    return {"ok": True, "added": added}
+    if show_progress:
+        try:
+            if status is not None:
+                status.caption(f"Terminé ✅ — ajoutés: {added}/{total}")
+            if prog is not None:
+                prog.progress(1.0)
+        except Exception:
+            pass
+    summary = f"Terminé — ajoutés: {added}/{total}"
+    return {"ok": True, "added": added, "summary": summary}
