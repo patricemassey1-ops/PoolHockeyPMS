@@ -77,7 +77,7 @@ def _collect_backup_files(data_dir: str, season_lbl: str) -> List[str]:
         os.path.join(data_dir, "hockey.players.csv"),
         os.path.join(data_dir, "Hockey.Players.csv"),
         os.path.join(data_dir, "players_master.csv"),
-        os.path.join(data_dir, "PuckPedia2025_26.csv"),
+        os.path.join(data_dir, "puckpedia2025_26.csv"),
         os.path.join(data_dir, "settings.csv"),
     ]:
         if os.path.exists(p):
@@ -463,7 +463,7 @@ def _render_misc_tools(data_dir: str, season_lbl: str) -> None:
     with st.expander("🧾 Sync PuckPedia → Level (STD/ELC)", expanded=False):
         puck_path = st.text_input(
             "Fichier PuckPedia",
-            value=os.path.join(data_dir, "PuckPedia2025_26.csv"),
+            value=os.path.join(data_dir, "puckpedia2025_26.csv"),
             key=f"puck_path__{season_lbl}",
         )
         players_path = st.text_input(
@@ -478,6 +478,23 @@ def _render_misc_tools(data_dir: str, season_lbl: str) -> None:
                 st.success(f"✅ Level synchronisé. Modifiés: {res.get('updated',0)}")
             else:
                 st.error(f"❌ {res.get('error')}")
+                cols = res.get("pk_columns") or []
+                if cols:
+                    with st.expander("🧩 Diagnostic PuckPedia — choisir les colonnes", expanded=True):
+                        st.caption("Je n’ai pas trouvé automatiquement la colonne du nom. Sélectionne-la manuellement, puis relance la synchro.")
+                        pk_name = st.selectbox("Colonne NOM joueur (PuckPedia)", options=cols, key=f"pk_name_col__{season_lbl}")
+                        pk_level = st.selectbox("Colonne LEVEL/TYPE (optionnel)", options=["(auto)"] + cols, key=f"pk_level_col__{season_lbl}")
+                        if st.button("✅ Relancer avec colonnes sélectionnées", key=f"retry_level_btn__{season_lbl}", use_container_width=True):
+                            res2 = sync_level_from_puckpedia(
+                                players_path,
+                                puck_path,
+                                pk_name_col=str(pk_name),
+                                pk_level_col=None if pk_level == "(auto)" else str(pk_level),
+                            )
+                            if res2.get("ok"):
+                                st.success(f"✅ Level synchronisé. Modifiés: {res2.get('updated',0)}")
+                            else:
+                                st.error(f"❌ {res2.get('error')}")
 
     # -------------------------
     # 2) NHL ID auto-match (search endpoint)
@@ -504,9 +521,23 @@ def _render_misc_tools(data_dir: str, season_lbl: str) -> None:
     # -------------------------
     # 3) API (placeholder hooks)
     # -------------------------
-    with st.expander("📡 API Pro / Stats — hooks", expanded=False):
-        st.info("Dis-moi exactement quelle API tu veux (Sportradar? NHL? autre) et quel fichier tu veux mettre à jour, et je branche ça ici proprement.")
-        st.caption("Je peux aussi ajouter un cache + checkpoint pour éviter les longs runs.")
+    with st.expander("🏒 API NHL gratuite — enrichir players DB (team/pos/headshot/stats)", expanded=False):
+        st.caption("Utilise l’API publique NHL (sans clé) via `api-web.nhle.com` + recherche `search.d3.nhle.com`.")
+        players_path3 = st.text_input(
+            "Players DB (hockey.players.csv)",
+            value=os.path.join(data_dir, "hockey.players.csv"),
+            key=f"players_path3__{season_lbl}",
+        )
+        limit2 = st.number_input("Max joueurs par run", min_value=10, max_value=500, value=150, step=10, key=f"nhl_enrich_limit__{season_lbl}")
+        dry2 = st.checkbox("Dry-run (ne sauvegarde pas)", value=False, key=f"nhl_enrich_dry__{season_lbl}")
+        if st.button("🔄 Enrichir via NHL API", key=f"nhl_enrich_btn__{season_lbl}", use_container_width=True):
+            res = enrich_players_from_nhl_api(players_path3, max_rows=int(limit2), dry_run=bool(dry2))
+            if res.get("ok"):
+                st.success(f"✅ Enrichi: {res.get('updated',0)} (traités {res.get('processed',0)})")
+                if res.get("missing_id"):
+                    st.warning(f"NHL_ID manquants (exemples): {', '.join(res.get('missing_id')[:10])}")
+            else:
+                st.error(f"❌ {res.get('error')}")
 
 
 
@@ -522,7 +553,7 @@ def _norm_name(s: str) -> str:
     return s
 
 
-def sync_level_from_puckpedia(players_path: str, puckpedia_path: str) -> Dict[str, Any]:
+def sync_level_from_puckpedia(players_path: str, puckpedia_path: str, pk_name_col: str | None = None, pk_level_col: str | None = None) -> Dict[str, Any]:
     """
     Update hockey.players.csv Level using puckpedia file.
     Expected columns in puckpedia: player name + level/contract type indicators.
@@ -546,15 +577,17 @@ def sync_level_from_puckpedia(players_path: str, puckpedia_path: str) -> Dict[st
         return {"ok": False, "error": "CSV vide (players ou puckpedia)."}
 
     # detect name columns
-    name_col_pk = None
-    for c in ["Player", "Name", "Joueur", "player", "name", "joueur"]:
-        if c in pk.columns:
-            name_col_pk = c
-            break
+    if pk_name_col and pk_name_col in pk.columns:
+        name_col_pk = pk_name_col
+    else:
+        name_col_pk = None
+        for c in ["Player", "Name", "Joueur", "player", "name", "joueur", "Player Name", "PLAYER", "Full Name", "full_name", "PlayerName"]:
+            if c in pk.columns:
+                name_col_pk = c
+                break
     if not name_col_pk:
-        return {"ok": False, "error": "Colonne nom joueur introuvable dans PuckPedia."}
-
-    name_col_pdb = None
+        return {"ok": False, "error": "Colonne nom joueur introuvable dans PuckPedia.", "pk_columns": list(pk.columns)}
+name_col_pdb = None
     for c in ["Joueur", "Player", "Name", "player_name", "Nom"]:
         if c in pdb.columns:
             name_col_pdb = c
@@ -563,11 +596,14 @@ def sync_level_from_puckpedia(players_path: str, puckpedia_path: str) -> Dict[st
         return {"ok": False, "error": "Colonne nom joueur introuvable dans players DB."}
 
     # detect level/contract column in puckpedia
-    level_col = None
-    for c in ["Level", "ContractType", "Type", "contract_type", "level"]:
-        if c in pk.columns:
-            level_col = c
-            break
+    if pk_level_col and pk_level_col in pk.columns:
+        level_col = pk_level_col
+    else:
+        level_col = None
+        for c in ["Level", "ContractType", "Type", "contract_type", "level", "LEVEL", "Contract", "Contract Type", "EntryLevel", "Entry Level"]:
+            if c in pk.columns:
+                level_col = c
+                break
 
     # build mapping
     mp: Dict[str, str] = {}
@@ -702,4 +738,102 @@ def fill_missing_nhl_ids(players_path: str, max_rows: int = 250, dry_run: bool =
             return {"ok": False, "error": f"Écriture échouée: {e}"}
 
     return {"ok": True, "processed": processed, "added": added, "dry_run": dry_run}
+
+
+
+def enrich_players_from_nhl_api(players_path: str, max_rows: int = 150, dry_run: bool = False) -> Dict[str, Any]:
+    """
+    Enrich players DB using NHL public endpoints:
+      - Player landing: https://api-web.nhle.com/v1/player/{playerId}/landing  citeturn0search0
+    Requires NHL_ID present in players DB.
+    """
+    import requests
+
+    players_path = str(players_path or "").strip()
+    if not os.path.exists(players_path):
+        return {"ok": False, "error": f"Players DB introuvable: {players_path}"}
+
+    try:
+        df = pd.read_csv(players_path, low_memory=False)
+    except Exception as e:
+        return {"ok": False, "error": f"Lecture players DB échouée: {e}"}
+
+    if df.empty:
+        return {"ok": False, "error": "Players DB vide."}
+
+    # columns
+    name_col = "Joueur" if "Joueur" in df.columns else ("Player" if "Player" in df.columns else None)
+    if not name_col:
+        name_col = "Joueur"
+        df[name_col] = ""
+
+    if "NHL_ID" not in df.columns:
+        df["NHL_ID"] = ""
+
+    # ensure target fields exist
+    for c in ["Team", "Position", "Jersey#", "Country", "Headshot"]:
+        if c not in df.columns:
+            df[c] = ""
+
+    def _is_missing(v):
+        s = str(v or "").strip()
+        return (not s) or s.lower() == "nan" or s == "0"
+
+    # process rows where Team/Position/Headshot missing but NHL_ID exists
+    candidates = df[(~df["NHL_ID"].apply(_is_missing))].copy()
+    processed = 0
+    updated = 0
+    missing_id_names: List[str] = []
+
+    for idx, row in candidates.head(max_rows).iterrows():
+        pid = str(row.get("NHL_ID", "") or "").strip()
+        if not pid.isdigit():
+            missing_id_names.append(str(row.get(name_col, ""))[:50])
+            continue
+
+        url = f"https://api-web.nhle.com/v1/player/{pid}/landing"
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code != 200:
+                continue
+            data = r.json() or {}
+            processed += 1
+
+            # best-effort extraction (keys vary)
+            team = data.get("currentTeamAbbrev") or data.get("currentTeam", {}).get("abbrev") or ""
+            pos = data.get("position") or data.get("positionCode") or ""
+            jersey = data.get("sweaterNumber") or data.get("sweaterNum") or ""
+            country = data.get("birthCountry") or data.get("birth", {}).get("country") or ""
+            headshot = data.get("headshot") or data.get("headshotUrl") or data.get("headshot_url") or ""
+
+            # only update if new info
+            changed = False
+            if team and str(row.get("Team","")).strip() != str(team):
+                df.at[idx, "Team"] = team
+                changed = True
+            if pos and str(row.get("Position","")).strip() != str(pos):
+                df.at[idx, "Position"] = pos
+                changed = True
+            if jersey and str(row.get("Jersey#","")).strip() != str(jersey):
+                df.at[idx, "Jersey#"] = jersey
+                changed = True
+            if country and str(row.get("Country","")).strip() != str(country):
+                df.at[idx, "Country"] = country
+                changed = True
+            if headshot and str(row.get("Headshot","")).strip() != str(headshot):
+                df.at[idx, "Headshot"] = headshot
+                changed = True
+
+            if changed:
+                updated += 1
+        except Exception:
+            continue
+
+    if not dry_run:
+        try:
+            df.to_csv(players_path, index=False)
+        except Exception as e:
+            return {"ok": False, "error": f"Écriture échouée: {e}"}
+
+    return {"ok": True, "processed": processed, "updated": updated, "missing_id": missing_id_names, "dry_run": dry_run}
 
