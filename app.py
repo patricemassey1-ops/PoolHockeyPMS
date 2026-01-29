@@ -16,7 +16,12 @@ import streamlit as st
 # =========================
 # CONFIG
 # =========================
-st.set_page_config(page_title="Pool GM", page_icon="🏒", layout="wide")
+st.set_page_config(
+    page_title="Pool GM",
+    page_icon="🏒",
+    layout="wide",
+    initial_sidebar_state="collapsed",  # ✅ hamburger / sidebar collapsée par défaut (meilleur mobile)
+)
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 DEFAULT_SEASON = "2025-2026"
@@ -43,76 +48,150 @@ TEAM_LOGO = {
 APP_LOGO = os.path.join(DATA_DIR, "gm_logo.png")
 BANNER = os.path.join(DATA_DIR, "logo_pool.png")
 
+ACCENT = "#ff3b4d"  # ✅ rouge comme tes screenshots
+
 
 # =========================
 # THEME (1 seule injection)
 # =========================
-THEME_CSS_DARK = """
+THEME_CSS = f"""
 <style>
-:root { color-scheme: dark; }
-html, body, [data-testid="stAppViewContainer"] {
-  background: #0b0f14 !important;
-  color: #e7eef7 !important;
-}
-.block-container { padding-top: 1.2rem; }
-h1,h2,h3 { letter-spacing: -0.02em; }
-[data-testid="stSidebar"] {
-  background: #0e131a !important;
-  border-right: 1px solid rgba(255,255,255,.06);
-}
-.card {
-  background: rgba(255,255,255,.04);
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 16px;
-  padding: 18px;
-}
-.pill {
-  display:inline-block; padding: 4px 10px; border-radius: 999px;
-  border: 1px solid rgba(255,255,255,.12);
-  background: rgba(255,255,255,.04);
-  font-size: 12px;
-}
-.navbtn button {
-  width: 100% !important;
-  text-align: left !important;
-  border-radius: 12px !important;
-}
-.smallmuted { opacity:.72; font-size: 13px; }
-hr { border-color: rgba(255,255,255,.10); }
-</style>
-"""
+/* ---------------------------------
+   Design system (Dark/Light)
+---------------------------------- */
+:root {{
+  --accent: {ACCENT};
+  --radius: 18px;
+  --border: rgba(15, 23, 42, .12);
+  --shadow: 0 14px 40px rgba(2, 6, 23, .12);
+  --shadow2: 0 10px 30px rgba(2, 6, 23, .10);
 
-THEME_CSS_LIGHT = """
-<style>
-:root { color-scheme: light; }
-html, body, [data-testid="stAppViewContainer"] {
-  background: #f6f7fb !important;
-  color: #0b1020 !important;
-}
-.block-container { padding-top: 1.2rem; }
-[data-testid="stSidebar"] {
-  background: #ffffff !important;
-  border-right: 1px solid rgba(0,0,0,.06);
-}
-.card {
-  background: #ffffff;
-  border: 1px solid rgba(0,0,0,.08);
-  border-radius: 16px;
-  padding: 18px;
-}
-.pill {
-  display:inline-block; padding: 4px 10px; border-radius: 999px;
-  border: 1px solid rgba(0,0,0,.10);
-  background: rgba(0,0,0,.03);
-  font-size: 12px;
-}
-.navbtn button {
-  width: 100% !important;
-  text-align: left !important;
+  --bg: #0b0f14;
+  --panel: rgba(255,255,255,.04);
+  --panel2: rgba(255,255,255,.06);
+  --text: #e7eef7;
+  --muted: rgba(231,238,247,.72);
+  --line: rgba(255,255,255,.10);
+
+  --side-bg: #0e131a;
+  --side-line: rgba(255,255,255,.08);
+  --side-item: transparent;
+  --side-item-hover: rgba(255,255,255,.06);
+  --side-active: color-mix(in srgb, var(--accent) 92%, #ffffff 8%);
+  --side-active-text: #ffffff;
+}}
+
+:root[data-theme="light"] {{
+  --bg: #f6f7fb;
+  --panel: #ffffff;
+  --panel2: rgba(2, 6, 23, .03);
+  --text: #0b1020;
+  --muted: rgba(11,16,32,.68);
+  --line: rgba(2,6,23,.10);
+
+  --side-bg: #ffffff;
+  --side-line: rgba(2,6,23,.08);
+  --side-item: transparent;
+  --side-item-hover: rgba(2,6,23,.04);
+  --side-active: color-mix(in srgb, var(--accent) 88%, #ffffff 12%);
+  --side-active-text: #ffffff;
+}}
+
+html, body, [data-testid="stAppViewContainer"] {{
+  background: var(--bg) !important;
+  color: var(--text) !important;
+}}
+
+.block-container {{
+  padding-top: 1.0rem;
+  padding-bottom: 1.5rem;
+  max-width: 1180px;
+}}
+
+h1,h2,h3 {{
+  letter-spacing: -0.02em;
+}}
+
+/* Sidebar */
+[data-testid="stSidebar"] {{
+  background: var(--side-bg) !important;
+  border-right: 1px solid var(--side-line);
+}}
+[data-testid="stSidebar"] .stSelectbox > div, 
+[data-testid="stSidebar"] .stRadio > div {{
+  background: transparent !important;
+}}
+
+/* ✅ Hamburger toujours visible et plus “3 lignes” */
+[data-testid="stSidebarCollapsedControl"] {{
+  position: fixed !important;
+  top: 10px !important;
+  left: 12px !important;
+  z-index: 1000 !important;
   border-radius: 12px !important;
-}
-.smallmuted { opacity:.72; font-size: 13px; }
-hr { border-color: rgba(0,0,0,.10); }
+  background: color-mix(in srgb, var(--panel) 70%, transparent) !important;
+  border: 1px solid var(--line) !important;
+  box-shadow: var(--shadow2) !important;
+}}
+[data-testid="stSidebarCollapsedControl"] button {{
+  width: 42px !important;
+  height: 42px !important;
+  padding: 0 !important;
+}}
+/* Le petit chevron Streamlit devient discret */
+[data-testid="stSidebarCollapsedControl"] svg {{
+  transform: scale(1.05);
+}}
+
+/* Cards */
+.card {{
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 18px;
+  box-shadow: var(--shadow);
+}}
+.card h3 {{
+  margin-top: 0.1rem;
+}}
+.smallmuted {{
+  color: var(--muted);
+  font-size: 13px;
+}}
+hr {{
+  border-color: var(--line);
+}}
+
+/* Boutons - accent */
+.stButton > button {{
+  border-radius: 14px !important;
+}}
+.stButton > button:focus {{
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent) !important;
+}}
+/* Radio nav: look “pill” */
+[data-testid="stSidebar"] [role="radiogroup"] label {{
+  padding: 8px 10px !important;
+  border-radius: 14px !important;
+  margin-bottom: 6px !important;
+}}
+[data-testid="stSidebar"] [role="radiogroup"] label:hover {{
+  background: var(--side-item-hover) !important;
+}}
+/* Approx : Streamlit marque la sélection via input checked + sibling */
+[data-testid="stSidebar"] [role="radiogroup"] input:checked + div {{
+  background: var(--side-active) !important;
+  border-radius: 14px !important;
+}}
+/* Text dans item actif */
+[data-testid="stSidebar"] [role="radiogroup"] input:checked + div * {{
+  color: var(--side-active-text) !important;
+}}
+
+/* Selects */
+.stSelectbox > div > div {{
+  border-radius: 14px !important;
+}}
 </style>
 """
 
@@ -120,7 +199,16 @@ hr { border-color: rgba(0,0,0,.10); }
 def apply_theme() -> None:
     """Une seule injection CSS par run."""
     mode = st.session_state.get("ui_theme", "dark")
-    st.markdown(THEME_CSS_LIGHT if mode == "light" else THEME_CSS_DARK, unsafe_allow_html=True)
+    # hack: on bascule variables via attribut data-theme sur root
+    st.markdown(
+        f"""
+        <script>
+        document.documentElement.setAttribute('data-theme', '{'light' if mode=='light' else 'dark'}');
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(THEME_CSS, unsafe_allow_html=True)
 
 
 # =========================
@@ -153,7 +241,7 @@ def _safe_image(path: str, width: int | None = None) -> None:
 
 
 def _is_admin(owner: str) -> bool:
-    # Règle actuelle: Whalers = admin (comme tu voulais)
+    # Règle actuelle: Whalers = admin
     return (owner or "").strip() == "Whalers"
 
 
@@ -174,20 +262,26 @@ TABS = [
 
 def sidebar_nav() -> str:
     with st.sidebar:
-        st.markdown("### Pool GM")
-
-        _safe_image(APP_LOGO, width=56)
+        # Brand row
+        top = st.columns([1, 4])
+        with top[0]:
+            _safe_image(APP_LOGO, width=44)
+        with top[1]:
+            st.markdown("### Pool GM")
 
         # Saison
+        st.caption("Saison")
         season = st.selectbox(
-            "Saison",
+            "",
             options=[DEFAULT_SEASON, "2024-2025", "2023-2024"],
             key="season_lbl",
+            label_visibility="collapsed",
         )
 
-        st.markdown("#### Navigation")
+        st.markdown("")
 
-        # IMPORTANT: un seul widget de nav (radio)
+        # Navigation
+        st.caption("Navigation")
         labels = [t[0] for t in TABS]
         default_idx = labels.index(st.session_state.get("active_tab", "🏠 Home")) if st.session_state.get("active_tab") in labels else 0
         active = st.radio("", labels, index=default_idx, key="nav_radio", label_visibility="collapsed")
@@ -195,8 +289,9 @@ def sidebar_nav() -> str:
 
         st.markdown("---")
 
-        # Mon équipe (owner) — sert partout
-        owner = st.selectbox("Mon équipe", options=POOL_TEAMS, key="owner_select")
+        # Mon équipe (owner)
+        st.caption("Mon équipe")
+        owner = st.selectbox("", options=POOL_TEAMS, key="owner_select", label_visibility="collapsed")
         st.session_state["owner"] = owner
 
         # Theme switch
@@ -210,10 +305,7 @@ def sidebar_nav() -> str:
 # RENDERERS IMPORT
 # =========================
 def _import_tabs():
-    """
-    Import des modules tabs/*.py.
-    Si un module manque, on affiche une erreur claire au lieu d'écran noir.
-    """
+    """Import des modules tabs/*.py."""
     try:
         from tabs import home, joueurs, alignement, transactions, gm, historique, classement, admin
         return {
@@ -226,18 +318,23 @@ def _import_tabs():
             "classement": classement,
             "admin": admin,
         }
-    except Exception as e:
+    except Exception:
         st.error("Impossible d'importer les modules dans /tabs/.")
         st.code(traceback.format_exc())
         st.stop()
 
 
 def _render_home(ctx: AppCtx):
-    st.title("🏠 Home")
+    # ✅ logo_pool complètement en haut du contenu (avant tout)
+    if os.path.exists(BANNER):
+        _safe_image(BANNER, width=None)
+        st.markdown("")
+
+    st.markdown("# 🏠 Home")
     st.markdown('<div class="smallmuted">Home reste clean — aucun bloc Admin ici.</div>', unsafe_allow_html=True)
     st.markdown("")
 
-    c1, c2 = st.columns([2, 1])
+    c1, c2 = st.columns([2.2, 1])
     with c1:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("### 🏒 Sélection d'équipe")
@@ -248,11 +345,7 @@ def _render_home(ctx: AppCtx):
 
     with c2:
         logo = TEAM_LOGO.get(ctx.owner, "")
-        _safe_image(logo, width=140)
-
-    if os.path.exists(BANNER):
-        st.markdown("")
-        _safe_image(BANNER, width=None)
+        _safe_image(logo, width=120)
 
 
 def main() -> None:
@@ -289,7 +382,7 @@ def main() -> None:
         if key == "home":
             _render_home(ctx)
         elif key == "admin" and not ctx.is_admin:
-            st.title("🛠️ Admin")
+            st.markdown("# 🛠️ Admin")
             st.warning("Accès admin requis.")
         else:
             mod = modules.get(key)
