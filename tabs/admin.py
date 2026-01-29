@@ -77,7 +77,7 @@ def _collect_backup_files(data_dir: str, season_lbl: str) -> List[str]:
         os.path.join(data_dir, "hockey.players.csv"),
         os.path.join(data_dir, "Hockey.Players.csv"),
         os.path.join(data_dir, "players_master.csv"),
-        os.path.join(data_dir, "puckpedia2025_26.csv"),
+        os.path.join(data_dir, "PuckPedia2025_26.csv"),
         os.path.join(data_dir, "settings.csv"),
     ]:
         if os.path.exists(p):
@@ -463,7 +463,7 @@ def _render_misc_tools(data_dir: str, season_lbl: str) -> None:
     with st.expander("🧾 Sync PuckPedia → Level (STD/ELC)", expanded=False):
         puck_path = st.text_input(
             "Fichier PuckPedia",
-            value=os.path.join(data_dir, "puckpedia2025_26.csv"),
+            value=os.path.join(data_dir, "PuckPedia2025_26.csv"),
             key=f"puck_path__{season_lbl}",
         )
         players_path = st.text_input(
