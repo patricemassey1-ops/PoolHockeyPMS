@@ -306,6 +306,7 @@ def sidebar_nav() -> str:
         # Mon équipe (owner)
         st.selectbox("Mon équipe", options=POOL_TEAMS, key="owner_select")
         st.session_state["owner"] = st.session_state.get("owner_select") or st.session_state.get("owner") or "Whalers"
+        st.session_state["home_owner_select"] = st.session_state["owner"]
 
         # Theme switch
         is_light = st.toggle(
@@ -372,12 +373,15 @@ def _render_home(ctx: AppCtx):
 
         # Widget selection local (home) = même valeur session_state "owner_select"
         # Label non vide (no warning)
+        st.session_state.setdefault("home_owner_select", team)
+
         st.selectbox(
             "Équipe (propriétaire)",
             options=POOL_TEAMS,
-            key="owner_select",
+            key="home_owner_select",
         )
-        st.session_state["owner"] = st.session_state.get("owner_select") or team
+        st.session_state["owner"] = st.session_state.get("home_owner_select") or team
+        st.session_state["owner_select"] = st.session_state["owner"]
 
         st.markdown(
             f"""
@@ -405,6 +409,7 @@ def main() -> None:
     st.session_state.setdefault("ui_theme", "dark")
     st.session_state.setdefault("owner", "Whalers")
     st.session_state.setdefault("owner_select", "Whalers")
+    st.session_state.setdefault("home_owner_select", st.session_state.get("owner_select") or st.session_state.get("owner") or "Whalers")
     st.session_state.setdefault("season_lbl", DEFAULT_SEASON)
     st.session_state.setdefault("active_tab", "🏠 Home")
 
