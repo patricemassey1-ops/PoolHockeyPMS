@@ -133,8 +133,9 @@ def _extract_roster_from_fantrax(df, team_name: str = ""):
 # ---- Optional: Google Drive client (if installed)
 try:
     from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload
+    from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
     from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
 except Exception:
     build = None
     MediaIoBaseDownload = None
@@ -188,8 +189,16 @@ def render_drive_oauth_connect_ui() -> None:
         return
 
     # already connected?
-    if st.session_state.get("drive_creds"):
-        st.success("✅ Drive OAuth connecté.")
+if st.session_state.get("drive_creds"):
+    creds_info = st.session_state.get("drive_creds") or {}
+    scopes = creds_info.get("scopes") or []
+    has_write = "https://www.googleapis.com/auth/drive" in scopes
+    if has_write:
+        st.success("✅ Drive OAuth connecté (lecture/écriture).")
+    else:
+        st.warning("⚠️ Drive OAuth connecté mais en lecture seule. Clique 'Reconnecter avec écriture' pour activer les backups Drive.")
+    c1, c2 = st.columns(2)
+    with c1:
         if st.button("🔌 Déconnecter Drive OAuth", use_container_width=True, key="adm_drive_disconnect"):
             st.session_state.pop("drive_creds", None)
             try:
@@ -197,6 +206,16 @@ def render_drive_oauth_connect_ui() -> None:
             except Exception:
                 pass
             st.rerun()
+    with c2:
+        if not has_write:
+            if st.button("🔄 Reconnecter avec écriture", use_container_width=True, key="adm_drive_reconnect"):
+                st.session_state.pop("drive_creds", None)
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+                st.rerun()
+    if has_write:
         return
 
     client_config = {
@@ -208,7 +227,7 @@ def render_drive_oauth_connect_ui() -> None:
             "token_uri": "https://oauth2.googleapis.com/token",
         }
     }
-    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+    scopes = ["https://www.googleapis.com/auth/drive"]
     flow = Flow.from_client_config(client_config, scopes=scopes, redirect_uri=redirect_uri)
 
     # handle return ?code=
@@ -283,6 +302,13 @@ DEFAULT_CAP_CE = 12_000_000
 # ============================================================
 # UTILS
 # ============================================================
+
+def _unique_key(prefix: str) -> str:
+    """Génère une clé Streamlit unique (évite StreamlitDuplicateElementKey)."""
+    k = "__st_key_counter__"
+    st.session_state[k] = int(st.session_state.get(k, 0)) + 1
+    return f"{prefix}__{st.session_state[k]}"
+
 def _now_ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1295,7 +1321,7 @@ def render_bulk_nhl_id_admin(DATA_DIR: str, season_lbl: str, is_admin: bool) -> 
             f"Chemin détecté: `{players_path}` | exists={info.get('exists')} | size={info.get('size')} | rows={info.get('rows')} | cols={len(info.get('cols') or [])}"
         )
     # NOTE: pas d'expander ici (évite nesting dans Streamlit)
-    show_diag = st.checkbox("🔎 Afficher diagnostic hockey.players.csv (aperçu brut + colonnes)", value=False, key=f"admin_diag_playersdb__{season_lbl}")
+    show_diag = st.checkbox("🔎 Afficher diagnostic hockey.players.csv (aperçu brut + colonnes)", value=False, key=_unique_key(f"admin_diag_playersdb__{season_lbl}"))
     if show_diag:
         if info.get('raw_head'):
             st.code(info.get('raw_head'), language="text")
@@ -2053,43 +2079,85 @@ def render(ctx: dict) -> None:
             z.extractall(path=data_dir)
         return True, f"Restore OK: {os.path.basename(zip_path)}"
 
-    if panel == "Backups":
-        with st.expander("💾 Backups complets (ZIP) — joueurs, alignements, transactions", expanded=True):
-            st.caption("Crée un **ZIP complet** de tes données (saison + joueurs). Tu peux restaurer en 1 clic si quelque chose brise.")
-            col1, col2 = st.columns([1,2])
-            with col1:
-                if st.button("📦 Créer un backup complet", use_container_width=True):
-                    ok, msg = _make_backup_zip(DATA_DIR, season_lbl)
-                    if ok:
-                        st.success("✅ Backup créé")
-                        st.code(msg)
-                    else:
-                        st.warning(msg)
+    
+if panel == "Backups":
+    with st.expander("💾 Backups complets (ZIP) — joueurs, alignements, transactions", expanded=True):
+        st.caption("Crée un **ZIP complet** (saison + joueurs) et sauvegarde-le dans **Google Drive** (folder PoolHockeyData).")
+        DEFAULT_FOLDER_ID = "1hIJovsHid2L1cY_wKM_sY-wVZKXAwrh1"
+        folder_id = st.text_input("Folder ID Drive", value=DEFAULT_FOLDER_ID, key="adm_backup_drive_folder")
+        svc = _drive_service()
 
-            backups = _list_backups(DATA_DIR, season_lbl)
-            with col2:
-                if backups:
-                    sel = st.selectbox("Choisir un backup à restaurer", backups, format_func=lambda p: os.path.basename(p))
-                    cA, cB = st.columns([1,1])
-                    with cA:
+        if svc is None:
+            st.warning("Drive non connecté ou scopes insuffisants. Connecte-toi dans **Connexion Google Drive (OAuth)** (avec écriture).")
+        else:
+            st.success("✅ Drive prêt.")
+
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            if st.button("📦 Créer un backup complet (ZIP → Drive)", use_container_width=True, disabled=(svc is None)):
+                ok, zip_path = _make_backup_zip(DATA_DIR, season_lbl)
+                if not ok:
+                    st.warning(zip_path)
+                else:
+                    try:
+                        res = _drive_upload_file(svc, folder_id, zip_path, filename=os.path.basename(zip_path))
+                        st.success("✅ Backup créé + envoyé sur Drive")
+                        if res.get("webViewLink"):
+                            st.link_button("🔗 Ouvrir sur Google Drive", res.get("webViewLink"))
+                        st.code(res.get("name") or "")
+                    except Exception as e:
+                        st.error(f"❌ Upload Drive échoué: {e}")
+                        st.info(f"ZIP local (quand même créé): `{zip_path}`")
+
+        with col2:
+            files = _drive_list_backups(svc, folder_id, prefix="backup_", max_files=100) if svc is not None else []
+            if files:
+                def _fmt(f):
+                    nm = f.get("name") or ""
+                    ct = f.get("createdTime") or ""
+                    return f"{nm}  ({ct})"
+                sel = st.selectbox("Choisir un backup Drive à restaurer", files, format_func=_fmt, key="adm_drive_backup_pick")
+
+                cA, cB = st.columns([1, 1])
+                with cA:
+                    # Download via Drive then offer download_button
+                    if st.button("⬇️ Préparer le téléchargement", use_container_width=True, disabled=(svc is None)):
+                        try:
+                            tmp = os.path.join(DATA_DIR, f"__tmp_dl__{sel.get('name')}")
+                            _drive_download_file(svc, sel["id"], tmp)
+                            st.session_state["__tmp_dl_zip__"] = tmp
+                            st.success("Prêt.")
+                        except Exception as e:
+                            st.error(f"Download échoué: {e}")
+
+                    tmp = st.session_state.get("__tmp_dl_zip__")
+                    if tmp and os.path.exists(tmp):
                         st.download_button(
                             "⬇️ Télécharger le ZIP",
-                            data=open(sel, "rb").read(),
-                            file_name=os.path.basename(sel),
+                            data=open(tmp, "rb").read(),
+                            file_name=os.path.basename(tmp),
                             mime="application/zip",
                             use_container_width=True,
+                            key=_unique_key("adm_dl_zip"),
                         )
-                    with cB:
-                        confirm = st.checkbox("Je confirme le restore (écrase data/)", value=False)
-                        if st.button("♻️ Restaurer", disabled=not confirm, use_container_width=True):
-                            ok, msg = _restore_backup_zip(DATA_DIR, sel)
-                            if ok:
-                                st.success(msg)
+
+                with cB:
+                    confirm = st.checkbox("Je confirme le restore (écrase data/)", value=False, key=_unique_key("adm_confirm_restore"))
+                    if st.button("♻️ Restaurer", disabled=(not confirm or svc is None), use_container_width=True):
+                        try:
+                            tmp_restore = os.path.join(DATA_DIR, f"__tmp_restore__{sel.get('name')}")
+                            _drive_download_file(svc, sel["id"], tmp_restore)
+                            ok2, msg2 = _restore_backup_zip(DATA_DIR, tmp_restore)
+                            if ok2:
+                                st.success(msg2)
                                 st.rerun()
                             else:
-                                st.error(msg)
-                else:
-                    st.info("Aucun backup encore. Crée-en un avec le bouton à gauche.")
+                                st.error(msg2)
+                        except Exception as e:
+                            st.error(f"Restore échoué: {e}")
+            else:
+                st.info("Aucun backup sur Drive (dans ce folder).")
     with st.expander("🧬 Fusion (master) — construire players_master.csv", expanded=(panel == "Fusion")):
         st.caption("Crée un fichier **unique** `players_master.csv` qui sert de source de vérité (disponibilité / équipes pool / NHL_ID / stats pro).")
         colA, colB, colC = st.columns([1,1,2])
