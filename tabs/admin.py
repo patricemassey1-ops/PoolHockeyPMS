@@ -114,6 +114,64 @@ def _make_zip_bytes(file_paths: List[str], base_dir: str) -> bytes:
     return mem.getvalue()
 
 
+
+def _maybe_run_scheduled_backup(data_dir: str, season_lbl: str, ok_drive: bool, fid: str) -> None:
+    """
+    Best-effort auto-backup at 00:00 and 12:00 America/Toronto.
+    NOTE: Streamlit Cloud does not run jobs in background. This runs when the app is visited around those times.
+    """
+    try:
+        now = _dt.datetime.now(ZoneInfo("America/Toronto"))
+        hour = now.hour
+        minute = now.minute
+        if hour not in (0, 12):
+            return
+        # small window to avoid repeated runs; also avoid running if app is opened later
+        if minute > 10:
+            return
+
+        day_key = now.strftime("%Y%m%d")
+        slot_key = f"{season_lbl}__{day_key}__{hour:02d}"
+        ss_key = f"__auto_backup_done__{slot_key}"
+        if st.session_state.get(ss_key):
+            return
+
+        files = _collect_backup_files(data_dir, season_lbl)
+        if not files:
+            return
+
+        ts = now.strftime("%Y%m%d_%H%M%S")
+        zip_name = f"backup_{season_lbl.replace('/','-')}_{ts}.zip"
+        zip_bytes = _make_zip_bytes(files, data_dir)
+
+        st.session_state[ss_key] = True  # mark done for this slot/day
+
+        # Upload to Drive if possible
+        if ok_drive:
+            tmp_path = os.path.join(data_dir, f"__tmp__{zip_name}")
+            try:
+                os.makedirs(os.path.dirname(tmp_path) or ".", exist_ok=True)
+                with open(tmp_path, "wb") as f:
+                    f.write(zip_bytes)
+                res = drive_upload_file(fid, tmp_path, drive_name=zip_name)
+                if res.get("ok"):
+                    st.toast(f"Backup auto (Drive) ✅ {zip_name}", icon="✅")
+                else:
+                    st.toast(f"Backup auto ⚠️ upload échoué: {res.get('error')}", icon="⚠️")
+            finally:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+        else:
+            # local only (kept in session)
+            st.session_state["__last_backup_zip_name__"] = zip_name
+            st.session_state["__last_backup_zip_bytes__"] = zip_bytes
+            st.toast(f"Backup auto (local) ✅ {zip_name}", icon="✅")
+    except Exception:
+        return
+
 def _render_backups(data_dir: str, season_lbl: str) -> None:
     st.markdown("### 📦 Backups complets (ZIP) — joueurs, alignements, transactions")
 
@@ -132,6 +190,9 @@ def _render_backups(data_dir: str, season_lbl: str) -> None:
         ok_drive = bool(fid) and bool(drive_ready())
     except Exception:
         ok_drive = False
+
+    # Auto-backup (best-effort)
+    _maybe_run_scheduled_backup(data_dir, season_lbl, ok_drive, fid)
 
     if not ok_drive:
         st.warning("Drive OAuth non connecté (ou secrets manquants). Vérifie `st.secrets[gdrive_oauth]` + `gdrive_folder_id`.")
@@ -390,7 +451,255 @@ def _move_players_ui(df: pd.DataFrame, path: str) -> None:
 # ============================================================
 # Misc tools placeholder
 # ============================================================
+
 def _render_misc_tools(data_dir: str, season_lbl: str) -> None:
-    st.markdown("### 🧰 Outils")
-    st.caption("Garde cet espace pour tes outils avancés (fusion master, NHL_ID auto, etc.).")
-    st.info("Si tu veux, je peux réintégrer tes outils existants ici **sans** replanter Streamlit (clés uniques, pas d’expander imbriqué).")
+    st.markdown("### 🧰 Outils — synchros (PuckPedia / NHL / API)")
+
+    st.caption("Ces outils mettent à jour tes fichiers locaux dans `data/`. Pense à faire un backup avant.")
+
+    # -------------------------
+    # 1) Sync Levels from PuckPedia
+    # -------------------------
+    with st.expander("🧾 Sync PuckPedia → Level (STD/ELC)", expanded=False):
+        puck_path = st.text_input(
+            "Fichier PuckPedia",
+            value=os.path.join(data_dir, "puckpedia2025_26.csv"),
+            key=f"puck_path__{season_lbl}",
+        )
+        players_path = st.text_input(
+            "Players DB (hockey.players.csv)",
+            value=os.path.join(data_dir, "hockey.players.csv"),
+            key=f"players_path__{season_lbl}",
+        )
+
+        if st.button("🔄 Synchroniser Level", key=f"sync_level_btn__{season_lbl}", use_container_width=True):
+            res = sync_level_from_puckpedia(players_path, puck_path)
+            if res.get("ok"):
+                st.success(f"✅ Level synchronisé. Modifiés: {res.get('updated',0)}")
+            else:
+                st.error(f"❌ {res.get('error')}")
+
+    # -------------------------
+    # 2) NHL ID auto-match (search endpoint)
+    # -------------------------
+    with st.expander("🪪 Sync NHL_ID manquants (AUTO)", expanded=False):
+        st.caption("Assigne automatiquement des NHL_ID manquants via recherche NHL. (Best-effort)")
+        players_path2 = st.text_input(
+            "Players DB (hockey.players.csv)",
+            value=os.path.join(data_dir, "hockey.players.csv"),
+            key=f"players_path2__{season_lbl}",
+        )
+        limit = st.number_input("Max par run", min_value=10, max_value=500, value=250, step=10, key=f"nhl_id_limit__{season_lbl}")
+        dry = st.checkbox("Dry-run (ne sauvegarde pas)", value=False, key=f"nhl_id_dry__{season_lbl}")
+
+        if st.button("🔎 Associer NHL_ID", key=f"nhl_id_btn__{season_lbl}", use_container_width=True):
+            res = fill_missing_nhl_ids(players_path2, max_rows=int(limit), dry_run=bool(dry))
+            if res.get("ok"):
+                st.success(f"✅ NHL_ID: ajoutés {res.get('added',0)} / traités {res.get('processed',0)}")
+                if res.get("skipped"):
+                    st.caption(f"Skippés (déjà ok): {res.get('skipped')}")
+            else:
+                st.error(f"❌ {res.get('error')}")
+
+    # -------------------------
+    # 3) API (placeholder hooks)
+    # -------------------------
+    with st.expander("📡 API Pro / Stats — hooks", expanded=False):
+        st.info("Dis-moi exactement quelle API tu veux (Sportradar? NHL? autre) et quel fichier tu veux mettre à jour, et je branche ça ici proprement.")
+        st.caption("Je peux aussi ajouter un cache + checkpoint pour éviter les longs runs.")
+
+
+
+# ============================================================
+# Tool implementations
+# ============================================================
+def _norm_name(s: str) -> str:
+    s = str(s or "").strip().lower()
+    # basic normalization
+    for ch in ["'", ".", ",", "-", "’"]:
+        s = s.replace(ch, " ")
+    s = " ".join(s.split())
+    return s
+
+
+def sync_level_from_puckpedia(players_path: str, puckpedia_path: str) -> Dict[str, Any]:
+    """
+    Update hockey.players.csv Level using puckpedia file.
+    Expected columns in puckpedia: player name + level/contract type indicators.
+    We'll try common column names: Name, Player, Joueur, Level, ContractType, Type, ELC/STD flags.
+    """
+    players_path = str(players_path or "").strip()
+    puckpedia_path = str(puckpedia_path or "").strip()
+
+    if not os.path.exists(players_path):
+        return {"ok": False, "error": f"Players DB introuvable: {players_path}"}
+    if not os.path.exists(puckpedia_path):
+        return {"ok": False, "error": f"PuckPedia introuvable: {puckpedia_path}"}
+
+    try:
+        pdb = pd.read_csv(players_path, low_memory=False)
+        pk = pd.read_csv(puckpedia_path, low_memory=False)
+    except Exception as e:
+        return {"ok": False, "error": f"Lecture CSV échouée: {e}"}
+
+    if pdb.empty or pk.empty:
+        return {"ok": False, "error": "CSV vide (players ou puckpedia)."}
+
+    # detect name columns
+    name_col_pk = None
+    for c in ["Player", "Name", "Joueur", "player", "name", "joueur"]:
+        if c in pk.columns:
+            name_col_pk = c
+            break
+    if not name_col_pk:
+        return {"ok": False, "error": "Colonne nom joueur introuvable dans PuckPedia."}
+
+    name_col_pdb = None
+    for c in ["Joueur", "Player", "Name", "player_name", "Nom"]:
+        if c in pdb.columns:
+            name_col_pdb = c
+            break
+    if not name_col_pdb:
+        return {"ok": False, "error": "Colonne nom joueur introuvable dans players DB."}
+
+    # detect level/contract column in puckpedia
+    level_col = None
+    for c in ["Level", "ContractType", "Type", "contract_type", "level"]:
+        if c in pk.columns:
+            level_col = c
+            break
+
+    # build mapping
+    mp: Dict[str, str] = {}
+    for _, r in pk.iterrows():
+        nm = _norm_name(r.get(name_col_pk, ""))
+        if not nm:
+            continue
+        val = ""
+        if level_col:
+            val = str(r.get(level_col, "") or "").upper().strip()
+        # heuristics
+        if not val or val == "NAN":
+            # check common flags/cols
+            for c in ["ELC", "IsELC", "EntryLevel", "Entry Level"]:
+                if c in pk.columns:
+                    v = str(r.get(c, "")).strip().lower()
+                    if v in ("1","true","yes","y"):
+                        val = "ELC"
+                        break
+        if "ELC" in val:
+            val = "ELC"
+        elif "STD" in val or "STANDARD" in val:
+            val = "STD"
+
+        if val in ("ELC", "STD"):
+            mp[nm] = val
+
+    if not mp:
+        return {"ok": False, "error": "Aucune correspondance Level trouvée dans PuckPedia (ELC/STD)."}
+
+    if "Level" not in pdb.columns:
+        pdb["Level"] = ""
+
+    updated = 0
+    for i, r in pdb.iterrows():
+        nm = _norm_name(r.get(name_col_pdb, ""))
+        if not nm:
+            continue
+        new = mp.get(nm, "")
+        if not new:
+            continue
+        old = str(r.get("Level","") or "").upper().strip()
+        if old != new:
+            pdb.at[i, "Level"] = new
+            updated += 1
+
+    try:
+        pdb.to_csv(players_path, index=False)
+        return {"ok": True, "updated": updated}
+    except Exception as e:
+        return {"ok": False, "error": f"Écriture players DB échouée: {e}"}
+
+
+def fill_missing_nhl_ids(players_path: str, max_rows: int = 250, dry_run: bool = False) -> Dict[str, Any]:
+    """
+    Fill missing NHL_ID using NHL search endpoint.
+    Uses: https://search.d3.nhle.com/api/v1/search/player?culture=en-us&limit=20&q=<name>&active=True
+    Source: Zmalski/NHL-API-Reference issue suggests this endpoint for active players search. citeturn0search3
+    """
+    import requests
+
+    players_path = str(players_path or "").strip()
+    if not os.path.exists(players_path):
+        return {"ok": False, "error": f"Players DB introuvable: {players_path}"}
+
+    try:
+        df = pd.read_csv(players_path, low_memory=False)
+    except Exception as e:
+        return {"ok": False, "error": f"Lecture players DB échouée: {e}"}
+
+    if df.empty:
+        return {"ok": False, "error": "Players DB vide."}
+
+    # detect name col
+    name_col = "Joueur" if "Joueur" in df.columns else ("Player" if "Player" in df.columns else None)
+    if not name_col:
+        return {"ok": False, "error": "Colonne Joueur/Player introuvable."}
+
+    # detect NHL_ID col
+    id_col = None
+    for c in ["NHL_ID", "nhl_id", "playerId", "player_id"]:
+        if c in df.columns:
+            id_col = c
+            break
+    if not id_col:
+        id_col = "NHL_ID"
+        df[id_col] = ""
+
+    # candidates: missing or 0
+    def _is_missing(v):
+        s = str(v or "").strip()
+        return (not s) or s.lower() == "nan" or s == "0"
+
+    candidates = df[df[id_col].apply(_is_missing)].copy()
+    processed = 0
+    added = 0
+
+    for idx, row in candidates.head(max_rows).iterrows():
+        name = str(row.get(name_col, "") or "").strip()
+        if not name:
+            continue
+
+        q = requests.utils.quote(name)
+        url = f"https://search.d3.nhle.com/api/v1/search/player?culture=en-us&limit=20&q={q}&active=True"
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code != 200:
+                continue
+            data = r.json() or []
+            # pick best exact-ish match by normalized name
+            target = _norm_name(name)
+            best = None
+            for item in data:
+                nm = _norm_name(item.get("name",""))
+                if nm == target:
+                    best = item
+                    break
+            if not best and data:
+                best = data[0]
+            if best and best.get("playerId"):
+                processed += 1
+                if not dry_run:
+                    df.at[idx, id_col] = int(best["playerId"])
+                added += 1
+        except Exception:
+            continue
+
+    if not dry_run:
+        try:
+            df.to_csv(players_path, index=False)
+        except Exception as e:
+            return {"ok": False, "error": f"Écriture échouée: {e}"}
+
+    return {"ok": True, "processed": processed, "added": added, "dry_run": dry_run}
+
