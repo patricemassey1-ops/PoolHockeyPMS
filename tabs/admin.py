@@ -287,19 +287,50 @@ def render(ctx: Dict[str, Any]):
             if err:
                 st.error(err)
             else:
+                # ensure NHL_ID column exists for downstream filtering/export
+                if "NHL_ID" not in df.columns:
+                    df["NHL_ID"] = ""
+
                 a = audit_nhl_ids(df)
+
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Total joueurs", a["total"])
                 c2.metric("Avec NHL_ID", a["filled"])
                 c3.metric("Manquants", a["missing"])
                 c4.metric("% manquants", f"{a['missing_pct']:.1f}%")
+
                 if a.get("duplicates", 0):
                     st.warning(f"IDs dupliqués détectés: {a['duplicates']} (souvent normal si erreurs de match).")
 
+                st.markdown("#### 📤 Export")
+                colx1, colx2 = st.columns(2)
+                with colx1:
+                    st.download_button(
+                        "⬇️ Exporter la liste complète (CSV)",
+                        data=df.to_csv(index=False).encode("utf-8"),
+                        file_name="players_full.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+                with colx2:
+                    missing_df = df[df["NHL_ID"].apply(_is_missing_id)].copy()
+                    st.download_button(
+                        "⬇️ Exporter la liste des manquants (CSV)",
+                        data=missing_df.to_csv(index=False).encode("utf-8"),
+                        file_name="players_missing_nhl_id.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+
                 if a["missing"] > 0:
-                    miss = df[df["NHL_ID"].apply(_is_missing_id)][["Player", "Team", "Position"] if "Team" in df.columns and "Position" in df.columns else ["Player"]].head(200)
+                    cols = ["Player"]
+                    if "Team" in df.columns:
+                        cols.append("Team")
+                    if "Position" in df.columns:
+                        cols.append("Position")
+                    miss_preview = missing_df[cols].head(200)
                     st.caption("Aperçu (max 200) des joueurs sans NHL_ID :")
-                    st.dataframe(miss, use_container_width=True)
+                    st.dataframe(miss_preview, use_container_width=True)
 
         # Sync button
         if st.button("Associer NHL_ID"):
