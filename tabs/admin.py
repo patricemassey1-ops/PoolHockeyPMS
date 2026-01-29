@@ -266,7 +266,7 @@ def render_tools(data_dir: str, season: str) -> None:
                         st.code(p, language="text")
                 if res.get("players_cols") or res.get("puck_cols"):
                     st.markdown("**🔎 Diagnostic colonnes**")
-                        if res.get("players_cols"):
+                    if res.get("players_cols"):
                             st.write("Players DB colonnes:")
                             st.write(res["players_cols"])
                         if res.get("puck_cols"):
