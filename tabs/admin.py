@@ -1,4 +1,9 @@
-# tabs/admin.py
+# tabs/admin.py — PoolHockeyPMS (Admin: Backups Drive + Outils Sync)
+# ------------------------------------------------------------
+# Compatible with app.py convention:
+#   mod.render(ctx.as_dict()) OR mod.render(ctx)
+# ------------------------------------------------------------
+
 from __future__ import annotations
 
 import os
@@ -7,7 +12,7 @@ import glob
 import zipfile
 import datetime as dt
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 import pandas as pd
@@ -24,21 +29,51 @@ try:
         drive_download_file,
     )
 except Exception:
-    def drive_ready(): return False
-    def get_drive_folder_id(): return ""
-    def drive_list_files(*a, **k): return []
-    def drive_upload_file(*a, **k): return {"ok": False, "error": "drive service missing"}
-    def drive_download_file(*a, **k): return {"ok": False, "error": "drive service missing"}
+    def drive_ready() -> bool:  # type: ignore
+        return False
+
+    def get_drive_folder_id() -> str:  # type: ignore
+        return ""
+
+    def drive_list_files(*a, **k):  # type: ignore
+        return []
+
+    def drive_upload_file(*a, **k):  # type: ignore
+        return {"ok": False, "error": "services/drive.py introuvable"}
+
+    def drive_download_file(*a, **k):  # type: ignore
+        return {"ok": False, "error": "services/drive.py introuvable"}
 
 
 # ============================================================
-# ENTRY POINT (called by app.py)
+# ctx helpers (dict OR AppCtx object)
 # ============================================================
-def render(ctx: Dict[str, Any] | None = None) -> None:
+def _ctx_s(ctx: Any, key: str, default: str = "") -> str:
+    try:
+        if isinstance(ctx, dict):
+            return str(ctx.get(key, default) or default)
+        return str(getattr(ctx, key, default) or default)
+    except Exception:
+        return default
+
+
+def _ctx_b(ctx: Any, key: str, default: bool = False) -> bool:
+    try:
+        if isinstance(ctx, dict):
+            return bool(ctx.get(key, default))
+        return bool(getattr(ctx, key, default))
+    except Exception:
+        return default
+
+
+# ============================================================
+# ENTRYPOINT
+# ============================================================
+def render(ctx: Any = None) -> None:
     ctx = ctx or {}
-    data_dir = str(ctx.get("DATA_DIR") or "data")
-    season = str(ctx.get("season_lbl") or "2025-2026")
-    is_admin = bool(ctx.get("is_admin"))
+    data_dir = _ctx_s(ctx, "DATA_DIR", _ctx_s(ctx, "data_dir", "data"))
+    season = _ctx_s(ctx, "season_lbl", "2025-2026").strip() or "2025-2026"
+    is_admin = _ctx_b(ctx, "is_admin", False)
 
     if not is_admin:
         st.warning("Accès admin requis.")
@@ -46,8 +81,7 @@ def render(ctx: Dict[str, Any] | None = None) -> None:
 
     st.subheader("🛠️ Gestion Admin")
 
-    tab = st.radio("", ["Backups", "Outils"], horizontal=True)
-
+    tab = st.radio("", ["Backups", "Outils"], horizontal=True, index=1)
     if tab == "Backups":
         render_backups(data_dir, season)
     else:
@@ -55,17 +89,13 @@ def render(ctx: Dict[str, Any] | None = None) -> None:
 
 
 # ============================================================
-# BACKUPS
+# BACKUPS (Drive)
 # ============================================================
 def render_backups(data_dir: str, season: str) -> None:
     st.markdown("### 📦 Backups complets (Google Drive)")
 
-    folder_id = st.text_input(
-        "Folder ID Drive",
-        value=get_drive_folder_id() or "",
-    ).strip()
-
-    drive_ok = bool(folder_id) and drive_ready()
+    folder_id = st.text_input("Folder ID Drive", value=(get_drive_folder_id() or "")).strip()
+    drive_ok = bool(folder_id) and bool(drive_ready())
 
     if drive_ok:
         st.success("Drive prêt (OAuth OK).")
@@ -75,77 +105,120 @@ def render_backups(data_dir: str, season: str) -> None:
     files = collect_backup_files(data_dir, season)
 
     with st.expander("📁 Fichiers inclus", expanded=False):
-        for f in files:
-            st.code(os.path.relpath(f, data_dir))
-
-    if st.button("📦 Créer un backup complet"):
         if not files:
-            st.error("Aucun fichier à sauvegarder.")
-        else:
-            ts = dt.datetime.now(ZoneInfo("America/Toronto")).strftime("%Y%m%d_%H%M%S")
-            zip_name = f"backup_{season}_{ts}.zip"
-            zip_bytes = make_zip(files, data_dir)
+            st.info("Aucun fichier trouvé pour ce backup.")
+        for f in files:
+            st.code(os.path.relpath(f, data_dir), language="text")
 
-            if drive_ok:
-                tmp = os.path.join(data_dir, zip_name)
-                with open(tmp, "wb") as fh:
-                    fh.write(zip_bytes)
-                res = drive_upload_file(folder_id, tmp, zip_name)
-                os.remove(tmp)
-                if res.get("ok"):
-                    st.success(f"Backup envoyé sur Drive : {zip_name}")
-                else:
-                    st.error(res.get("error"))
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("📦 Créer un backup complet", use_container_width=True):
+            if not files:
+                st.error("Aucun fichier à sauvegarder.")
             else:
-                st.download_button("Télécharger le ZIP", zip_bytes, zip_name)
+                ts = dt.datetime.now(ZoneInfo("America/Toronto")).strftime("%Y%m%d_%H%M%S")
+                zip_name = f"backup_{season}_{ts}.zip"
+                zip_bytes = make_zip(files, data_dir)
+
+                if drive_ok:
+                    tmp = os.path.join(data_dir, f"__tmp__{zip_name}")
+                    try:
+                        os.makedirs(os.path.dirname(tmp) or ".", exist_ok=True)
+                        with open(tmp, "wb") as fh:
+                            fh.write(zip_bytes)
+                        res = drive_upload_file(folder_id, tmp, zip_name)
+                        if res.get("ok"):
+                            st.success(f"✅ Backup envoyé sur Drive : {zip_name}")
+                        else:
+                            st.error(f"❌ Upload Drive: {res.get('error')}")
+                    finally:
+                        try:
+                            if os.path.exists(tmp):
+                                os.remove(tmp)
+                        except Exception:
+                            pass
+                else:
+                    st.session_state["__last_zip_name__"] = zip_name
+                    st.session_state["__last_zip_bytes__"] = zip_bytes
+                    st.success("✅ Backup créé (local). Télécharge-le à droite.")
+
+    with col2:
+        zn = st.session_state.get("__last_zip_name__")
+        zb = st.session_state.get("__last_zip_bytes__")
+        if zn and zb:
+            st.download_button("⬇️ Télécharger le ZIP", data=zb, file_name=zn, mime="application/zip", use_container_width=True)
+        else:
+            st.info("Aucun ZIP local prêt.")
 
     st.markdown("---")
     st.markdown("### ♻️ Restaurer depuis Drive")
+    if not drive_ok:
+        st.info("Connecte Drive (secrets) pour restaurer.")
+        return
 
-    if drive_ok:
-        backups = drive_list_files(folder_id, name_contains="backup_", limit=50)
-        backups = [b for b in backups if b.get("name","").endswith(".zip")]
-        names = [b["name"] for b in backups]
+    backups = drive_list_files(folder_id, name_contains="backup_", limit=100) or []
+    backups = [b for b in backups if str(b.get("name", "")).lower().endswith(".zip")]
+    backups = sorted(backups, key=lambda x: str(x.get("modifiedTime", "")), reverse=True)
 
-        if names:
-            sel = st.selectbox("Choisir un backup", names)
-            confirm = st.checkbox("Je confirme (écrase data/)")
-            if st.button("♻️ Restaurer", disabled=not confirm):
-                fid = next(b["id"] for b in backups if b["name"] == sel)
-                tmp = os.path.join(data_dir, "__restore__.zip")
-                res = drive_download_file(fid, tmp)
-                if res.get("ok"):
-                    restore_zip(tmp, data_dir)
-                    os.remove(tmp)
-                    st.success("Restore terminé.")
-                    st.rerun()
-                else:
-                    st.error(res.get("error"))
-        else:
-            st.info("Aucun backup trouvé.")
+    if not backups:
+        st.info("Aucun backup trouvé dans Drive.")
+        return
+
+    name_to_id = {b["name"]: b["id"] for b in backups if b.get("name") and b.get("id")}
+    sel = st.selectbox("Choisir un backup", list(name_to_id.keys()))
+    confirm = st.checkbox("Je confirme (écrase data/)", value=False)
+
+    if st.button("♻️ Restaurer", disabled=not confirm, use_container_width=True):
+        file_id = name_to_id.get(sel)
+        if not file_id:
+            st.error("Backup invalide.")
+            return
+        tmp = os.path.join(data_dir, "__restore__.zip")
+        res = drive_download_file(file_id, tmp)
+        if not res.get("ok"):
+            st.error(f"❌ Download: {res.get('error')}")
+            return
+        try:
+            restore_zip(tmp, data_dir)
+            st.success("✅ Restore terminé.")
+            st.rerun()
+        finally:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
 
 
 def collect_backup_files(data_dir: str, season: str) -> List[str]:
-    out = []
+    out: List[str] = []
+    data_dir = str(data_dir or "data")
+
+    # season-related files
     for f in glob.glob(os.path.join(data_dir, f"*{season}*")):
         if os.path.isfile(f):
             out.append(f)
-    for base in ["hockey.players.csv", "puckpedia2025_26.csv"]:
+
+    # core files
+    for base in ["hockey.players.csv", "Hockey.Players.csv", "players_master.csv", "PuckPedia2025_26.csv", "puckpedia2025_26.csv", "settings.csv"]:
         p = os.path.join(data_dir, base)
-        if os.path.exists(p):
+        if os.path.exists(p) and os.path.isfile(p):
             out.append(p)
-    return sorted(set(out))
+
+    # de-dupe
+    return sorted(set(map(os.path.abspath, out)))
 
 
 def make_zip(files: List[str], base_dir: str) -> bytes:
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
         for f in files:
-            z.write(f, arcname=os.path.relpath(f, base_dir))
+            arc = os.path.relpath(f, base_dir) if base_dir else os.path.basename(f)
+            z.write(f, arcname=arc)
     return mem.getvalue()
 
 
 def restore_zip(zip_path: str, data_dir: str) -> None:
+    os.makedirs(data_dir, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as z:
         z.extractall(data_dir)
 
@@ -156,39 +229,56 @@ def restore_zip(zip_path: str, data_dir: str) -> None:
 def render_tools(data_dir: str, season: str) -> None:
     st.markdown("### 🧰 Outils")
 
+    # ---------- Sync PuckPedia -> Level
     with st.expander("🧾 Sync PuckPedia → Level (STD/ELC)", expanded=False):
         puck = st.text_input("Fichier PuckPedia", os.path.join(data_dir, "PuckPedia2025_26.csv"))
         players = st.text_input("Players DB", os.path.join(data_dir, "hockey.players.csv"))
-        if st.button("Synchroniser"):
+
+        if st.button("Synchroniser", use_container_width=False):
             res = sync_level(players, puck)
-            if res["ok"]:
-                st.success(f"Modifiés: {res['updated']}")
-            else:
-                st.error(res["error"])
+            if not isinstance(res, dict):
+                st.error("Erreur interne: sync_level n'a pas retourné un résultat.")
+                return
 
-    with st.expander("🪪 Sync NHL_ID manquants", expanded=False):
-        players = st.text_input("Players DB", os.path.join(data_dir, "hockey.players.csv"), key="nhl_players")
-        limit = st.number_input("Max par run", 10, 500, 250)
-        if st.button("Associer NHL_ID"):
-            res = fill_nhl_ids(players, int(limit), show_progress=True)
-            if res["ok"]:
-                st.success(f"Ajoutés: {res['added']}")
+            if res.get("ok"):
+                st.success(f"✅ Level synchronisé. Modifiés: {res.get('updated', 0)}")
             else:
-                st.error(res["error"])
+                st.error(res.get("error", "Erreur."))
+                if res.get("missing"):
+                    st.caption("Chemins introuvables :")
+                    for p in res["missing"]:
+                        st.code(p, language="text")
+                if res.get("players_cols") or res.get("puck_cols"):
+                    with st.expander("🔎 Diagnostic colonnes", expanded=False):
+                        if res.get("players_cols"):
+                            st.write("Players DB colonnes:")
+                            st.write(res["players_cols"])
+                        if res.get("puck_cols"):
+                            st.write("PuckPedia colonnes:")
+                            st.write(res["puck_cols"])
+
+    # ---------- Sync NHL_ID missing (progress)
+    with st.expander("🪪 Sync NHL_ID manquants (progress)", expanded=False):
+        players2 = st.text_input("Players DB", os.path.join(data_dir, "hockey.players.csv"), key="nhl_players_db")
+        limit = st.number_input("Max par run", min_value=10, max_value=500, value=250, step=10)
+        dry = st.checkbox("Dry-run (ne sauvegarde pas)", value=False)
+
+        if st.button("Associer NHL_ID", use_container_width=False):
+            res = fill_nhl_ids(players2, int(limit), dry_run=bool(dry), show_progress=True)
+            if res.get("ok"):
+                st.success(res.get("summary", "Terminé."))
+            else:
+                st.error(res.get("error", "Erreur."))
 
 
 # ============================================================
-# SAFE HELPERS (no top-level loops)
+# SYNC FUNCTIONS (safe returns)
 # ============================================================
-def detect_name_col(df: pd.DataFrame) -> str | None:
-    for c in ["Joueur", "Player", "Name", "player_name", "Nom"]:
-        if c in df.columns:
-            return c
-    return None
-
-
 def sync_level(players_path: str, puck_path: str) -> Dict[str, Any]:
-    missing: list[str] = []
+    players_path = str(players_path or "").strip()
+    puck_path = str(puck_path or "").strip()
+
+    missing: List[str] = []
     if not os.path.exists(players_path):
         missing.append(players_path)
     if not os.path.exists(puck_path):
@@ -196,47 +286,139 @@ def sync_level(players_path: str, puck_path: str) -> Dict[str, Any]:
     if missing:
         return {"ok": False, "error": "Fichier introuvable.", "missing": missing}
 
-def fill_nhl_ids(players_path: str, limit: int, show_progress: bool = True) -> Dict[str, Any]:
-    import requests
-    if not os.path.exists(players_path):
-        return {"ok": False, "error": "Players DB introuvable."}
+    try:
+        pdb = pd.read_csv(players_path, low_memory=False)
+        pk = pd.read_csv(puck_path, low_memory=False)
+    except Exception as e:
+        return {"ok": False, "error": f"Lecture CSV échouée: {e}"}
 
-    df = pd.read_csv(players_path)
+    # Based on your screenshots: both use column 'Player'
+    name_pdb = "Player" if "Player" in pdb.columns else None
+    name_pk = "Player" if "Player" in pk.columns else None
+
+    if not name_pdb or not name_pk:
+        return {
+            "ok": False,
+            "error": "Colonne 'Player' introuvable dans un des fichiers.",
+            "players_cols": list(pdb.columns),
+            "puck_cols": list(pk.columns),
+        }
+
+    # Level column in puckpedia appears to be 'Level'
+    level_pk = "Level" if "Level" in pk.columns else None
+    if not level_pk:
+        return {"ok": False, "error": "Colonne 'Level' introuvable dans PuckPedia.", "puck_cols": list(pk.columns)}
+
+    if "Level" not in pdb.columns:
+        pdb["Level"] = ""
+
+    # build mapping Player -> Level (ELC/STD)
+    mp: Dict[str, str] = {}
+    for _, r in pk.iterrows():
+        nm = str(r.get(name_pk, "") or "").strip()
+        lv = str(r.get(level_pk, "") or "").strip().upper()
+        if nm and lv in ("ELC", "STD"):
+            mp[nm] = lv
+
+    if not mp:
+        return {"ok": False, "error": "Aucun Level ELC/STD trouvé dans PuckPedia.", "puck_cols": list(pk.columns)}
+
+    updated = 0
+    for i, r in pdb.iterrows():
+        nm = str(r.get(name_pdb, "") or "").strip()
+        if not nm:
+            continue
+        new_lv = mp.get(nm)
+        if not new_lv:
+            continue
+        old_lv = str(r.get("Level", "") or "").strip().upper()
+        if old_lv != new_lv:
+            pdb.at[i, "Level"] = new_lv
+            updated += 1
+
+    try:
+        pdb.to_csv(players_path, index=False)
+    except Exception as e:
+        return {"ok": False, "error": f"Écriture players DB échouée: {e}"}
+
+    return {"ok": True, "updated": updated}
+
+
+def fill_nhl_ids(players_path: str, limit: int, dry_run: bool = False, show_progress: bool = True) -> Dict[str, Any]:
+    import requests
+
+    players_path = str(players_path or "").strip()
+    if not os.path.exists(players_path):
+        return {"ok": False, "error": f"Players DB introuvable: {players_path}"}
+
+    try:
+        df = pd.read_csv(players_path, low_memory=False)
+    except Exception as e:
+        return {"ok": False, "error": f"Lecture players DB échouée: {e}"}
+
+    # Your file uses 'Player' (per screenshot)
+    if "Player" not in df.columns:
+        return {"ok": False, "error": "Colonne 'Player' introuvable dans hockey.players.csv", "players_cols": list(df.columns)}
+
     if "NHL_ID" not in df.columns:
         df["NHL_ID"] = ""
 
-    name_col = detect_name_col(df)
-    if not name_col:
-        return {"ok": False, "error": "Colonne nom introuvable."}
+    def _is_missing(v: Any) -> bool:
+        s = str(v or "").strip()
+        return (not s) or s.lower() == "nan" or s == "0"
 
-    added = 0
-    targets = df[df["NHL_ID"].isna() | (df["NHL_ID"]=="")].head(limit)
+    targets = df[df["NHL_ID"].apply(_is_missing)].head(int(limit))
     total = int(len(targets))
+    if total == 0:
+        return {"ok": True, "summary": "Aucun NHL_ID manquant à remplir.", "added": 0, "total": 0}
+
     prog = st.progress(0) if show_progress else None
     status = st.empty() if show_progress else None
 
+    added = 0
+    processed = 0
+
     for idx_num, (i, r) in enumerate(targets.iterrows(), start=1):
-        if show_progress and total:
-            prog.progress(min(1.0, idx_num/total))
-            status.caption(f"Traitement NHL_ID: {idx_num}/{total} — ajoutés: {added}")
-        q = requests.utils.quote(str(r[name_col]))
+        name = str(r.get("Player", "") or "").strip()
+        if not name:
+            continue
+
+        if show_progress and prog is not None and status is not None:
+            prog.progress(min(1.0, idx_num / max(1, total)))
+            status.caption(f"Traitement: {idx_num}/{total} — ajoutés: {added}")
+
+        q = requests.utils.quote(name)
         url = f"https://search.d3.nhle.com/api/v1/search/player?culture=en-us&limit=5&q={q}"
         try:
-            res = requests.get(url, timeout=10).json()
-            if res and "playerId" in res[0]:
-                df.at[i,"NHL_ID"] = int(res[0]["playerId"])
+            resp = requests.get(url, timeout=10)
+            if resp.status_code != 200:
+                continue
+            data = resp.json() or []
+            if not data:
+                continue
+            pid = data[0].get("playerId")
+            if pid:
+                processed += 1
                 added += 1
+                if not dry_run:
+                    df.at[i, "NHL_ID"] = int(pid)
         except Exception:
-            pass
+            continue
 
-    df.to_csv(players_path, index=False)
-    if show_progress:
+    if show_progress and prog is not None and status is not None:
+        prog.progress(1.0)
+        status.caption(f"Terminé ✅ — ajoutés: {added}/{total}")
+
+    if not dry_run:
         try:
-            if status is not None:
-                status.caption(f"Terminé ✅ — ajoutés: {added}/{total}")
-            if prog is not None:
-                prog.progress(1.0)
-        except Exception:
-            pass
-    summary = f"Terminé — ajoutés: {added}/{total}"
-    return {"ok": True, "added": added, "summary": summary}
+            df.to_csv(players_path, index=False)
+        except Exception as e:
+            return {"ok": False, "error": f"Écriture échouée: {e}"}
+
+    return {
+        "ok": True,
+        "added": added,
+        "processed": processed,
+        "total": total,
+        "summary": f"Terminé — ajoutés: {added}/{total}" + (" (dry-run)" if dry_run else ""),
+    }
