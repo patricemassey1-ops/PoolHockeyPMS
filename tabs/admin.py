@@ -1294,10 +1294,12 @@ def render_bulk_nhl_id_admin(DATA_DIR: str, season_lbl: str, is_admin: bool) -> 
         st.caption(
             f"Chemin détecté: `{players_path}` | exists={info.get('exists')} | size={info.get('size')} | rows={info.get('rows')} | cols={len(info.get('cols') or [])}"
         )
-        with st.expander("🔎 Diagnostic hockey.players.csv (aperçu brut + colonnes)", expanded=False):
-            if info.get('raw_head'):
-                st.code(info.get('raw_head'), language="text")
-            st.write({k: info.get(k) for k in ['delimiter','rows','cols','error']})
+    # NOTE: pas d'expander ici (évite nesting dans Streamlit)
+    show_diag = st.checkbox("🔎 Afficher diagnostic hockey.players.csv (aperçu brut + colonnes)", value=False, key=f"admin_diag_playersdb__{season_lbl}")
+    if show_diag:
+        if info.get('raw_head'):
+            st.code(info.get('raw_head'), language="text")
+        st.write({k: info.get(k) for k in ['delimiter','rows','cols','error']})
 
         st.caption(f"Chemin détecté: `{players_path}` (size={os.path.getsize(players_path) if os.path.exists(players_path) else 'NA'})")
         pm = os.path.join(DATA_DIR, "players_master.csv")
@@ -1334,7 +1336,8 @@ def render_bulk_nhl_id_admin(DATA_DIR: str, season_lbl: str, is_admin: bool) -> 
         st.metric("Checkpoint", "Oui" if bool(ckpt) else "Non")
 
     if ckpt:
-        with st.expander("Voir checkpoint", expanded=False):
+        # NOTE: pas d'expander ici (évite nesting dans Streamlit)
+        if st.checkbox("Voir checkpoint", value=False, key=f"admin_show_ckpt__{season_lbl}"):
             st.json(ckpt)
 
     colA, colB, colC, colD = st.columns([1, 1, 1, 1])
