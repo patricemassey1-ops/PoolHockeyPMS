@@ -517,9 +517,6 @@ def main() -> None:
     # Defaults
     st.session_state.setdefault("ui_theme", "dark")
     st.session_state.setdefault("season_lbl", DEFAULT_SEASON)
-        st.session_state.setdefault("active_tab_key", active_key)
-        st.session_state["nav_full"] = active_key
-        st.session_state["nav_icon"] = active_key
     st.session_state.setdefault("pending_tab", "")
     st.session_state.setdefault("owner", "Whalers")
     st.session_state.setdefault("owner_select", st.session_state.get("owner", "Whalers"))
