@@ -1,9 +1,10 @@
-
-# app.py — PoolHockeyPMS (routing + thème + contexte) — UI v4 (top bar + fix keys)
+# app.py — PoolHockeyPMS (routing + thème + contexte) — UI v5 (synced toggles + red accent)
 # ------------------------------------------------------------
-# - Accent rouge + fond navy (dark default) + option light
-# - Top bar (logo + titre + toggle + "menu" hint)
-# - Fix StreamlitDuplicateElementKey: owner_select unique (sidebar) + home_owner_select (home)
+# ✅ Dark par défaut, option Light (toggle sidebar + topbar synchronisés)
+# ✅ Aucune écriture interdite dans st.session_state après création d'un widget (fix StreamlitAPIException)
+# ✅ Pas de DuplicateElementKey (owner_select sidebar != home_owner_select home)
+# ✅ Logo équipe affiché à côté du select (sidebar + home)
+# ✅ Bannière logo_pool.png en HAUT de Home (proportions + container width)
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import Dict, Any
 
 import streamlit as st
 
+
 # =========================
 # CONFIG
 # =========================
@@ -22,7 +24,7 @@ st.set_page_config(
     page_title="Pool GM",
     page_icon="🏒",
     layout="wide",
-    initial_sidebar_state="expanded",  # users can collapse via built-in control
+    initial_sidebar_state="expanded",
 )
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -45,8 +47,10 @@ TEAM_LOGO = {
     "Cracheurs": os.path.join(DATA_DIR, "Cracheurs.png"),
     "Canadiens": os.path.join(DATA_DIR, "Canadiens.png"),
 }
+
 APP_LOGO = os.path.join(DATA_DIR, "gm_logo.png")
 BANNER = os.path.join(DATA_DIR, "logo_pool.png")
+
 
 # =========================
 # THEME (1 seule injection)
@@ -55,16 +59,15 @@ THEME_CSS_DARK = """
 <style>
 :root { color-scheme: dark; }
 
-/* --- Background (not pure black) --- */
+/* Background (navy, pas noir pur) */
 html, body, [data-testid="stAppViewContainer"]{
   background:
-    radial-gradient(1200px 800px at 20% -10%, rgba(255,0,64,.20), transparent 55%),
-    radial-gradient(1200px 800px at 95% 10%, rgba(80,140,255,.12), transparent 55%),
+    radial-gradient(1200px 800px at 20% -10%, rgba(255,0,64,.18), transparent 55%),
+    radial-gradient(1200px 800px at 95% 10%, rgba(80,140,255,.10), transparent 55%),
     linear-gradient(180deg, #0b1220, #070b12 65%, #070b12) !important;
   color: #e7eef7 !important;
 }
-
-.block-container { padding-top: .8rem; padding-bottom: 4.2rem; }
+.block-container { padding-top: .7rem; padding-bottom: 4.6rem; }
 
 /* Sidebar */
 section[data-testid="stSidebar"]{
@@ -72,35 +75,26 @@ section[data-testid="stSidebar"]{
   border-right: 1px solid rgba(255,255,255,.06);
 }
 
-/* --- Top bar --- */
+/* Topbar */
 .pms-topbar{
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  padding: .6rem .75rem;
-  margin: -0.5rem -0.5rem 0.75rem -0.5rem;
+  position: sticky; top: 0; z-index: 60;
+  padding: .60rem .75rem;
+  margin: -0.5rem -0.5rem 0.65rem -0.5rem;
   border-radius: 16px;
   backdrop-filter: blur(10px);
   background: rgba(10,16,28,.55);
   border: 1px solid rgba(255,255,255,.08);
   box-shadow: 0 10px 30px rgba(0,0,0,.25);
 }
-.pms-brand{
-  display:flex; align-items:center; gap:.6rem;
-  font-weight: 800; letter-spacing:-.02em;
-}
+.pms-brand{ display:flex; align-items:center; gap:.6rem; font-weight: 850; letter-spacing:-.02em; }
 .pms-brand img{ width:34px; height:34px; border-radius:10px; }
-.pms-right{
-  display:flex; align-items:center; gap:.6rem; justify-content:flex-end;
-}
+.pms-right{ display:flex; align-items:center; gap:.6rem; justify-content:flex-end; }
 .pms-chip{
   display:inline-flex; align-items:center; gap:.45rem;
-  padding:.35rem .55rem;
-  border-radius: 999px;
+  padding:.35rem .55rem; border-radius:999px;
   border:1px solid rgba(255,255,255,.10);
   background: rgba(255,255,255,.05);
-  font-size: 12px;
-  opacity:.92;
+  font-size:12px; opacity:.92;
 }
 .pms-hamburger{
   width:36px; height:36px;
@@ -108,8 +102,7 @@ section[data-testid="stSidebar"]{
   border-radius: 12px;
   border:1px solid rgba(255,255,255,.12);
   background: rgba(255,255,255,.05);
-  font-size: 16px;
-  line-height: 1;
+  font-size:16px; line-height:1;
 }
 
 /* Cards */
@@ -122,33 +115,25 @@ section[data-testid="stSidebar"]{
 .smallmuted{ opacity:.72; font-size: 13px; }
 hr{ border-color: rgba(255,255,255,.10); }
 
-/* Accent red for selected radio option */
-div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child{
-  border-color: rgba(255,255,255,.18);
-}
-div[role="radiogroup"] label[data-baseweb="radio"] input:checked + div{
-  border-color: rgba(255,60,90,.95) !important;
-  box-shadow: 0 0 0 3px rgba(255,60,90,.16);
-}
-
-/* Buttons */
-.stButton>button{
-  border-radius: 12px !important;
-}
+/* Accent rouge */
+.stButton>button{ border-radius: 12px !important; }
 .stButton>button[kind="primary"]{
   background: #ef4444 !important;
   border: 1px solid rgba(255,46,77,.55) !important;
 }
-.stButton>button[kind="primary"]:hover{
-  filter: brightness(1.03);
+.stButton>button[kind="primary"]:hover{ filter: brightness(1.03); }
+
+/* Radio selected */
+div[role="radiogroup"] label[data-baseweb="radio"] input:checked + div{
+  border-color: rgba(239,68,68,1) !important;
+  box-shadow: 0 0 0 3px rgba(239,68,68,.18);
 }
 
-/* Bottom nav (mobile only) */
+/* Bottom dock (mobile) */
 @media (max-width: 900px){
-  .block-container{ padding-bottom: 5.4rem; }
+  .block-container{ padding-bottom: 5.6rem; }
   .pms-bottomnav{
-    position: fixed; left: 0; right: 0; bottom: 0;
-    z-index: 80;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 90;
     padding: .55rem .75rem;
     background: rgba(10,16,28,.70);
     backdrop-filter: blur(12px);
@@ -160,9 +145,7 @@ div[role="radiogroup"] label[data-baseweb="radio"] input:checked + div{
     display:flex; flex-direction:column; align-items:center; gap:.15rem;
   }
   .pms-bottomnav a.active{ color:#ef4444; }
-  .pms-bottomnav .row{
-    display:flex; justify-content:space-around; gap:.25rem;
-  }
+  .pms-bottomnav .row{ display:flex; justify-content:space-around; gap:.25rem; }
 }
 </style>
 """
@@ -171,6 +154,7 @@ THEME_CSS_LIGHT = """
 <style>
 :root { color-scheme: light; }
 
+/* Background */
 html, body, [data-testid="stAppViewContainer"]{
   background:
     radial-gradient(1000px 700px at 20% -10%, rgba(255,60,90,.14), transparent 55%),
@@ -178,42 +162,34 @@ html, body, [data-testid="stAppViewContainer"]{
     linear-gradient(180deg, #f7f8fc, #f3f5fb 60%, #f3f5fb) !important;
   color: #0b1020 !important;
 }
+.block-container { padding-top: .7rem; padding-bottom: 4.6rem; }
 
-.block-container { padding-top: .8rem; padding-bottom: 4.2rem; }
-
+/* Sidebar */
 section[data-testid="stSidebar"]{
   background: #ffffff !important;
   border-right: 1px solid rgba(0,0,0,.06);
 }
 
+/* Topbar */
 .pms-topbar{
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  padding: .6rem .75rem;
-  margin: -0.5rem -0.5rem 0.75rem -0.5rem;
+  position: sticky; top: 0; z-index: 60;
+  padding: .60rem .75rem;
+  margin: -0.5rem -0.5rem 0.65rem -0.5rem;
   border-radius: 16px;
   backdrop-filter: blur(10px);
   background: rgba(255,255,255,.72);
   border: 1px solid rgba(0,0,0,.06);
   box-shadow: 0 10px 30px rgba(0,0,0,.08);
 }
-.pms-brand{
-  display:flex; align-items:center; gap:.6rem;
-  font-weight: 800; letter-spacing:-.02em;
-}
+.pms-brand{ display:flex; align-items:center; gap:.6rem; font-weight: 850; letter-spacing:-.02em; }
 .pms-brand img{ width:34px; height:34px; border-radius:10px; }
-.pms-right{
-  display:flex; align-items:center; gap:.6rem; justify-content:flex-end;
-}
+.pms-right{ display:flex; align-items:center; gap:.6rem; justify-content:flex-end; }
 .pms-chip{
   display:inline-flex; align-items:center; gap:.45rem;
-  padding:.35rem .55rem;
-  border-radius: 999px;
+  padding:.35rem .55rem; border-radius:999px;
   border:1px solid rgba(0,0,0,.08);
   background: rgba(0,0,0,.03);
-  font-size: 12px;
-  opacity:.85;
+  font-size:12px; opacity:.85;
 }
 .pms-hamburger{
   width:36px; height:36px;
@@ -221,10 +197,10 @@ section[data-testid="stSidebar"]{
   border-radius: 12px;
   border:1px solid rgba(0,0,0,.10);
   background: rgba(0,0,0,.03);
-  font-size: 16px;
-  line-height: 1;
+  font-size:16px; line-height:1;
 }
 
+/* Cards */
 .card{
   background: #ffffff;
   border: 1px solid rgba(0,0,0,.08);
@@ -234,18 +210,17 @@ section[data-testid="stSidebar"]{
 .smallmuted{ opacity:.72; font-size: 13px; }
 hr{ border-color: rgba(0,0,0,.10); }
 
-/* Accent red */
+/* Accent rouge */
 .stButton>button[kind="primary"]{
   background: #ef4444 !important;
   border: 1px solid rgba(255,46,77,.45) !important;
 }
 
-/* Bottom nav (mobile only) */
+/* Bottom dock (mobile) */
 @media (max-width: 900px){
-  .block-container{ padding-bottom: 5.4rem; }
+  .block-container{ padding-bottom: 5.6rem; }
   .pms-bottomnav{
-    position: fixed; left: 0; right: 0; bottom: 0;
-    z-index: 80;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 90;
     padding: .55rem .75rem;
     background: rgba(255,255,255,.80);
     backdrop-filter: blur(12px);
@@ -257,9 +232,7 @@ hr{ border-color: rgba(0,0,0,.10); }
     display:flex; flex-direction:column; align-items:center; gap:.15rem;
   }
   .pms-bottomnav a.active{ color:#ef4444; }
-  .pms-bottomnav .row{
-    display:flex; justify-content:space-around; gap:.25rem;
-  }
+  .pms-bottomnav .row{ display:flex; justify-content:space-around; gap:.25rem; }
 }
 </style>
 """
@@ -318,30 +291,6 @@ TABS = [
 ]
 
 
-def _render_topbar(active_label: str) -> None:
-    # Pure HTML/CSS header; Streamlit widgets are placed just under via columns
-    logo_ok = APP_LOGO if os.path.exists(APP_LOGO) else ""
-    logo_html = f'<img src="data:image/png;base64,{_img_to_b64(logo_ok)}"/>' if logo_ok else '<div style="width:34px;height:34px;border-radius:10px;background:rgba(255,46,77,.25)"></div>'
-    st.markdown(
-        f"""
-        <div class="pms-topbar">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;">
-            <div class="pms-brand">
-              {logo_html}
-              <div>Pool GM</div>
-              <span class="pms-chip">📍 {active_label}</span>
-            </div>
-            <div class="pms-right">
-              <span class="pms-chip">Theme</span>
-              <span class="pms-hamburger" title="Menu: utilise la flèche de la sidebar (en haut à gauche) sur petits écrans">☰</span>
-            </div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def _img_to_b64(path: str) -> str:
     import base64
     try:
@@ -353,19 +302,73 @@ def _img_to_b64(path: str) -> str:
         return ""
 
 
+def _render_topbar(active_label: str) -> None:
+    logo_ok = APP_LOGO if os.path.exists(APP_LOGO) else ""
+    b64 = _img_to_b64(logo_ok)
+    logo_html = f'<img src="data:image/png;base64,{b64}"/>' if b64 else '<div style="width:34px;height:34px;border-radius:10px;background:rgba(239,68,68,.25)"></div>'
+    st.markdown(
+        f"""
+        <div class="pms-topbar">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;">
+            <div class="pms-brand">
+              {logo_html}
+              <div>Pool GM</div>
+              <span class="pms-chip">📍 {active_label}</span>
+            </div>
+            <div class="pms-right">
+              <span class="pms-chip">Thème</span>
+              <span class="pms-hamburger" title="Menu: utilise la flèche de la sidebar sur petits écrans">☰</span>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _sync_theme_from(key_name: str) -> None:
+    """
+    Callback: lit la valeur d'un toggle et met à jour:
+      - ui_theme (source of truth)
+      - les 2 toggles (top + sidebar) pour rester en sync
+    """
+    is_light = bool(st.session_state.get(key_name, False))
+    st.session_state["ui_theme"] = "light" if is_light else "dark"
+    # sync l'autre toggle (permis ici: callback, pas "après rendu")
+    st.session_state["ui_theme_toggle_top"] = is_light
+    st.session_state["ui_theme_toggle_side"] = is_light
+
+
+def _render_theme_toggle_inline() -> None:
+    # Toggle topbar (pas de label vide -> label_visibility="collapsed")
+    cols = st.columns([4, 1.6, 6], vertical_alignment="center")
+    with cols[0]:
+        st.markdown("")
+    with cols[1]:
+        st.toggle(
+            "Mode clair",
+            value=(st.session_state.get("ui_theme", "dark") == "light"),
+            key="ui_theme_toggle_top",
+            on_change=_sync_theme_from,
+            args=("ui_theme_toggle_top",),
+            label_visibility="collapsed",
+        )
+    with cols[2]:
+        st.markdown('<div class="smallmuted">Astuce: sur petit écran, utilise la flèche de la sidebar (ou ☰).</div>', unsafe_allow_html=True)
+
+
 def sidebar_nav() -> str:
     with st.sidebar:
         st.markdown("### Pool GM")
         _safe_image(APP_LOGO, width=52)
 
-        season = st.selectbox(
+        st.selectbox(
             "Saison",
             options=[DEFAULT_SEASON, "2024-2025", "2023-2024"],
             key="season_lbl",
         )
 
         st.markdown("#### Navigation")
-
         labels = [t[0] for t in TABS]
         default_idx = labels.index(st.session_state.get("active_tab", "🏠 Home")) if st.session_state.get("active_tab") in labels else 0
         active = st.radio("Navigation", labels, index=default_idx, key="nav_radio", label_visibility="collapsed")
@@ -373,20 +376,29 @@ def sidebar_nav() -> str:
 
         st.markdown("---")
 
+        # Owner + logo côte-à-côte
         c_own, c_logo = st.columns([4, 1], gap="small")
         with c_own:
             owner = st.selectbox("Mon équipe", options=POOL_TEAMS, key="owner_select")
         with c_logo:
-            _safe_image(TEAM_LOGO.get(owner, ""), width=36)
+            _safe_image(TEAM_LOGO.get(owner, ""), width=34)
         st.session_state["owner"] = owner
-        st.session_state["ui_theme"] = "light" if is_light else "dark"
+
+        st.markdown("---")
+
+        # Toggle sidebar (sync)
+        st.toggle(
+            "Mode clair",
+            value=(st.session_state.get("ui_theme", "dark") == "light"),
+            key="ui_theme_toggle_side",
+            on_change=_sync_theme_from,
+            args=("ui_theme_toggle_side",),
+        )
 
     return active
 
 
 def _render_bottom_nav(active_label: str) -> None:
-    # Mobile helper; links are visual only (Streamlit can't navigate via anchor to session_state).
-    # Still useful as a "dock" look; real nav remains in sidebar.
     items = [
         ("🏠", "Home"),
         ("👥", "Joueurs"),
@@ -394,7 +406,12 @@ def _render_bottom_nav(active_label: str) -> None:
         ("🔁", "Transactions"),
         ("🧑‍💼", "GM"),
     ]
-    active_simple = active_label.replace("🏠 ", "").replace("👥 ", "").replace("🧊 ", "").replace("🔁 ", "").replace("🧑‍💼 ", "").strip()
+    # Simplifie l'étiquette active
+    active_simple = active_label
+    for p in ["🏠 ", "👥 ", "🧊 ", "🔁 ", "🧑‍💼 ", "🕘 ", "🏆 ", "🛠️ "]:
+        active_simple = active_simple.replace(p, "")
+    active_simple = active_simple.strip()
+
     links = []
     for icon, name in items:
         cls = "active" if name == active_simple else ""
@@ -412,7 +429,7 @@ def _render_bottom_nav(active_label: str) -> None:
 
 
 # =========================
-# RENDERERS IMPORT
+# IMPORT TABS
 # =========================
 def _import_tabs():
     try:
@@ -434,7 +451,6 @@ def _import_tabs():
 
 
 def _sync_owner_to_sidebar(new_owner: str) -> None:
-    """Synchronise le owner 'global' (sidebar) avec la sélection Home, sans DuplicateKey."""
     new_owner = str(new_owner or "").strip()
     if not new_owner:
         return
@@ -443,7 +459,7 @@ def _sync_owner_to_sidebar(new_owner: str) -> None:
 
 
 def _render_home(ctx: AppCtx):
-    # banner top — fully at top (like your screenshot proportions)
+    # Banner tout en haut (comme tes screenshots)
     if os.path.exists(BANNER):
         st.markdown('<div class="card" style="padding:10px;">', unsafe_allow_html=True)
         st.image(BANNER, use_container_width=True)
@@ -454,14 +470,12 @@ def _render_home(ctx: AppCtx):
     st.markdown('<div class="smallmuted">Home reste clean — aucun bloc Admin ici.</div>', unsafe_allow_html=True)
     st.markdown("")
 
-    # Selection card
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### 🏒 Sélection d'équipe")
     st.caption("Cette sélection alimente Alignement / GM / Transactions (même clé session_state).")
 
     c1, c2 = st.columns([3, 1], vertical_alignment="center")
     with c1:
-        # UNIQUE KEY (no collision with sidebar)
         picked = st.selectbox(
             "Équipe (propriétaire)",
             options=POOL_TEAMS,
@@ -475,45 +489,45 @@ def _render_home(ctx: AppCtx):
     with c2:
         logo = TEAM_LOGO.get(ctx.owner, "")
         if logo and os.path.exists(logo):
-            st.image(logo, width=88)
+            st.image(logo, width=96)
 
     st.success(f"✅ Équipe sélectionnée: **{ctx.owner}**")
     st.markdown(f"**Saison:** {ctx.season_lbl}")
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def _render_theme_toggle_inline() -> None:
-    """Topbar theme toggle without empty labels."""
-    c1, c2, c3 = st.columns([1, 1, 2], vertical_alignment="center")
-    with c1:
-        # no-op spacer
-        st.markdown("")
-    with c2:
-        is_light = st.toggle("Mode clair (top)", value=(st.session_state.get("ui_theme", "dark") == "light"),
-                             key="ui_theme_toggle_top", label_visibility="collapsed")
-        # keep single source of truth
-        st.session_state["ui_theme"] = "light" if is_light else "dark"
-    with c3:
-        st.markdown('<div class="smallmuted">Astuce: sur petit écran, utilise la flèche de la sidebar ou ☰.</div>', unsafe_allow_html=True)
-
-
 def main() -> None:
+    # ---- Defaults (AVANT widgets)
     st.session_state.setdefault("ui_theme", "dark")
+    st.session_state.setdefault("ui_theme_toggle_top", False)
+    st.session_state.setdefault("ui_theme_toggle_side", False)
+
+    # Align toggle states with ui_theme on first run (safe: before widgets)
+    if st.session_state.get("ui_theme", "dark") == "light":
+        st.session_state["ui_theme_toggle_top"] = True
+        st.session_state["ui_theme_toggle_side"] = True
+    else:
+        st.session_state["ui_theme_toggle_top"] = False
+        st.session_state["ui_theme_toggle_side"] = False
+
     st.session_state.setdefault("owner", "Whalers")
     st.session_state.setdefault("season_lbl", DEFAULT_SEASON)
     st.session_state.setdefault("active_tab", "🏠 Home")
     st.session_state.setdefault("owner_select", st.session_state.get("owner", "Whalers"))
 
+    # ---- Theme injection (1 fois)
     apply_theme()
 
+    # ---- Sidebar nav
     active_label = sidebar_nav()
 
-    # Top bar (visual) + inline toggle
+    # ---- Top bar + toggle
     _render_topbar(active_label)
     _render_theme_toggle_inline()
 
     owner = st.session_state.get("owner") or "Whalers"
     season = st.session_state.get("season_lbl") or DEFAULT_SEASON
+
     ctx = AppCtx(
         data_dir=DATA_DIR,
         season_lbl=str(season),
@@ -547,7 +561,6 @@ def main() -> None:
         st.error("Une erreur a été détectée (évite l'écran noir).")
         st.code(traceback.format_exc())
 
-    # bottom dock look (mobile)
     _render_bottom_nav(active_label)
 
 
