@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import io
+import re
 import json
 import time
 import zipfile
@@ -20,7 +21,6 @@ from typing import Dict, Any, List, Tuple
 
 import streamlit as st
 import pandas as pd
-import re
 
 # ===== Teams (doit matcher app.py) =====
 POOL_TEAMS = [
