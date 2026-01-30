@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Tuple
 
 import re
+import difflib
 import streamlit as st
 import pandas as pd
 import re
@@ -171,6 +172,69 @@ def _pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
         if key in cmap:
             return cmap[key]
     return None
+
+
+def _best_recovery_source(data_dir: str, season: str):
+    """Pick the best local source file (highest NHL_ID coverage)."""
+    season = str(season or "").strip()
+    candidates = []
+    cand_paths = [
+        ("Roster filtré (export)", os.path.join(data_dir, f"roster_filtered_{season}.csv")),
+        ("Roster complet (export)", os.path.join(data_dir, f"roster_{season}.csv")),
+        ("Équipes (equipes_joueurs)", os.path.join(data_dir, f"equipes_joueurs_{season}.csv")),
+    ]
+    for label, p in cand_paths:
+        if not p or not os.path.exists(p):
+            continue
+        try:
+            df = pd.read_csv(p, nrows=2000, low_memory=False)
+        except Exception:
+            continue
+        idc = _resolve_nhl_id_col(df)
+        if not idc:
+            cov = 0.0
+        else:
+            s = df[idc].astype(str).str.strip()
+            cov = float((s != "").sum()) / float(len(df) or 1)
+        candidates.append((cov, label, p))
+    if not candidates:
+        return (None, None)
+    candidates.sort(reverse=True, key=lambda x: x[0])
+    return (candidates[0][1], candidates[0][2])
+
+
+def _dedupe_nhl_ids(df: pd.DataFrame, id_col: str, conf_col: str = "nhl_id_conf"):
+    """Resolve duplicate NHL_IDs by keeping the highest confidence row; blank out others."""
+    out = df.copy()
+    if id_col not in out.columns:
+        return out, {"dup_count": 0, "dup_rate": 0.0}
+    s = out[id_col].astype(str).str.strip()
+    mask = s.ne("") & s.ne("nan")
+    if not mask.any():
+        return out, {"dup_count": 0, "dup_rate": 0.0}
+    if conf_col not in out.columns:
+        out[conf_col] = 0
+    conf = pd.to_numeric(out[conf_col], errors="coerce").fillna(0).astype(int)
+    ids = s.where(mask, "")
+    dup_ids = ids[mask].value_counts()
+    dup_ids = dup_ids[dup_ids > 1].index.tolist()
+    if not dup_ids:
+        return out, {"dup_count": 0, "dup_rate": 0.0}
+    to_blank = []
+    for did in dup_ids:
+        rows = out.index[ids == did].tolist()
+        if len(rows) <= 1:
+            continue
+        best = max(rows, key=lambda i: conf.loc[i])
+        for i in rows:
+            if i != best:
+                to_blank.append(i)
+    out.loc[to_blank, id_col] = ""
+    out.loc[to_blank, conf_col] = 0
+    dup_count = int(len(dup_ids))
+    dup_rate = float((ids[mask].duplicated(keep=False).sum()) / float(mask.sum() or 1)) * 100.0
+    return out, {"dup_count": dup_count, "dup_rate_pct": dup_rate, "rows_blank": len(to_blank)}
+
 
 def recover_nhl_id_from_source(players_df: pd.DataFrame, source_df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """Récupère NHL_ID depuis un CSV source (roster/export) sans appeler d'API.
@@ -644,6 +708,8 @@ def sync_nhl_id(
     dry_run: bool = False,
     allow_decrease: bool = False,
     source_df: pd.DataFrame | None = None,
+    dedupe_fallback: bool = False,
+    dup_block_pct: float = 5.0,
 ) -> Dict[str, Any]:
     """Complète NHL_ID manquants dans hockey.players.csv.
 
@@ -925,225 +991,8 @@ def render_roster_admin(data_dir: str, season: str) -> None:
     with c2:
         owner = st.selectbox("Équipe", options=POOL_TEAMS, index=0)
     with c3:
-        bucket = st.selectbox("Bucket", options=["GC", "CE"], index=0)
-    with c4:
-        slot = st.selectbox("Slot", options=["Actif", "Banc", "IR", "Mineur"], index=0)
-
-    if st.button("✅ Ajouter au roster"):
-        if not picked:
-            st.warning("Choisis au moins 1 joueur.")
-        else:
-            add_rows = []
-            existing_keys = set(
-                (str(r.get("season")), str(r.get("owner")), str(r.get("bucket")), str(r.get("slot")), _norm_player(r.get("player")))
-                for _, r in roster.iterrows()
-            )
-            for p in picked:
-                key = (season, owner, bucket, slot, _norm_player(p))
-                if key in existing_keys:
-                    continue
-                add_rows.append({"season": season, "owner": owner, "bucket": bucket, "slot": slot, "player": _norm_player(p)})
-
-            if add_rows:
-                roster2 = pd.concat([roster, pd.DataFrame(add_rows)], ignore_index=True)
-                err2 = roster_save(roster2, data_dir, season)
-                if err2:
-                    st.error(err2)
-                else:
-                    st.success(f"Ajoutés: {len(add_rows)}")
-                    st.rerun()
-            else:
-                st.info("Aucun nouvel ajout (déjà présents).")
-
-    st.markdown("---")
-
-    st.markdown("### 🔁 Déplacer GC ↔ CE")
-    c5, c6 = st.columns([2, 1])
-    with c5:
-        roster_owner = st.selectbox("Équipe (roster)", options=POOL_TEAMS, key="roster_owner_filter")
-    with c6:
-        players_for_owner = roster.loc[roster["owner"].astype(str) == roster_owner, "player"].astype(str).tolist()
-        players_for_owner = sorted({_norm_player(x) for x in players_for_owner if str(x).strip()})
-        move_player = st.selectbox("Joueur", options=[""] + players_for_owner, key="move_player")
-
-    if st.button("Basculer GC↔CE"):
-        if not move_player:
-            st.warning("Choisis un joueur.")
-        else:
-            mask = (
-                (roster["season"].astype(str) == season)
-                & (roster["owner"].astype(str) == roster_owner)
-                & (roster["player"].astype(str).apply(_norm_player) == _norm_player(move_player))
-            )
-            if int(mask.sum()) == 0:
-                st.info("Joueur non trouvé dans le roster.")
-            else:
-                def _toggle(x):
-                    x = str(x or "").strip().upper()
-                    return "CE" if x == "GC" else "GC"
-                roster.loc[mask, "bucket"] = roster.loc[mask, "bucket"].apply(_toggle)
-                err3 = roster_save(roster, data_dir, season)
-                if err3:
-                    st.error(err3)
-                else:
-                    st.success("Déplacement effectué.")
-                    st.rerun()
-
-    st.markdown("---")
-
-    st.markdown("### 🗑️ Retirer joueur(s)")
-    roster_f = roster.copy()
-    if not roster_f.empty:
-        roster_f["player"] = roster_f["player"].astype(str).apply(_norm_player)
-
-    filt_owner = st.selectbox("Filtrer par équipe", options=["(Toutes)"] + POOL_TEAMS, index=0, key="rm_owner")
-    if filt_owner != "(Toutes)":
-        roster_f = roster_f[roster_f["owner"].astype(str) == filt_owner]
-
-    st.dataframe(roster_f.sort_values(["owner", "bucket", "slot", "player"]), use_container_width=True, height=360)
-
-    to_remove = st.multiselect(
-        "Sélectionne les lignes à retirer (format: index :: owner | bucket | slot | player)",
-        options=[f"{i} :: {r['owner']} | {r['bucket']} | {r['slot']} | {r['player']}" for i, r in roster_f.iterrows()],
-        max_selections=200,
-    )
-    confirm = st.checkbox("Je confirme la suppression", value=False)
-
-    if st.button("🗑️ Supprimer", disabled=not (confirm and bool(to_remove))):
-        idxs = []
-        for s in to_remove:
-            try:
-                idxs.append(int(str(s).split("::")[0].strip()))
-            except Exception:
-                pass
-        if not idxs:
-            st.warning("Aucune ligne valide sélectionnée.")
-        else:
-            roster2 = roster.drop(index=idxs, errors="ignore").reset_index(drop=True)
-            err4 = roster_save(roster2, data_dir, season)
-            if err4:
-                st.error(err4)
-            else:
-                st.success(f"Supprimés: {len(idxs)}")
-                st.rerun()
-
-    st.markdown("---")
-    st.markdown("### 📤 Export roster")
-    colx1, colx2 = st.columns(2)
-    with colx1:
-        st.download_button(
-            "⬇️ Export roster (CSV)",
-            data=roster.to_csv(index=False).encode("utf-8"),
-            file_name=os.path.basename(roster_path(data_dir, season)),
-            mime="text/csv",
-            use_container_width=True,
-        )
-    with colx2:
-        st.download_button(
-            "⬇️ Export roster filtré (CSV)",
-            data=roster_f.to_csv(index=False).encode("utf-8"),
-            file_name=f"roster_filtered_{season}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-
-# =====================================================
-# UI — Outils
-# =====================================================
-def render_tools(data_dir: str, season: str) -> None:
-    st.subheader("🧰 Outils — synchros")
-
-    with st.expander("🧾 Sync PuckPedia → Level (STD/ELC)", expanded=False):
-        puck = st.text_input("Fichier PuckPedia", puckpedia_path(data_dir))
-        players = st.text_input("Players DB", players_db_path(data_dir))
-
-        colp1, colp2 = st.columns(2)
-        with colp1:
-            if st.button("👀 Voir colonnes PuckPedia"):
-                try:
-                    pk0 = pd.read_csv(puck, nrows=0)
-                    st.write(list(pk0.columns))
-                except Exception as e:
-                    st.error(f"Lecture PuckPedia échouée: {e}")
-        with colp2:
-            if st.button("👀 Voir colonnes Players DB"):
-                try:
-                    pdb0 = pd.read_csv(players, nrows=0)
-                    st.write(list(pdb0.columns))
-                except Exception as e:
-                    st.error(f"Lecture Players DB échouée: {e}")
-
-        if st.button("Synchroniser Level"):
-            res = sync_level(players, puck)
-            if res.get("ok"):
-                st.success(f"Levels mis à jour: {res.get('updated', 0)}")
-            else:
-                st.error(res.get("error", "Erreur inconnue"))
-                if res.get("missing"):
-                    st.write("Chemins manquants:", res["missing"])
-                if res.get("players_cols"):
-                    st.write("Players DB colonnes:", res["players_cols"])
-                if res.get("puck_cols"):
-                    st.write("PuckPedia colonnes:", res["puck_cols"])
-
-    with st.expander("🆔 Sync NHL_ID manquants (avec progression + audit + exports)", expanded=False):
-        players2 = st.text_input("Players DB (NHL_ID)", players_db_path(data_dir), key="nhl_players")
-        limit = st.number_input("Max par run", 1, 2000, 1000, step=50)
-        dry = st.checkbox("Dry-run (ne sauvegarde pas)", value=False)
-        override = st.checkbox("Override SAFE MODE (autoriser une baisse NHL_ID)", value=False, key="nhl_id_override")
-
-        if st.button("🔎 Vérifier l'état des NHL_ID"):
-            st.caption("Note: si tes IDs sont dans une autre colonne (ex: nhl_id), l’audit l’utilise automatiquement — il ne doit plus te retomber à 100%.")
-            df, err = load_csv(players2)
-            if err:
-                st.error(err)
-            else:
-                a = audit_nhl_ids(df)
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Total joueurs", a["total"])
-                c2.metric(f"Avec ID ({a.get('id_col','NHL_ID')})", a["filled"])
-                c3.metric("Manquants", a["missing"])
-                c4.metric("% manquants", f"{a['missing_pct']:.1f}%")
-
-                if a.get("duplicates", 0):
-                    st.warning(f"IDs dupliqués détectés: {a['duplicates']} (souvent normal si erreurs de match).")
-
-                st.markdown("#### 📤 Export")
-                ex1, ex2 = st.columns(2)
-                with ex1:
-                    st.download_button(
-                        "⬇️ Exporter la liste complète (CSV)",
-                        data=df.to_csv(index=False).encode("utf-8"),
-                        file_name="players_full.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
-                with ex2:
-                    id_col = a.get('id_col') or _resolve_nhl_id_col(df)
-                    missing_df = df[df[id_col].apply(_is_missing_id)].copy()
-                    st.download_button(
-                        "⬇️ Exporter la liste des manquants (CSV)",
-                        data=missing_df.to_csv(index=False).encode("utf-8"),
-                        file_name="players_missing_nhl_id.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
-
-                if a["missing"] > 0:
-                    cols = ["Player"]
-                    if "Team" in df.columns:
-                        cols.append("Team")
-                    if "Position" in df.columns:
-                        cols.append("Position")
-                    st.caption("Aperçu (max 200) des joueurs sans NHL_ID :")
-                    st.dataframe(missing_df[cols].head(200), use_container_width=True)
-
-        st.markdown("**Source de récupération (optionnel)**")
-        src_choice = st.selectbox(
-            "Récupérer NHL_ID depuis…",
-            ["Aucune (API NHL uniquement)", "Roster export (CSV dans /data)", "Uploader un CSV"],
-            index=0,
+        bucket = st.selectbox("Bucket", options=[o[0] for o in recovery_opts],
+            index=1 if len(recovery_opts)>1 else 0,
             key="nhl_id_src_choice",
         )
 
