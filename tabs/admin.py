@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import io
-import re
 import json
 import time
 import zipfile
@@ -21,6 +20,7 @@ from typing import Dict, Any, List, Tuple
 
 import streamlit as st
 import pandas as pd
+import re
 
 # ===== Teams (doit matcher app.py) =====
 POOL_TEAMS = [
@@ -220,21 +220,18 @@ def _coerce_nhl_id_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_csv(path: str, **read_kwargs):
-    """
-    Charge un CSV de façon SAFE.
-    Retourne: (df, err) où err est None si OK, sinon un message d'erreur.
-    """
+def load_csv(path: str) -> pd.DataFrame:
+    """Lecture CSV robuste (évite mixed dtypes, garde les IDs en texte)."""
+    if not path or not os.path.exists(path):
+        return pd.DataFrame()
     try:
-        if not path:
-            return pd.DataFrame(), "Chemin CSV vide."
-        if not os.path.exists(path):
-            return pd.DataFrame(), f"Fichier introuvable: {path}"
-        # low_memory=False réduit les DtypeWarning sur gros CSV
-        df = pd.read_csv(path, low_memory=False, **read_kwargs)
-        return df, None
-    except Exception as e:
-        return pd.DataFrame(), f"{type(e).__name__}: {e}"
+        df = pd.read_csv(path, low_memory=False)
+        df = _coerce_nhl_id_cols(df)
+        return df
+    except Exception:
+        st.error(f"❌ Erreur lecture: {path}")
+        st.code(traceback.format_exc())
+        return pd.DataFrame()
 
 
 def save_csv(df: pd.DataFrame, path: str, *, safe_mode: bool = True, id_cols: list[str] | None = None) -> str:
@@ -292,6 +289,50 @@ def restore_zip_bytes(zip_bytes: bytes, data_dir: str) -> str | None:
         return None
     except Exception as e:
         return str(e)
+
+
+def collect_backup_files(data_dir: str, season: str) -> list[str]:
+    """Return a stable list of local files to include in a backup zip.
+
+    We include common CSV/JSON assets from /data, and season-scoped files.
+    This is intentionally conservative (SAFE): it never crashes if the folder is missing.
+    """
+    files: list[str] = []
+    try:
+        if not data_dir:
+            return files
+        os.makedirs(data_dir, exist_ok=True)
+
+        season = str(season or "").strip()
+        # include all CSV/JSON in data_dir except obvious temp/backup artifacts
+        for name in sorted(os.listdir(data_dir)):
+            p = os.path.join(data_dir, name)
+            if not os.path.isfile(p):
+                continue
+            low = name.lower()
+            if low.endswith((".csv", ".json")) and not low.endswith(".zip"):
+                if low.startswith("backup_") or "checkpoint" in low:
+                    continue
+                files.append(p)
+
+        # ensure core season roster file(s) are included if present
+        if season:
+            season_tokens = [season, season.replace("-", "_"), season.replace("-", "–")]
+            for name in sorted(os.listdir(data_dir)):
+                low = name.lower()
+                if not low.endswith(".csv"):
+                    continue
+                if any(tok.lower() in low for tok in season_tokens):
+                    p = os.path.join(data_dir, name)
+                    if os.path.isfile(p) and p not in files:
+                        files.append(p)
+
+    except Exception:
+        # never fail backups UI because of a listing error
+        return files
+    return files
+
+
 
 
 # =====================================================
