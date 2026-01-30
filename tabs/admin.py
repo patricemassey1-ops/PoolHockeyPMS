@@ -162,58 +162,113 @@ def autobackup_state_path(data_dir: str, season: str) -> str:
 # =====================================================
 # CSV IO helpers
 # =====================================================
-def load_csv(path: str) -> Tuple[pd.DataFrame, str | None]:
+def _count_nonempty(s: pd.Series) -> int:
+    try:
+        return int((s.astype(str).str.strip().replace({'nan':'', 'None':''}) != '').sum())
+    except Exception:
+        return 0
+
+
+def _coerce_nhl_id_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalise les colonnes d'ID NHL sans perdre les valeurs existantes.
+
+    - Accepte 'NHL_ID' ou 'nhl_id' (ou variantes).
+    - Crée 'nhl_id' si seulement 'NHL_ID' existe.
+    - Fusionne sans écraser une valeur non-vide.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+
+    # Detect candidates
+    cols = {c.lower(): c for c in df.columns}
+    c_nhl = cols.get("nhl_id")
+    c_nhl2 = cols.get("nhl id")  # rare
+    c_nhl_up = cols.get("nhl_id".upper().lower())  # no-op
+
+    # Also accept NHL_ID exactly
+    c_NHL_ID = None
+    for c in df.columns:
+        if c == "NHL_ID":
+            c_NHL_ID = c
+            break
+
+    # Choose existing lower-case id column if present
+    if c_nhl is None:
+        # try alternate spellings
+        for c in df.columns:
+            if c.lower().replace(" ", "_") in {"nhl_id", "nhl-id", "nhlid"}:
+                c_nhl = c
+                break
+
+    # If NHL_ID exists but nhl_id doesn't, create nhl_id
+    if c_nhl is None and c_NHL_ID is not None:
+        df["nhl_id"] = df[c_NHL_ID]
+        c_nhl = "nhl_id"
+
+    # If both exist, merge safely into nhl_id
+    if c_nhl is not None and c_NHL_ID is not None and c_nhl != c_NHL_ID:
+        a = df[c_nhl].astype(str).str.strip().replace({'nan':'', 'None':''})
+        b = df[c_NHL_ID].astype(str).str.strip().replace({'nan':'', 'None':''})
+        df[c_nhl] = a.where(a != '', b)
+
+    # Ensure string dtype-ish
+    if c_nhl is not None:
+        df[c_nhl] = df[c_nhl].astype(str).str.strip().replace({'nan':'', 'None':''})
+        df.loc[df[c_nhl] == '', c_nhl] = pd.NA
+
+    return df
+
+
+def load_csv(path: str) -> pd.DataFrame:
+    """Lecture CSV robuste (évite mixed dtypes, garde les IDs en texte)."""
     if not path or not os.path.exists(path):
-        return pd.DataFrame(), f"Fichier introuvable: {path}"
+        return pd.DataFrame()
     try:
         df = pd.read_csv(path, low_memory=False)
-        return df, None
-    except Exception as e:
-        return pd.DataFrame(), f"Lecture CSV échouée: {e}"
+        df = _coerce_nhl_id_cols(df)
+        return df
+    except Exception:
+        st.error(f"❌ Erreur lecture: {path}")
+        st.code(traceback.format_exc())
+        return pd.DataFrame()
 
 
-def save_csv(df: pd.DataFrame, path: str) -> str | None:
+def save_csv(df: pd.DataFrame, path: str, *, safe_mode: bool = True, id_cols: list[str] | None = None) -> str:
+    """Sauvegarde CSV avec 'SAFE MODE' (empêche d'effacer les NHL_ID par accident)."""
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        if df is None or not isinstance(df, pd.DataFrame):
+            return "df invalide"
+        df = _coerce_nhl_id_cols(df.copy())
+
+        # SAFE MODE: compare couverture d'ID avec le fichier existant
+        id_cols = id_cols or [c for c in df.columns if c.lower().replace(' ', '_') in {'nhl_id', 'nhl-id', 'nhlid'}] + (["NHL_ID"] if "NHL_ID" in df.columns else [])
+        id_cols = [c for c in dict.fromkeys(id_cols) if c in df.columns]
+
+        if safe_mode and os.path.exists(path) and id_cols:
+            try:
+                prev = pd.read_csv(path, low_memory=False)
+                prev = _coerce_nhl_id_cols(prev)
+                warnings = []
+                for c in id_cols:
+                    if c in prev.columns and c in df.columns:
+                        prev_cnt = _count_nonempty(prev[c])
+                        new_cnt = _count_nonempty(df[c])
+                        # if we drop more than 2% coverage OR go to 0 from non-zero -> block
+                        if prev_cnt > 0 and (new_cnt == 0 or new_cnt < int(prev_cnt * 0.98)):
+                            warnings.append((c, prev_cnt, new_cnt))
+                if warnings:
+                    msg = " | ".join([f"{c}: {a} → {b}" for c, a, b in warnings])
+                    return f"SAFE MODE: baisse suspecte NHL_ID ({msg}). Coche 'Override' pour forcer."
+            except Exception:
+                # If comparison fails, still allow save
+                pass
+
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         df.to_csv(path, index=False)
-        return None
-    except Exception as e:
-        return f"Écriture CSV échouée: {e}"
+        return ""
+    except Exception:
+        return traceback.format_exc()
 
-
-# =====================================================
-# BACKUPS — build zip from key files
-# =====================================================
-def collect_backup_files(data_dir: str, season: str) -> List[str]:
-    data_dir = str(data_dir or "data")
-    season = str(season or "").strip() or "season"
-    out: List[str] = []
-
-    candidates = [
-        players_db_path(data_dir),
-        puckpedia_path(data_dir),
-        roster_path(data_dir, season),
-        _data_path(data_dir, f"equipes_joueurs_{season}.csv"),
-        _data_path(data_dir, f"transactions_{season}.csv"),
-        _data_path(data_dir, f"trade_market_{season}.csv"),
-        _data_path(data_dir, f"backup_history_{season}.csv"),
-        _data_path(data_dir, "backup_history.csv"),
-        _data_path(data_dir, "settings.csv"),
-    ]
-
-    for p in candidates:
-        if p and os.path.exists(p) and os.path.isfile(p):
-            out.append(os.path.abspath(p))
-
-    # include any season-tagged csv (safe)
-    if os.path.isdir(data_dir):
-        for fn in os.listdir(data_dir):
-            if season in fn and fn.lower().endswith(".csv"):
-                p = os.path.abspath(os.path.join(data_dir, fn))
-                if os.path.isfile(p):
-                    out.append(p)
-
-    return sorted(set(out))
 
 
 def make_zip_bytes(files: List[str], base_dir: str) -> bytes:
@@ -503,7 +558,7 @@ def sync_nhl_id(players_path: str, limit: int = 250, dry_run: bool = False) -> D
     txt.caption(f"Terminé ✅ — ajoutés: {added}/{total}" + (" (dry-run)" if dry_run else ""))
 
     if not dry_run:
-        err = save_csv(df, players_path)
+        err = save_csv(df, players_path, safe_mode=safe_mode)
         if err:
             return {"ok": False, "error": err}
 
@@ -858,6 +913,7 @@ def render_tools(data_dir: str, season: str) -> None:
         players2 = st.text_input("Players DB (NHL_ID)", players_db_path(data_dir), key="nhl_players")
         limit = st.number_input("Max par run", 1, 2000, 1000, step=50)
         dry = st.checkbox("Dry-run (ne sauvegarde pas)", value=False)
+        override = st.checkbox("Override SAFE MODE (autoriser une baisse NHL_ID)", value=False, key="nhl_id_override")
 
         if st.button("🔎 Vérifier l'état des NHL_ID"):
             st.caption("Note: si tes IDs sont dans une autre colonne (ex: nhl_id), l’audit l’utilise automatiquement — il ne doit plus te retomber à 100%.")
