@@ -88,15 +88,49 @@ def _is_missing_id(v: Any) -> bool:
 
 
 def _resolve_nhl_id_col(df: pd.DataFrame) -> str:
-    """Return the best NHL id column name present in df, otherwise create 'NHL_ID'."""
-    candidates = [
-        "NHL_ID", "nhl_id", "NHLId", "nhlId", "playerId", "player_id",
-        "nhl_player_id", "NHLPlayerId", "NHL_PLAYER_ID",
+    """Return standardized NHL id column name.
+
+    Detect common variants even if they contain spaces/hyphens or trailing spaces.
+    If a non-standard column is found, copy it into a canonical 'NHL_ID' column
+    (without deleting the original) and return 'NHL_ID'.
+    If nothing is found, ensure 'NHL_ID' exists (empty) and return it.
+    """
+
+    def _norm(s: str) -> str:
+        s = str(s or "").strip().lower()
+        s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
+        return s
+
+    colmap = {_norm(c): c for c in df.columns}
+
+    cand_norm = [
+        "nhl_id", "nhlid", "nhl_player_id", "nhlplayerid",
+        "player_id", "playerid", "nhl_id_api",
     ]
-    for c in candidates:
-        if c in df.columns:
-            return c
-    df["NHL_ID"] = ""
+
+    found_col = None
+    for cn in cand_norm:
+        if cn in colmap:
+            found_col = colmap[cn]
+            break
+
+    if found_col is None:
+        for nc, orig in colmap.items():
+            if nc.startswith("nhl") and "id" in nc:
+                found_col = orig
+                break
+
+    if found_col is None:
+        if "NHL_ID" not in df.columns:
+            df["NHL_ID"] = ""
+        return "NHL_ID"
+
+    # Canonicalize into NHL_ID (string)
+    if found_col != "NHL_ID":
+        df["NHL_ID"] = df[found_col].astype(str)
+    else:
+        df["NHL_ID"] = df["NHL_ID"].astype(str)
+
     return "NHL_ID"
 
 
