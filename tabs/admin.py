@@ -20,6 +20,7 @@ from typing import Dict, Any, List, Tuple
 
 import streamlit as st
 import pandas as pd
+import re
 
 # ===== Teams (doit matcher app.py) =====
 POOL_TEAMS = [
