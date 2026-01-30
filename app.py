@@ -142,25 +142,6 @@ section[data-testid="stSidebar"] .stToggleSwitch{
 
 /* Banner rounding */
 .pms-banner img{ border-radius: 18px; box-shadow: 0 12px 34px rgba(0,0,0,.20); }
-
-/* === Sidebar nav: FULL when expanded, ICON when collapsed === */
-section[data-testid="stSidebar"][aria-expanded="true"] div:has(.pms-nav-icon-marker){ display:none !important; }
-section[data-testid="stSidebar"][aria-expanded="false"] div:has(.pms-nav-full-marker){ display:none !important; }
-
-/* Collapsed sidebar width + center */
-section[data-testid="stSidebar"][aria-expanded="false"]{
-  min-width: 76px !important;
-  max-width: 76px !important;
-}
-section[data-testid="stSidebar"][aria-expanded="false"] label[data-baseweb="radio"]{
-  justify-content:center !important;
-  padding-left: 0.25rem !important;
-  padding-right: 0.25rem !important;
-}
-section[data-testid="stSidebar"][aria-expanded="false"] label[data-baseweb="radio"] span{
-  font-size: 18px !important;
-}
-
 </style>
 """
 
@@ -228,25 +209,6 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child{
 }
 
 .pms-banner img{ border-radius: 18px; box-shadow: 0 12px 34px rgba(0,0,0,.08); }
-
-/* === Sidebar nav: FULL when expanded, ICON when collapsed === */
-section[data-testid="stSidebar"][aria-expanded="true"] div:has(.pms-nav-icon-marker){ display:none !important; }
-section[data-testid="stSidebar"][aria-expanded="false"] div:has(.pms-nav-full-marker){ display:none !important; }
-
-/* Collapsed sidebar width + center */
-section[data-testid="stSidebar"][aria-expanded="false"]{
-  min-width: 76px !important;
-  max-width: 76px !important;
-}
-section[data-testid="stSidebar"][aria-expanded="false"] label[data-baseweb="radio"]{
-  justify-content:center !important;
-  padding-left: 0.25rem !important;
-  padding-right: 0.25rem !important;
-}
-section[data-testid="stSidebar"][aria-expanded="false"] label[data-baseweb="radio"] span{
-  font-size: 18px !important;
-}
-
 </style>
 """
 
@@ -292,15 +254,15 @@ def _is_admin(owner: str) -> bool:
 # =========================
 # NAV
 # =========================
-NAV_ITEMS = [
-    ("home", "🏠", "Home"),
-    ("joueurs", "👥", "Joueurs"),
-    ("alignement", "🧊", "Alignement"),
-    ("transactions", "🔁", "Transactions"),
-    ("gm", "🧑‍💼", "GM"),
-    ("historique", "🕘", "Historique"),
-    ("classement", "🏆", "Classement"),
-    ("admin", "🛠️", "Admin"),
+TABS = [
+    ("🏠  Home", "home"),
+    ("👥  Joueurs", "joueurs"),
+    ("🧊  Alignement", "alignement"),
+    ("🔁  Transactions", "transactions"),
+    ("🧑‍💼  GM", "gm"),
+    ("🕘  Historique", "historique"),
+    ("🏆  Classement", "classement"),
+    ("🛠️  Admin", "admin"),
 ]
 
 
@@ -347,91 +309,52 @@ def _sidebar_brand() -> None:
             )
 
 
-
-
-def _on_nav_full_change():
-    # Called when FULL navigation changes
-    st.session_state["active_tab_key"] = st.session_state.get("nav_full", "home")
-    st.session_state["nav_last"] = "full"
-
-def _on_nav_icon_change():
-    # Called when ICON navigation changes
-    st.session_state["active_tab_key"] = st.session_state.get("nav_icon", "home")
-    st.session_state["nav_last"] = "icon"
-
 def sidebar_nav() -> str:
-    """
-    Sidebar:
-      - Expanded: radio FULL (icône + texte)
-      - Collapsed: radio ICON only
-    On rend les deux et on masque via CSS selon aria-expanded.
-    """
-    keys = [k for k,_,_ in NAV_ITEMS]
-    icon_map = {k: ic for k,ic,_ in NAV_ITEMS}
-    label_map = {k: lbl for k,_,lbl in NAV_ITEMS}
-
     with st.sidebar:
-        st.markdown("### Pool GM")
-        _safe_image(APP_LOGO, width=52)
+        _sidebar_brand()
 
+        # Saison
         st.selectbox(
             "Saison",
             options=[DEFAULT_SEASON, "2024-2025", "2023-2024"],
             key="season_lbl",
         )
 
-        st.markdown("#### Navigation")
+        st.markdown("### Navigation")
 
-        active_key = st.session_state.get("active_tab_key", "home")
-        if active_key not in keys:
-            active_key = "home"
+        labels = [t[0] for t in TABS]
+        cur = st.session_state.get("active_tab", labels[0])
+        default_idx = labels.index(cur) if cur in labels else 0
 
-        # Initialize widget states BEFORE widgets are created (prevents StreamlitAPIException)
-        st.session_state["nav_full"] = active_key
-        st.session_state["nav_icon"] = active_key
-        st.session_state.setdefault("active_tab_key", active_key)
-
-        # FULL (expanded)
-        with st.container():
-            st.markdown('<div class="pms-nav-full-marker"></div>', unsafe_allow_html=True)
-            st.radio(
-                "Navigation full",
-                options=keys,
-                index=keys.index(st.session_state.get("nav_full", active_key)),
-                key="nav_full",
-                on_change=_on_nav_full_change,
-                format_func=lambda k: f"{icon_map.get(k,'')}  {label_map.get(k,k)}",
-                label_visibility="collapsed",
-            )
-
-        # ICONS (collapsed)
-        with st.container():
-            st.markdown('<div class="pms-nav-icon-marker"></div>', unsafe_allow_html=True)
-            st.radio(
-                "Navigation icons",
-                options=keys,
-                index=keys.index(st.session_state.get("nav_icon", active_key)),
-                key="nav_icon",
-                on_change=_on_nav_icon_change,
-                format_func=lambda k: f"{icon_map.get(k,'')}",
-                label_visibility="collapsed",
-            )
-
-        # Single source of truth for current tab
-        active_key = st.session_state.get("active_tab_key", active_key)
+        active = st.radio(
+            "Navigation",
+            labels,
+            index=default_idx,
+            key="nav_radio",
+            label_visibility="collapsed",
+        )
+        st.session_state["active_tab"] = active
 
         st.markdown("---")
 
-        # Owner selector + logo preview
-        c_own, c_logo = st.columns([4, 1], gap="small")
-        with c_own:
-            st.selectbox("Mon équipe", options=POOL_TEAMS, key="owner_select")
-        with c_logo:
-            _safe_image(TEAM_LOGO.get(st.session_state.get("owner_select",""), ""), width=34)
+        # Mon équipe (avec logo à droite)
+        st.markdown("### Mon équipe")
+        c1, c2 = st.columns([4, 1], gap="small")
+        with c1:
+            st.selectbox(
+                "Mon équipe",
+                options=POOL_TEAMS,
+                key="owner_select",
+                format_func=lambda x: TEAM_LABELS.get(x, x),
+                label_visibility="collapsed",
+            )
+        with c2:
+            _safe_image(TEAM_LOGO.get(st.session_state.get("owner_select", "Whalers"), ""), width=34)
 
-        st.markdown("")
+        # Canonical owner value (no mutation of owner_select here)
+        st.session_state["owner"] = st.session_state.get("owner_select", "Whalers")
 
-        # Theme toggle
+        # Theme toggle (only here)
         is_light = st.toggle(
             "Mode clair",
             value=(st.session_state.get("ui_theme", "dark") == "light"),
@@ -439,9 +362,7 @@ def sidebar_nav() -> str:
         )
         st.session_state["ui_theme"] = "light" if is_light else "dark"
 
-    # Single source of truth for owner
-    st.session_state["owner"] = st.session_state.get("owner_select", "Whalers")
-    return st.session_state.get("active_tab_key", "home")
+    return active
 
 
 # =========================
@@ -470,12 +391,6 @@ def _import_tabs():
 # HOME
 # =========================
 def _render_home(ctx: AppCtx) -> None:
-    # logo_pool banner TOP (reduced)
-    if os.path.exists(BANNER):
-        st.markdown('<div class="pms-banner" style="max-width:980px; margin:0 auto 1.0rem auto;">', unsafe_allow_html=True)
-        st.image(BANNER, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
     st.title("🏠 Home")
     st.markdown('<div class="smallmuted">Home reste clean — aucun bloc Admin ici.</div>', unsafe_allow_html=True)
     st.markdown("")
@@ -509,6 +424,12 @@ def _render_home(ctx: AppCtx) -> None:
 
     st.markdown("")
 
+    # Banner below card (proportions)
+    if os.path.exists(BANNER):
+        st.markdown('<div class="pms-banner">', unsafe_allow_html=True)
+        st.image(BANNER, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
 
 # =========================
 # MAIN
@@ -517,7 +438,7 @@ def main() -> None:
     # Defaults
     st.session_state.setdefault("ui_theme", "dark")
     st.session_state.setdefault("season_lbl", DEFAULT_SEASON)
-    st.session_state.setdefault("pending_tab", "")
+    st.session_state.setdefault("active_tab", "🏠  Home")
     st.session_state.setdefault("owner", "Whalers")
     st.session_state.setdefault("owner_select", st.session_state.get("owner", "Whalers"))
     st.session_state.setdefault("home_owner_select", st.session_state.get("owner", "Whalers"))
@@ -529,7 +450,7 @@ def main() -> None:
     apply_theme()
 
     # Sidebar
-    active_key = sidebar_nav()
+    active_label = sidebar_nav()
 
     # Build ctx
     owner = st.session_state.get("owner") or "Whalers"
@@ -544,7 +465,7 @@ def main() -> None:
 
     # Route
     modules = _import_tabs()
-    key = active_key or "home"
+    key = dict(TABS).get(active_label, "home")
 
     try:
         if key == "home":
