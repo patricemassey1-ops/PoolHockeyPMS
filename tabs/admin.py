@@ -219,18 +219,21 @@ def _coerce_nhl_id_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_csv(path: str) -> pd.DataFrame:
-    """Lecture CSV robuste (évite mixed dtypes, garde les IDs en texte)."""
-    if not path or not os.path.exists(path):
-        return pd.DataFrame()
+def load_csv(path: str, **read_kwargs):
+    """
+    Charge un CSV de façon SAFE.
+    Retourne: (df, err) où err est None si OK, sinon un message d'erreur.
+    """
     try:
-        df = pd.read_csv(path, low_memory=False)
-        df = _coerce_nhl_id_cols(df)
-        return df
-    except Exception:
-        st.error(f"❌ Erreur lecture: {path}")
-        st.code(traceback.format_exc())
-        return pd.DataFrame()
+        if not path:
+            return pd.DataFrame(), "Chemin CSV vide."
+        if not os.path.exists(path):
+            return pd.DataFrame(), f"Fichier introuvable: {path}"
+        # low_memory=False réduit les DtypeWarning sur gros CSV
+        df = pd.read_csv(path, low_memory=False, **read_kwargs)
+        return df, None
+    except Exception as e:
+        return pd.DataFrame(), f"{type(e).__name__}: {e}"
 
 
 def save_csv(df: pd.DataFrame, path: str, *, safe_mode: bool = True, id_cols: list[str] | None = None) -> str:
