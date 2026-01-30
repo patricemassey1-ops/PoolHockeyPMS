@@ -1,20 +1,18 @@
-# app.py — PoolHockeyPMS (routing + thème + contexte) — UI "like screenshot"
-# -----------------------------------------------------------------------------
-# Objectifs:
-# - Look proche de tes screenshots: fond navy, accent rouge, sidebar propre (icônes + hover + actif rouge)
-# - Dark par défaut + toggle Mode clair (sidebar)
-# - Home: carte "Sélection d'équipe" + logo à droite + bannière logo_pool.png en dessous (proportions stables)
-# - Routing stable vers tabs/*.py (render(ctx_dict) ou render(ctx))
-# - Zéro expander nested ici (les tabs gèrent leur UI)
-# - Zéro StreamlitDuplicateElementKey / et pas de modification de session_state d'un widget après instanciation
-# -----------------------------------------------------------------------------
+# app.py — PoolHockeyPMS (routing + thème + contexte) — UI (mini sidebar icons + banner top)
+# ------------------------------------------------------------
+# - Dark par défaut (navy, pas noir) + accent rouge (#ef4444) + mode clair
+# - Sidebar compacte (icônes seulement)
+# - Bandeau logo_pool.png en haut (top) sur toutes les pages
+# - Sélection équipe/season dans le header (main), avec logo d'équipe à côté du nom
+# - 1 seule injection CSS (apply_theme appelé 1 fois)
+# ------------------------------------------------------------
 
 from __future__ import annotations
 
 import os
 import traceback
 from dataclasses import dataclass
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 import streamlit as st
 
@@ -44,171 +42,216 @@ TEAM_LABELS = {
 
 TEAM_LOGO = {k: os.path.join(DATA_DIR, f"{k}.png") for k in POOL_TEAMS}
 APP_LOGO = os.path.join(DATA_DIR, "gm_logo.png")
-BANNER = os.path.join(DATA_DIR, "logo_pool.png")
-
+BANNER = os.path.join(DATA_DIR, "logo_pool.png")  # <- demandé: logo_pool en top
 
 # =========================
 # THEME (1 seule injection)
 # =========================
 THEME_CSS_DARK = """
 <style>
-:root{ color-scheme: dark; }
+:root { color-scheme: dark; }
+
+/* Background (navy, pas noir pur) */
 html, body, [data-testid="stAppViewContainer"]{
   background:
-    radial-gradient(1100px 760px at 18% -10%, rgba(239,68,68,.18), transparent 58%),
-    radial-gradient(1050px 740px at 96% 10%, rgba(59,130,246,.14), transparent 58%),
-    linear-gradient(180deg,#0b1220,#070b12 65%,#070b12) !important;
-  color:#e7eef7 !important;
+    radial-gradient(1200px 800px at 20% -10%, rgba(239,68,68,.18), transparent 55%),
+    radial-gradient(1200px 800px at 95% 10%, rgba(80,140,255,.12), transparent 55%),
+    linear-gradient(180deg, #0b1220, #070b12 65%, #070b12) !important;
+  color: #e7eef7 !important;
 }
-.block-container{ padding-top: 1.1rem; padding-bottom: 2.6rem; max-width: 1200px; }
 
-/* ---- Sidebar ---- */
+.block-container { padding-top: .7rem; padding-bottom: 2.5rem; max-width: 1180px; }
+
+/* -------- Sidebar compacte (icônes seulement) -------- */
 section[data-testid="stSidebar"]{
   background: linear-gradient(180deg,#0d1627,#0b1220) !important;
-  border-right: 1px solid rgba(255,255,255,.07);
+  border-right: 1px solid rgba(255,255,255,.06);
+  width: 86px !important;
+  min-width: 86px !important;
 }
-section[data-testid="stSidebar"] .block-container{ padding-top: 1.1rem; }
-
-/* Brand header in sidebar */
-.pms-sidebrand{
-  display:flex; align-items:center; gap:.65rem;
-  margin-bottom: .85rem;
+section[data-testid="stSidebar"] *{
+  font-size: 12px;
 }
-.pms-sidebrand img{ width: 44px; height: 44px; border-radius: 12px; }
-.pms-sidebrand .t1{ font-weight: 800; font-size: 20px; letter-spacing:-.02em; }
-.pms-sidebrand .t2{ opacity:.75; font-size: 12px; margin-top: -2px; }
 
-/* ---- Cards ---- */
-.card{
+/* Cache les labels et “radio circles” */
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h1,
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3,
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p{
+  margin: .2rem 0 !important;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child{
+  display:none !important;
+}
+
+/* Style des boutons icônes */
+.pms-sb{
+  display:flex; flex-direction:column; align-items:center; gap:.45rem;
+  padding: .35rem .25rem .75rem .25rem;
+}
+.pms-sb-top{
+  display:flex; flex-direction:column; align-items:center; gap:.35rem;
+  margin-bottom: .3rem;
+}
+.pms-sb-logo{
+  width:44px;height:44px;border-radius:14px; overflow:hidden;
+  border:1px solid rgba(255,255,255,.10);
   background: rgba(255,255,255,.04);
-  border: 1px solid rgba(255,255,255,.09);
+  display:flex;align-items:center;justify-content:center;
+}
+.pms-sb-btn{
+  width:52px; height:52px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.05);
+  display:flex; align-items:center; justify-content:center;
+  text-decoration:none;
+  color:#cfd8e6;
+  transition: transform .06s ease;
+}
+.pms-sb-btn:hover{ transform: translateY(-1px); border-color: rgba(255,255,255,.16); }
+.pms-sb-btn.active{
+  background: rgba(239,68,68,.90);
+  border-color: rgba(239,68,68,.95);
+  color: #0b1220;
+  box-shadow: 0 0 0 4px rgba(239,68,68,.18);
+}
+.pms-sb-ico{ font-size: 20px; line-height:1; }
+
+/* Cards */
+.pms-card{
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.08);
   border-radius: 18px;
   padding: 18px;
-  box-shadow: 0 12px 34px rgba(0,0,0,.22);
 }
 .smallmuted{ opacity:.72; font-size: 13px; }
 hr{ border-color: rgba(255,255,255,.10); }
 
-/* ---- Accent red (buttons) ---- */
-.stButton>button{ border-radius: 12px !important; }
+/* Inputs */
+div[data-baseweb="select"] > div{
+  border-radius: 12px !important;
+}
+div[data-baseweb="select"] > div:hover{
+  border-color: rgba(255,255,255,.18) !important;
+}
+
+/* Primary buttons accent rouge */
 .stButton>button[kind="primary"]{
-  background:#ef4444 !important;
-  border:1px solid rgba(239,68,68,.55) !important;
-}
-.stButton>button[kind="primary"]:hover{ filter: brightness(1.02); }
-
-/* ---- Sidebar Navigation RADIO styling (match screenshot) ---- */
-section[data-testid="stSidebar"] div[role="radiogroup"]{ gap:.35rem; }
-section[data-testid="stSidebar"] div[role="radiogroup"] label{
-  padding: .65rem .75rem !important;
-  border-radius: 12px !important;
-  border: 1px solid rgba(255,255,255,.08) !important;
-  background: rgba(255,255,255,.02) !important;
-  margin: 0 !important;
-  transition: all .14s ease;
-}
-section[data-testid="stSidebar"] div[role="radiogroup"] label:hover{
-  border-color: rgba(255,255,255,.14) !important;
-  background: rgba(255,255,255,.04) !important;
-}
-section[data-testid="stSidebar"] div[role="radiogroup"] label p{
-  color: #dbe5f5 !important;
-  font-size: 15px !important;
-  font-weight: 650 !important;
-  margin: 0 !important;
-}
-section[data-testid="stSidebar"] div[role="radiogroup"] input{ display:none !important; }
-section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked){
-  background: rgba(239,68,68,.18) !important;
-  border-color: rgba(239,68,68,.55) !important;
-  box-shadow: 0 0 0 3px rgba(239,68,68,.16) !important;
-}
-section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p{
-  color: #ffffff !important;
-}
-
-/* Hide Streamlit's tiny "radio dot" container */
-section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child{
-  display:none !important;
-}
-
-/* Inputs look */
-section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"]{
+  background: #ef4444 !important;
+  border: 1px solid rgba(255,46,77,.55) !important;
   border-radius: 12px !important;
 }
-section[data-testid="stSidebar"] .stToggleSwitch{
-  margin-top: .6rem;
+
+/* Banner */
+.pms-banner{
+  border-radius: 22px;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.03);
+  box-shadow: 0 12px 34px rgba(0,0,0,.28);
 }
 
-/* Banner rounding */
-.pms-banner img{ border-radius: 18px; box-shadow: 0 12px 34px rgba(0,0,0,.20); }
+
+/* Radio -> tiles (sidebar icons) */
+section[data-testid="stSidebar"] div[role="radiogroup"]{
+  display:flex; flex-direction:column; align-items:center; gap:.45rem;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-baseweb="radio"]{
+  width:52px; height:52px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.05);
+  display:flex; align-items:center; justify-content:center;
+  margin: 0 !important;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-baseweb="radio"]:hover{
+  border-color: rgba(255,255,255,.16);
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-baseweb="radio"] div:nth-child(2){
+  font-size: 20px !important;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-baseweb="radio"]:has(input:checked){
+  background: rgba(239,68,68,.90);
+  border-color: rgba(239,68,68,.95);
+  box-shadow: 0 0 0 4px rgba(239,68,68,.18);
+}
+
 </style>
 """
 
 THEME_CSS_LIGHT = """
 <style>
-:root{ color-scheme: light; }
+:root { color-scheme: light; }
+
 html, body, [data-testid="stAppViewContainer"]{
   background:
-    radial-gradient(1000px 720px at 18% -10%, rgba(239,68,68,.14), transparent 58%),
-    radial-gradient(1000px 720px at 96% 10%, rgba(59,130,246,.14), transparent 58%),
-    linear-gradient(180deg,#f7f8fc,#f2f5fb 60%,#f2f5fb) !important;
-  color:#0b1020 !important;
+    radial-gradient(1000px 700px at 20% -10%, rgba(239,68,68,.14), transparent 55%),
+    radial-gradient(1000px 700px at 95% 10%, rgba(60,140,255,.12), transparent 55%),
+    linear-gradient(180deg, #f7f8fc, #f3f5fb 60%, #f3f5fb) !important;
+  color: #0b1020 !important;
 }
-.block-container{ padding-top: 1.1rem; padding-bottom: 2.6rem; max-width: 1200px; }
+.block-container { padding-top: .7rem; padding-bottom: 2.5rem; max-width: 1180px; }
 
 section[data-testid="stSidebar"]{
   background: #ffffff !important;
   border-right: 1px solid rgba(0,0,0,.06);
+  width: 86px !important;
+  min-width: 86px !important;
 }
-.pms-sidebrand .t2{ color: rgba(0,0,0,.55); }
 
-.card{
+/* Buttons icônes */
+.pms-sb-btn{
+  border: 1px solid rgba(0,0,0,.08);
+  background: rgba(0,0,0,.03);
+  color:#2b3447;
+}
+.pms-sb-btn.active{
+  background: rgba(239,68,68,.92);
+  border-color: rgba(239,68,68,.95);
+  color:#ffffff;
+  box-shadow: 0 0 0 4px rgba(239,68,68,.16);
+}
+
+/* Cards */
+.pms-card{
   background: #ffffff;
   border: 1px solid rgba(0,0,0,.08);
   border-radius: 18px;
   padding: 18px;
-  box-shadow: 0 12px 34px rgba(0,0,0,.08);
 }
 .smallmuted{ opacity:.72; font-size: 13px; }
 hr{ border-color: rgba(0,0,0,.10); }
 
-.stButton>button[kind="primary"]{
-  background:#ef4444 !important;
-  border:1px solid rgba(239,68,68,.35) !important;
+.pms-banner{
+  border-radius: 22px;
+  overflow: hidden;
+  border: 1px solid rgba(0,0,0,.08);
+  background: #ffffff;
+  box-shadow: 0 12px 34px rgba(0,0,0,.10);
 }
 
-/* Sidebar nav radio */
-section[data-testid="stSidebar"] div[role="radiogroup"] label{
-  padding: .65rem .75rem !important;
-  border-radius: 12px !important;
-  border: 1px solid rgba(0,0,0,.08) !important;
-  background: rgba(0,0,0,.02) !important;
+/* Radio -> tiles (sidebar icons) */
+section[data-testid="stSidebar"] div[role="radiogroup"]{
+  display:flex; flex-direction:column; align-items:center; gap:.45rem;
 }
-section[data-testid="stSidebar"] div[role="radiogroup"] label:hover{
-  border-color: rgba(0,0,0,.12) !important;
-  background: rgba(0,0,0,.03) !important;
-}
-section[data-testid="stSidebar"] div[role="radiogroup"] label p{
-  color: #1f2937 !important;
-  font-size: 15px !important;
-  font-weight: 650 !important;
+section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-baseweb="radio"]{
+  width:52px; height:52px;
+  border-radius: 16px;
+  border: 1px solid rgba(0,0,0,.08);
+  background: rgba(0,0,0,.03);
+  display:flex; align-items:center; justify-content:center;
   margin: 0 !important;
 }
-section[data-testid="stSidebar"] div[role="radiogroup"] input{ display:none !important; }
-section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked){
-  background: rgba(239,68,68,.12) !important;
-  border-color: rgba(239,68,68,.45) !important;
-  box-shadow: 0 0 0 3px rgba(239,68,68,.14) !important;
+section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-baseweb="radio"] div:nth-child(2){
+  font-size: 20px !important;
 }
-section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p{
-  color: #111827 !important;
-}
-section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child{
-  display:none !important;
+section[data-testid="stSidebar"] div[role="radiogroup"] > label[data-baseweb="radio"]:has(input:checked){
+  background: rgba(239,68,68,.92);
+  border-color: rgba(239,68,68,.95);
+  box-shadow: 0 0 0 4px rgba(239,68,68,.16);
 }
 
-.pms-banner img{ border-radius: 18px; box-shadow: 0 12px 34px rgba(0,0,0,.08); }
 </style>
 """
 
@@ -239,7 +282,7 @@ class AppCtx:
         }
 
 
-def _safe_image(path: str, width: Optional[int] = None) -> None:
+def _safe_image(path: str, width: int | None = None) -> None:
     try:
         if path and os.path.exists(path):
             st.image(path, width=width)
@@ -255,118 +298,66 @@ def _is_admin(owner: str) -> bool:
 # NAV
 # =========================
 TABS = [
-    ("🏠  Home", "home"),
-    ("👥  Joueurs", "joueurs"),
-    ("🧊  Alignement", "alignement"),
-    ("🔁  Transactions", "transactions"),
-    ("🧑‍💼  GM", "gm"),
-    ("🕘  Historique", "historique"),
-    ("🏆  Classement", "classement"),
-    ("🛠️  Admin", "admin"),
+    ("🏠", "Home", "home"),
+    ("👥", "Joueurs", "joueurs"),
+    ("🧊", "Alignement", "alignement"),
+    ("🔁", "Transactions", "transactions"),
+    ("🧑‍💼", "GM", "gm"),
+    ("🕘", "Historique", "historique"),
+    ("🏆", "Classement", "classement"),
+    ("🛠️", "Admin", "admin"),
 ]
 
 
-def _queue_owner_sync(new_owner: str) -> None:
-    """Home -> Sidebar sync sans toucher owner_select après instanciation: on planifie + rerun."""
-    new_owner = str(new_owner or "").strip()
-    if not new_owner:
-        return
-    st.session_state["owner"] = new_owner
-    st.session_state["_pending_owner_select"] = new_owner
-    st.rerun()
-
-
-def _apply_pending_widget_values_before_widgets() -> None:
-    """Applique les 'pending' AVANT la création des widgets (sinon StreamlitAPIException)."""
-    if st.session_state.get("_pending_owner_select"):
-        st.session_state["owner_select"] = st.session_state["_pending_owner_select"]
-        st.session_state["home_owner_select"] = st.session_state["_pending_owner_select"]
-        st.session_state.pop("_pending_owner_select", None)
-
-
 def _sidebar_brand() -> None:
-    with st.sidebar:
-        c1, c2 = st.columns([1, 3], gap="small")
-        with c1:
-            if os.path.exists(APP_LOGO):
-                st.image(APP_LOGO, width=46)
-            else:
-                st.markdown(
-                    '<div style="width:46px;height:46px;border-radius:12px;background:rgba(239,68,68,.25)"></div>',
-                    unsafe_allow_html=True,
-                )
-        with c2:
-            st.markdown(
-                """
-                <div class="pms-sidebrand">
-                  <div>
-                    <div class="t1">Pool GM</div>
-                    <div class="t2">Gestion du pool (PMS)</div>
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    st.markdown('<div class="pms-sb">', unsafe_allow_html=True)
+    st.markdown('<div class="pms-sb-top">', unsafe_allow_html=True)
+    if os.path.exists(APP_LOGO):
+        st.markdown('<div class="pms-sb-logo">', unsafe_allow_html=True)
+        st.image(APP_LOGO, width=44)
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="pms-sb-logo"></div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def sidebar_nav() -> str:
+    """Sidebar compacte: uniquement des icônes (radio stylé)."""
     with st.sidebar:
         _sidebar_brand()
 
-        # Saison
-        st.selectbox(
-            "Saison",
-            options=[DEFAULT_SEASON, "2024-2025", "2023-2024"],
-            key="season_lbl",
-        )
+        st.session_state.setdefault("active_tab_key", "home")
 
-        st.markdown("### Navigation")
+        # Radio (emoji only) — stable, sans JS
+        opt_keys = [k for (_ico, _label, k) in TABS]
+        def _fmt(k: str) -> str:
+            for ico, _label, kk in TABS:
+                if kk == k:
+                    return ico
+            return "•"
 
-        labels = [t[0] for t in TABS]
-        cur = st.session_state.get("active_tab", labels[0])
-        default_idx = labels.index(cur) if cur in labels else 0
-
-        active = st.radio(
+        active_key = st.radio(
             "Navigation",
-            labels,
-            index=default_idx,
-            key="nav_radio",
+            options=opt_keys,
+            index=opt_keys.index(st.session_state.get("active_tab_key", "home")) if st.session_state.get("active_tab_key") in opt_keys else 0,
+            format_func=_fmt,
+            key="sb_nav_radio",
             label_visibility="collapsed",
         )
-        st.session_state["active_tab"] = active
+        st.session_state["active_tab_key"] = active_key
 
-        st.markdown("---")
+        st.markdown("<div style='height:.75rem'></div>", unsafe_allow_html=True)
 
-        # Mon équipe (avec logo à droite)
-        st.markdown("### Mon équipe")
-        c1, c2 = st.columns([4, 1], gap="small")
-        with c1:
-            st.selectbox(
-                "Mon équipe",
-                options=POOL_TEAMS,
-                key="owner_select",
-                format_func=lambda x: TEAM_LABELS.get(x, x),
-                label_visibility="collapsed",
-            )
-        with c2:
-            _safe_image(TEAM_LOGO.get(st.session_state.get("owner_select", "Whalers"), ""), width=34)
-
-        # Canonical owner value (no mutation of owner_select here)
-        st.session_state["owner"] = st.session_state.get("owner_select", "Whalers")
-
-        # Theme toggle (only here)
-        is_light = st.toggle(
-            "Mode clair",
-            value=(st.session_state.get("ui_theme", "dark") == "light"),
-            key="ui_theme_toggle_sidebar",
-        )
+        is_light = st.toggle("Mode clair", value=(st.session_state.get("ui_theme", "dark") == "light"), key="ui_theme_toggle_sidebar")
         st.session_state["ui_theme"] = "light" if is_light else "dark"
 
-    return active
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    return st.session_state.get("active_tab_key", "home")
 
 
 # =========================
-# RENDERERS IMPORT
+# IMPORT TABS
 # =========================
 def _import_tabs():
     try:
@@ -388,6 +379,42 @@ def _import_tabs():
 
 
 # =========================
+# HEADER CONTROLS (main)
+# =========================
+def _render_banner_top() -> None:
+    if os.path.exists(BANNER):
+        st.markdown('<div class="pms-banner">', unsafe_allow_html=True)
+        st.image(BANNER, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("")
+
+
+def _render_header_controls() -> None:
+    """Saison + Équipe (avec logo) dans le main (pas dans sidebar)."""
+    c1, c2, c3, c4 = st.columns([2.2, 2.6, 1.0, 0.6], vertical_alignment="center")
+    with c1:
+        st.selectbox(
+            "Saison",
+            options=[DEFAULT_SEASON, "2024-2025", "2023-2024"],
+            key="season_lbl",
+        )
+    with c2:
+        picked = st.selectbox(
+            "Équipe",
+            options=POOL_TEAMS,
+            key="owner_main",
+            format_func=lambda x: TEAM_LABELS.get(x, x),
+        )
+        st.session_state["owner"] = picked
+    with c3:
+        # Logo à côté du nom (comme screenshot)
+        _safe_image(TEAM_LOGO.get(st.session_state.get("owner", "Whalers"), ""), width=46)
+    with c4:
+        # Indication “admin” possible, sans bouton (juste look)
+        st.markdown("")
+
+
+# =========================
 # HOME
 # =========================
 def _render_home(ctx: AppCtx) -> None:
@@ -395,8 +422,7 @@ def _render_home(ctx: AppCtx) -> None:
     st.markdown('<div class="smallmuted">Home reste clean — aucun bloc Admin ici.</div>', unsafe_allow_html=True)
     st.markdown("")
 
-    # Card selection (same layout as screenshot)
-    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="pms-card">', unsafe_allow_html=True)
     st.markdown("### 🏒 Sélection d'équipe")
     st.caption("Cette sélection alimente Alignement / GM / Transactions (même clé session_state).")
 
@@ -409,50 +435,41 @@ def _render_home(ctx: AppCtx) -> None:
             key="home_owner_select",
             format_func=lambda x: TEAM_LABELS.get(x, x),
         )
-        # Home -> sidebar sync via pending + rerun (safe)
         if picked != ctx.owner:
-            _queue_owner_sync(picked)
+            # Ici on ne touche PAS aux clés de widgets déjà instanciés ailleurs.
+            st.session_state["owner"] = picked
+            st.session_state["owner_main"] = picked  # synchronise le selectbox header (safe: même run)
+            ctx.owner = picked
+            st.rerun()
 
     with c2:
-        logo = TEAM_LOGO.get(ctx.owner, "")
-        if logo and os.path.exists(logo):
-            st.image(logo, width=92)
+        _safe_image(TEAM_LOGO.get(ctx.owner, ""), width=88)
 
     st.success(f"✅ Équipe sélectionnée: **{TEAM_LABELS.get(ctx.owner, ctx.owner)}**")
     st.markdown(f"**Saison:** {ctx.season_lbl}")
     st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("")
-
-    # Banner below card (proportions)
-    if os.path.exists(BANNER):
-        st.markdown('<div class="pms-banner">', unsafe_allow_html=True)
-        st.image(BANNER, use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # =========================
 # MAIN
 # =========================
 def main() -> None:
-    # Defaults
     st.session_state.setdefault("ui_theme", "dark")
     st.session_state.setdefault("season_lbl", DEFAULT_SEASON)
-    st.session_state.setdefault("active_tab", "🏠  Home")
     st.session_state.setdefault("owner", "Whalers")
-    st.session_state.setdefault("owner_select", st.session_state.get("owner", "Whalers"))
-    st.session_state.setdefault("home_owner_select", st.session_state.get("owner", "Whalers"))
+    st.session_state.setdefault("owner_main", st.session_state.get("owner", "Whalers"))
 
-    # Apply any pending widget sync BEFORE widgets are instantiated
-    _apply_pending_widget_values_before_widgets()
+    apply_theme()  # 1 seule injection
 
-    # Theme injection (once)
-    apply_theme()
+    active_key = sidebar_nav()
 
-    # Sidebar
-    active_label = sidebar_nav()
+    # Top banner (logo_pool)
+    _render_banner_top()
 
-    # Build ctx
+    # Header controls (season + owner + logo)
+    _render_header_controls()
+    st.markdown("")
+
     owner = st.session_state.get("owner") or "Whalers"
     season = st.session_state.get("season_lbl") or DEFAULT_SEASON
     ctx = AppCtx(
@@ -463,20 +480,18 @@ def main() -> None:
         theme=st.session_state.get("ui_theme", "dark"),
     )
 
-    # Route
     modules = _import_tabs()
-    key = dict(TABS).get(active_label, "home")
 
     try:
-        if key == "home":
+        if active_key == "home":
             _render_home(ctx)
-        elif key == "admin" and not ctx.is_admin:
+        elif active_key == "admin" and not ctx.is_admin:
             st.title("🛠️ Admin")
             st.warning("Accès admin requis.")
         else:
-            mod = modules.get(key)
+            mod = modules.get(active_key)
             if mod is None:
-                st.error(f"Module introuvable: tabs/{key}.py")
+                st.error(f"Module introuvable: tabs/{active_key}.py")
             else:
                 if hasattr(mod, "render"):
                     try:
@@ -484,7 +499,7 @@ def main() -> None:
                     except TypeError:
                         mod.render(ctx)
                 else:
-                    st.error(f"tabs/{key}.py n'a pas de fonction render(ctx).")
+                    st.error(f"tabs/{active_key}.py n'a pas de fonction render(ctx).")
     except Exception:
         st.error("Une erreur a été détectée (évite l'écran noir).")
         st.code(traceback.format_exc())
