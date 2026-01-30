@@ -348,6 +348,17 @@ def _sidebar_brand() -> None:
 
 
 
+
+def _on_nav_full_change():
+    # Called when FULL navigation changes
+    st.session_state["active_tab_key"] = st.session_state.get("nav_full", "home")
+    st.session_state["nav_last"] = "full"
+
+def _on_nav_icon_change():
+    # Called when ICON navigation changes
+    st.session_state["active_tab_key"] = st.session_state.get("nav_icon", "home")
+    st.session_state["nav_last"] = "icon"
+
 def sidebar_nav() -> str:
     """
     Sidebar:
@@ -375,14 +386,20 @@ def sidebar_nav() -> str:
         if active_key not in keys:
             active_key = "home"
 
+        # Initialize widget states BEFORE widgets are created (prevents StreamlitAPIException)
+        st.session_state["nav_full"] = active_key
+        st.session_state["nav_icon"] = active_key
+        st.session_state.setdefault("active_tab_key", active_key)
+
         # FULL (expanded)
         with st.container():
             st.markdown('<div class="pms-nav-full-marker"></div>', unsafe_allow_html=True)
             st.radio(
                 "Navigation full",
                 options=keys,
-                index=keys.index(active_key),
+                index=keys.index(st.session_state.get("nav_full", active_key)),
                 key="nav_full",
+                on_change=_on_nav_full_change,
                 format_func=lambda k: f"{icon_map.get(k,'')}  {label_map.get(k,k)}",
                 label_visibility="collapsed",
             )
@@ -393,19 +410,15 @@ def sidebar_nav() -> str:
             st.radio(
                 "Navigation icons",
                 options=keys,
-                index=keys.index(active_key),
+                index=keys.index(st.session_state.get("nav_icon", active_key)),
                 key="nav_icon",
+                on_change=_on_nav_icon_change,
                 format_func=lambda k: f"{icon_map.get(k,'')}",
                 label_visibility="collapsed",
             )
 
-        # Sync choice (if one changed, take it)
-        if st.session_state.get("nav_icon") and st.session_state.get("nav_icon") != st.session_state.get("nav_full"):
-            st.session_state["active_tab_key"] = st.session_state.get("nav_icon")
-            st.session_state["nav_full"] = st.session_state.get("nav_icon")
-        else:
-            st.session_state["active_tab_key"] = st.session_state.get("nav_full", active_key)
-            st.session_state["nav_icon"] = st.session_state.get("nav_full", active_key)
+        # Single source of truth for current tab
+        active_key = st.session_state.get("active_tab_key", active_key)
 
         st.markdown("---")
 
@@ -504,9 +517,9 @@ def main() -> None:
     # Defaults
     st.session_state.setdefault("ui_theme", "dark")
     st.session_state.setdefault("season_lbl", DEFAULT_SEASON)
-    st.session_state.setdefault("active_tab_key", "home")
-    st.session_state.setdefault("nav_full", st.session_state.get("active_tab_key","home"))
-    st.session_state.setdefault("nav_icon", st.session_state.get("active_tab_key","home"))
+        st.session_state.setdefault("active_tab_key", active_key)
+        st.session_state["nav_full"] = active_key
+        st.session_state["nav_icon"] = active_key
     st.session_state.setdefault("pending_tab", "")
     st.session_state.setdefault("owner", "Whalers")
     st.session_state.setdefault("owner_select", st.session_state.get("owner", "Whalers"))
