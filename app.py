@@ -175,6 +175,22 @@ div[role="radiogroup"] label[data-baseweb="radio"]:has(input:checked) span{
   object-fit: cover;
   display: block;
 }
+
+/* Ensure nav text is visible (BaseWeb radio) */
+div[role="radiogroup"] label[data-baseweb="radio"] span{
+  color: #dbe4f3 !important;
+  font-weight: 650 !important;
+  opacity: 1 !important;
+}
+/* Selectbox styling (match screenshot) */
+div[data-baseweb="select"] > div{
+  border-radius: 14px !important;
+}
+div[data-baseweb="select"] > div:focus-within{
+  border-color: rgba(239,68,68,.95) !important;
+  box-shadow: 0 0 0 3px rgba(239,68,68,.95)_GLOW !important;
+}
+
 </style>
 """
 
@@ -272,6 +288,22 @@ div[role="radiogroup"] label[data-baseweb="radio"]:has(input:checked) span{
   object-fit: cover;
   display: block;
 }
+
+/* Ensure nav text is visible (BaseWeb radio) */
+div[role="radiogroup"] label[data-baseweb="radio"] span{
+  color: #111827 !important;
+  font-weight: 650 !important;
+  opacity: 1 !important;
+}
+/* Selectbox styling (match screenshot) */
+div[data-baseweb="select"] > div{
+  border-radius: 14px !important;
+}
+div[data-baseweb="select"] > div:focus-within{
+  border-color: rgba(239,68,68,.85) !important;
+  box-shadow: 0 0 0 3px rgba(239,68,68,.85)_GLOW !important;
+}
+
 </style>
 """
 
@@ -431,12 +463,14 @@ def _import_tabs():
         st.stop()
 
 
-def _sync_owner_to_sidebar(new_owner: str) -> None:
+def _queue_owner_change(new_owner: str) -> None:
+    """Demande un changement d'équipe 'global' au prochain run (avant instanciation des widgets sidebar)."""
     new_owner = str(new_owner or "").strip()
     if not new_owner:
         return
-    st.session_state["owner"] = new_owner
-    st.session_state["owner_select"] = new_owner
+    st.session_state["_pending_owner"] = new_owner
+    # On rerun tout de suite pour que le sidebar prenne la valeur avant de créer ses widgets
+    st.rerun()
 
 
 def _render_banner_top() -> None:
@@ -480,8 +514,7 @@ def _render_home(ctx: AppCtx) -> None:
             key="home_owner_select",
         )
         if picked != ctx.owner:
-            _sync_owner_to_sidebar(picked)
-            ctx.owner = picked
+            _queue_owner_change(picked)
 
     with c2:
         _safe_image(TEAM_LOGO.get(ctx.owner, ""), width=92)
@@ -500,6 +533,13 @@ def main() -> None:
     st.session_state.setdefault("owner_select", st.session_state.get("owner", "Whalers"))
 
     # Theme injection ONCE (based on current session state)
+
+    # Apply pending owner change BEFORE creating sidebar widgets (avoids StreamlitAPIException)
+    if st.session_state.get("_pending_owner"):
+        _po = st.session_state.pop("_pending_owner")
+        st.session_state["owner"] = _po
+        st.session_state["owner_select"] = _po
+
     apply_theme()
 
     # Sidebar nav (also updates theme + owner)
