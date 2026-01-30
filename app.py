@@ -379,8 +379,6 @@ def sidebar_nav() -> str:
         with c_logo:
             _safe_image(TEAM_LOGO.get(owner, ""), width=36)
         st.session_state["owner"] = owner
-
-        is_light = st.toggle("Mode clair", value=(st.session_state.get("ui_theme", "dark") == "light"), key="ui_theme_toggle")
         st.session_state["ui_theme"] = "light" if is_light else "dark"
 
     return active
@@ -495,7 +493,6 @@ def _render_theme_toggle_inline() -> None:
                              key="ui_theme_toggle_top", label_visibility="collapsed")
         # keep single source of truth
         st.session_state["ui_theme"] = "light" if is_light else "dark"
-        st.session_state["ui_theme_toggle"] = is_light
     with c3:
         st.markdown('<div class="smallmuted">Astuce: sur petit écran, utilise la flèche de la sidebar ou ☰.</div>', unsafe_allow_html=True)
 
