@@ -166,6 +166,9 @@ class MasterBuildConfig:
     puckpedia_file: str = "PuckPedia2025_26.csv"
     master_file: str = "hockey.players_master.csv"
 
+    # Write output file (set False for dry-run / gated writes)
+    write_output: bool = True
+
     # NHL enrichment
     enrich_from_nhl: bool = True
     nhl_cache_file: str = "nhl_player_cache.json"
@@ -173,7 +176,7 @@ class MasterBuildConfig:
     sleep_s: float = 0.05
 
 
-def build_master(cfg: MasterBuildConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+def build_master(cfg: MasterBuildConfig, write_output: bool | None = None) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Build data/hockey.players_master.csv by merging:
       - hockey.players.csv (base)
@@ -186,6 +189,9 @@ def build_master(cfg: MasterBuildConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     puck_path = os.path.join(cfg.data_dir, cfg.puckpedia_file)
     out_path = os.path.join(cfg.data_dir, cfg.master_file)
     cache_path = os.path.join(cfg.data_dir, cfg.nhl_cache_file)
+
+    # Effective write flag
+    write_output_eff = cfg.write_output if write_output is None else bool(write_output)
 
     players = _safe_read_csv(players_path)
     puck = _safe_read_csv(puck_path)
@@ -344,7 +350,13 @@ def build_master(cfg: MasterBuildConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     if "_norm_player" in merged.columns:
         merged = merged.drop(columns=["_norm_player"])
 
-    _atomic_write_csv(merged, out_path)
+    if write_output_eff:
+        _atomic_write_csv(merged, out_path)
+        report["master_written"] = True
+        report["master_path"] = out_path
+    else:
+        report["master_written"] = False
+        report["master_path"] = out_path
 
     return merged, report
 
