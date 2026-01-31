@@ -35,6 +35,30 @@ def _read_file_bytes(path: str) -> bytes:
     except Exception:
         return b""
 
+
+
+def _quick_nhl_id_stats(csv_path: str) -> dict:
+    out = {"path": csv_path, "rows": 0, "with_id": 0, "missing": 0, "ok": False, "error": ""}
+    if not csv_path or not os.path.exists(csv_path):
+        out["error"] = "introuvable"
+        return out
+    try:
+        df = pd.read_csv(csv_path, low_memory=False)
+        out["rows"] = int(len(df))
+        if "NHL_ID" not in df.columns:
+            out["with_id"] = 0
+            out["missing"] = int(out["rows"])
+        else:
+            s = df["NHL_ID"].astype(str).str.strip()
+            out["with_id"] = int(s.ne("").sum())
+            out["missing"] = int(out["rows"] - out["with_id"])
+        out["ok"] = True
+        return out
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+
+
 WKEY = "admin_nhlid_"  # widget key prefix (unique)
 
 
@@ -343,6 +367,57 @@ def _fill_missing_nhl_ids_from_source(target_path: str, source_path: str) -> tup
 
     return True, f"✅ NHL_ID remplis: +{stats['filled']} (ambigus ignorés: {stats['skipped_ambiguous']}, encore manquants: {stats['still_missing']})", stats
 
+
+
+def _preview_fill_missing_nhl_ids(target_path: str, source_path: str) -> tuple[bool, str, dict]:
+    """
+    Dry-run: compute how many NHL_ID would be filled (blank -> value) from source into target.
+    Does NOT write anything.
+    Returns (ok, message, stats).
+    """
+    stats = {"rows": 0, "would_fill": 0, "skipped_ambiguous": 0, "still_missing": 0}
+    if not os.path.exists(target_path) or not os.path.exists(source_path):
+        return False, "target/source introuvable", stats
+    try:
+        tdf = pd.read_csv(target_path, low_memory=False)
+        sdf = pd.read_csv(source_path, low_memory=False)
+    except Exception as e:
+        return False, f"lecture CSV impossible: {e}", stats
+
+    t_name = _detect_col(tdf, ["Player", "Skaters", "Name", "Full Name"])
+    if t_name is None:
+        return False, "colonne Player introuvable dans target", stats
+
+    if "NHL_ID" not in tdf.columns:
+        tdf["NHL_ID"] = ""
+
+    s_name = _detect_col(sdf, ["Player", "Skaters", "Name", "Full Name"])
+    s_id = _detect_col(sdf, ["NHL_ID", "nhl_id", "NHL ID", "playerId", "player_id", "nhlPlayerId", "id"])
+    if s_name is None or s_id is None:
+        return False, "colonne Player/NHL_ID introuvable dans source", stats
+
+    tdf["__pname__"] = _normalize_player_series(tdf[t_name])
+    sdf["__sname__"] = _normalize_player_series(sdf[s_name])
+    sdf["__sid__"] = sdf[s_id].astype(str).str.strip()
+    sdf = sdf[sdf["__sid__"].ne("") & sdf["__sid__"].str.lower().ne("nan")]
+
+    amb = sdf.groupby("__sname__")["__sid__"].nunique()
+    ambiguous = set(amb[amb > 1].index.tolist())
+    src_map = sdf.drop_duplicates(subset=["__sname__"])[["__sname__", "__sid__"]]
+
+    merged = tdf.merge(src_map, how="left", left_on="__pname__", right_on="__sname__")
+
+    blank = merged["NHL_ID"].astype(str).str.strip().eq("")
+    got = merged["__sid__"].astype(str).str.strip()
+    is_amb = merged["__pname__"].isin(list(ambiguous))
+    would_fill_mask = blank & (~is_amb) & got.ne("") & got.str.lower().ne("nan")
+
+    stats["rows"] = int(len(merged))
+    stats["would_fill"] = int(would_fill_mask.sum())
+    stats["skipped_ambiguous"] = int((blank & is_amb).sum())
+    stats["still_missing"] = int((blank & (~would_fill_mask)).sum())
+
+    return True, f"would_fill={stats['would_fill']} (ambigus={stats['skipped_ambiguous']})", stats
 
 def _pick_name_col(df: pd.DataFrame) -> str | None:
     if df is None or df.empty:
@@ -893,6 +968,65 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             before_df, err = load_csv(master_path)
             if err:
                 st.warning(f"Avant: {err}")
+
+        # -------------------------------------------------
+        # ✅ Statut NHL_ID (idiot-proof)
+        # -------------------------------------------------
+        players_path_dbg = os.path.join(DATA_DIR, "hockey.players.csv")
+        master_path_dbg = os.path.join(DATA_DIR, "hockey.players_master.csv")
+        pstat = _quick_nhl_id_stats(players_path_dbg)
+        mstat = _quick_nhl_id_stats(master_path_dbg)
+
+        cA, cB, cC, cD = st.columns([1.2, 1, 1, 1])
+        with cA:
+            st.markdown("#### 🧾 Statut NHL_ID")
+        with cB:
+            st.metric("Players (rows)", pstat.get("rows", 0))
+        with cC:
+            st.metric("Players avec NHL_ID", pstat.get("with_id", 0))
+        with cD:
+            st.metric("Players manquants", pstat.get("missing", 0))
+
+        if pstat.get("ok") and pstat.get("missing", 0) == 0 and pstat.get("rows", 0) > 0:
+            st.success("✅ Tous tes joueurs ont un NHL_ID dans hockey.players.csv — l’enrichissement NHL peut fonctionner.")
+        elif pstat.get("ok") and pstat.get("rows", 0) > 0:
+            st.warning(f"⚠️ Il manque {pstat.get('missing', 0)} NHL_ID dans hockey.players.csv. Génère une source NHL_ID puis applique-la.")
+            # Actions rapides (1 clic)
+            c1, c2, c3 = st.columns([1, 1, 1])
+            with c1:
+                if st.button("⬇️ Aller à Générer source NHL_ID", use_container_width=True, key="go_nhl_search"):
+                    st.session_state["open_nhl_cov"] = True
+            with c2:
+                st.markdown("🔗 [Aller à la section NHL Search](#nhl_search_section)")
+            with c3:
+                # 1-clic: remplir depuis data/nhl_search_players.csv si présent
+                src_auto = os.path.join(DATA_DIR, "nhl_search_players.csv")
+                can_fill = os.path.exists(src_auto)
+                threshold_pct = st.slider("Seuil de protection: bloquer si > X% des joueurs reçoivent un NHL_ID", 1, 50, 10, 1, key="mb_guard_pct")
+                confirm_big = st.checkbox("Je confirme appliquer un gros changement NHL_ID (au-delà du seuil)", value=False, key="mb_guard_confirm")
+
+                if st.button("🧩 Remplir maintenant", use_container_width=True, disabled=(not can_fill), key="mb_fill_now"):
+                    okp, msgp, pstats = _preview_fill_missing_nhl_ids(players_path_dbg, src_auto)
+                    if okp and pstats.get("rows", 0) > 0:
+                        rate = (pstats.get("would_fill", 0) / max(1, pstats.get("rows", 1))) * 100.0
+                        if rate > float(threshold_pct) and not bool(confirm_big):
+                            st.error(f"🛑 Protection activée: {pstats.get('would_fill',0)}/{pstats.get('rows',0)} joueurs (≈{rate:.1f}%) recevraient un NHL_ID. Coche la confirmation pour continuer.")
+                            st.stop()
+                    okf, msgf, stats = _fill_missing_nhl_ids_from_source(players_path_dbg, src_auto)
+                    if okf:
+                        st.success(msgf)
+                        # refresh stats after fill
+                        st.rerun()
+                    else:
+                        st.error("❌ " + msgf)
+                if not can_fill:
+                    st.caption("⚠️ Source manquante: data/nhl_search_players.csv (génère-la plus bas).")
+        else:
+            st.info("ℹ️ Statut NHL_ID: players non lisible (ou fichier manquant).")
+
+        if mstat.get("ok") and mstat.get("rows", 0) > 0:
+            st.caption(f"Master NHL_ID: {mstat.get('with_id', 0)}/{mstat.get('rows', 0)} non vides (fichier: hockey.players_master.csv)")
+        st.divider()
             else:
                 st.info(f"Avant: master existant ✅ ({len(before_df)} lignes)")
         else:
@@ -922,7 +1056,104 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
         with colC:
             st.write("")
             st.write("")
-            run_btn = st.button("🧱 Construire / Mettre à jour Master", type="primary", key=WKEY + "mb_build")
+            run_all_btn = st.button("🚀 Tout faire automatiquement", use_container_width=True, key=WKEY + "mb_run_all", help="Génère (si besoin) la source NHL_ID, remplit hockey.players.csv, construit le master, et écrit l’audit.")
+            run_btn = st.button("🧱 Construire / Mettre à jour Master", type="primary", use_container_width=True, key=WKEY + "mb_build")
+
+
+        if run_all_btn:
+            st.info("🚀 Pipeline automatique: (1) Source NHL_ID → (2) Remplir NHL_ID → (3) Master → (4) Audit")
+            data_dir = data_dir  # (déjà défini plus haut)
+            src_auto = os.path.join(data_dir, "nhl_search_players.csv")
+
+            # (1) Générer la source NHL_ID si absente
+            if not os.path.exists(src_auto):
+                with st.spinner("Étape 1/4 — Génération source NHL_ID (NHL Search API)…"):
+                    df_src, meta, err = generate_nhl_search_source(
+                        src_auto,
+                        active_only=True,
+                        limit=1000,
+                        timeout_s=20,
+                        max_pages=25,
+                    )
+                if err:
+                    st.error("❌ Étape 1/4 échouée: " + err)
+                    st.stop()
+                st.success(f"✅ Étape 1/4 OK — source créée: {os.path.basename(src_auto)} (rows_saved={meta.get('rows_saved', 0)}, pages={meta.get('pages', 0)})")
+
+            # (2) Remplir NHL_ID manquants dans hockey.players.csv
+            with st.spinner("Étape 2/4 — Remplissage NHL_ID manquants dans hockey.players.csv…"):
+                okp, msgp, pstats = _preview_fill_missing_nhl_ids(players_path_dbg, src_auto)
+            if okp and pstats.get("rows", 0) > 0:
+                rate = (pstats.get("would_fill", 0) / max(1, pstats.get("rows", 1))) * 100.0
+                guard_pct = float(st.session_state.get("mb_guard_pct", 10))
+                guard_ok = bool(st.session_state.get("mb_guard_confirm", False))
+                if rate > guard_pct and not guard_ok:
+                    st.error(f"🛑 Protection activée: {pstats.get('would_fill',0)}/{pstats.get('rows',0)} joueurs (≈{rate:.1f}%) recevraient un NHL_ID. Coche la confirmation dans Master Builder pour continuer.")
+                    st.stop()
+            okf, msgf, stats = _fill_missing_nhl_ids_from_source(players_path_dbg, src_auto)
+            if not okf:
+                st.error("❌ Étape 2/4 échouée: " + msgf)
+                st.stop()
+            st.success("✅ Étape 2/4 OK — " + msgf)
+
+            # (3) Construire master
+            with st.spinner("Étape 3/4 — Construction du master (fusion + enrichissement)…"):
+                try:
+                    from services.master_builder import build_master, MasterBuildConfig
+                except Exception as e:
+                    st.error("Impossible d'importer services.master_builder. Assure-toi que le fichier est dans /services/master_builder.py.")
+                    st.exception(e)
+                    st.stop()
+
+                cfg = MasterBuildConfig(
+                    data_dir=data_dir,
+                    enrich_from_nhl=bool(enrich),
+                    max_nhl_calls=int(max_calls),
+                )
+                after_df, rep = build_master(cfg)
+
+            st.success("✅ Étape 3/4 OK — Master généré: " + master_path)
+
+            # (4) Audit / Diff
+            with st.spinner("Étape 4/4 — Calcul diff + écriture audit…"):
+                summary, audit_df = _build_diff_and_audit(before_df, after_df, max_rows=50000, compare_cols=compare_cols)
+                ok, werr = _atomic_write_df(audit_df, report_path)
+
+            if ok:
+                st.success(f"🧾 Audit écrit: {report_path} ({len(audit_df)} lignes)")
+                # Téléchargements
+                rep_bytes = _read_file_bytes(report_path)
+                if rep_bytes:
+                    st.download_button(
+                        "📥 Télécharger rapport CSV (audit fusion)",
+                        data=rep_bytes,
+                        file_name=os.path.basename(report_path),
+                        mime="text/csv",
+                        use_container_width=True,
+                        key=WKEY + "dl_report_all",
+                    )
+                if os.path.exists(master_path):
+                    master_bytes = _read_file_bytes(master_path)
+                    if master_bytes:
+                        st.download_button(
+                            "📥 Télécharger hockey.players_master.csv",
+                            data=master_bytes,
+                            file_name=os.path.basename(master_path),
+                            mime="text/csv",
+                            use_container_width=True,
+                            key=WKEY + "dl_master_all",
+                        )
+            else:
+                st.error(f"❌ Échec écriture audit: {werr}")
+
+            # Mini résumé (simple)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Avant", summary.get("before_rows", 0))
+            c2.metric("Après", summary.get("after_rows", 0))
+            c3.metric("Ajouts", summary.get("added", 0))
+            c4.metric("Modifiés", summary.get("modified_rows", 0))
+
+            st.info("✅ Pipeline terminé. (Si tu veux, refais juste ‘Construire’ pour recalculer l’audit après d’autres edits.)")
 
         if run_btn:
             # lazy import (évite crash si module absent)
@@ -1025,11 +1256,14 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             # -------------------------------------------------
             # ✅ Vérification couverture NHL_ID (simple)
             # -------------------------------------------------
-            with st.expander("✅ Vérifier couverture NHL_ID (par rapport à tes joueurs)", expanded=False):
+            with st.expander("✅ Vérifier couverture NHL_ID (par rapport à tes joueurs)", expanded=bool(st.session_state.get("open_nhl_cov", False))):
                 target_default = os.path.join(DATA_DIR, "hockey.players.csv")
                 target_path2 = st.text_input("Fichier joueurs à vérifier", value=target_default, key="nhl_cov_target")
                 source_path2 = os.path.join(DATA_DIR, "nhl_search_players.csv")
                 st.caption(f"Source NHL Search utilisée: `{os.path.basename(source_path2)}`")
+
+                if st.session_state.get("open_nhl_cov"):
+                    st.session_state["open_nhl_cov"] = False
 
                 if st.button("🔍 Vérifier couverture", use_container_width=True, key="nhl_cov_check"):
                     rep = _nhl_id_coverage_report(target_path2, source_path2)
