@@ -357,5 +357,3 @@ if __name__ == "__main__":
     df, rep = build_master(cfg)
     print("✅ Master écrit:", os.path.join(cfg.data_dir, cfg.master_file))
     print(rep)
-
-

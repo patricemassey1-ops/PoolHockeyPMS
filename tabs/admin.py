@@ -658,7 +658,9 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 if summary.get("audit_truncated"):
                     st.warning("⚠️ Audit tronqué (trop de changements). Le fichier contient la première portion seulement.")
                 # Détails (plus propre) — tout est dans un seul expander
-                with st.expander("📄 Détails (diff + aperçus)", expanded=False):
+                show_details = st.toggle("📄 Afficher détails (diff + aperçus)", value=False)
+                if show_details:
+                    # Détails
                     if not audit_df.empty:
                         st.markdown("**Aperçu des changements (top 200)**")
                         st.dataframe(audit_df.head(200), use_container_width=True)
