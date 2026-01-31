@@ -202,6 +202,148 @@ def _apply_nhl_id_source_to_players(players_path: str, source_path: str) -> tupl
     return True, f"NHL_ID appliqués: +{added} (total NHL_ID non vides: {after_filled})"
 
 
+
+def _nhl_id_coverage_report(target_path: str, source_path: str) -> dict:
+    """
+    Compare target players DB vs NHL search source and report NHL_ID coverage + missing names.
+    """
+    out = {
+        "target_path": target_path,
+        "source_path": source_path,
+        "target_rows": 0,
+        "target_with_id": 0,
+        "target_missing_id": 0,
+        "source_rows": 0,
+        "matched_by_name": 0,
+        "missing_names": [],
+        "ambiguous_names": [],
+    }
+
+    if not os.path.exists(target_path) or not os.path.exists(source_path):
+        out["error"] = "target/source introuvable"
+        return out
+
+    try:
+        tdf = pd.read_csv(target_path, low_memory=False)
+        sdf = pd.read_csv(source_path, low_memory=False)
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+
+    t_name = _detect_col(tdf, ["Player", "Skaters", "Name", "Full Name"])
+    if t_name is None:
+        out["error"] = "colonne Player introuvable dans target"
+        return out
+
+    if "NHL_ID" not in tdf.columns:
+        tdf["NHL_ID"] = ""
+
+    s_name = _detect_col(sdf, ["Player", "Skaters", "Name", "Full Name"])
+    s_id = _detect_col(sdf, ["NHL_ID", "nhl_id", "NHL ID", "playerId", "player_id", "id"])
+    if s_name is None or s_id is None:
+        out["error"] = "colonne Player/NHL_ID introuvable dans source"
+        return out
+
+    tdf["__pname__"] = _normalize_player_series(tdf[t_name])
+    sdf["__sname__"] = _normalize_player_series(sdf[s_name])
+    sdf["__sid__"] = sdf[s_id].astype(str).str.strip()
+
+    sdf = sdf[sdf["__sid__"].ne("") & sdf["__sid__"].str.lower().ne("nan")]
+
+    # detect ambiguous names in source (same name -> multiple NHL_ID)
+    amb = sdf.groupby("__sname__")["__sid__"].nunique()
+    ambiguous = set(amb[amb > 1].index.tolist())
+
+    # mapping (first occurrence)
+    src_map = sdf.drop_duplicates(subset=["__sname__"])[["__sname__", "__sid__"]]
+
+    # coverage
+    out["target_rows"] = int(len(tdf))
+    out["source_rows"] = int(len(sdf))
+    out["target_with_id"] = int(tdf["NHL_ID"].astype(str).str.strip().ne("").sum())
+    out["target_missing_id"] = int(out["target_rows"] - out["target_with_id"])
+
+    missing_names = []
+    matched_by_name = 0
+    for name, nhl_id in zip(tdf["__pname__"].tolist(), tdf["NHL_ID"].astype(str).str.strip().tolist()):
+        if nhl_id:
+            continue
+        if name in ambiguous:
+            continue
+        # match exists?
+        if (src_map["__sname__"] == name).any():
+            matched_by_name += 1
+        else:
+            missing_names.append(name)
+
+    out["matched_by_name"] = int(matched_by_name)
+    out["missing_names"] = missing_names[:200]  # keep UI light
+    out["ambiguous_names"] = [n for n in tdf["__pname__"].tolist() if n in ambiguous][:200]
+    return out
+
+
+def _fill_missing_nhl_ids_from_source(target_path: str, source_path: str) -> tuple[bool, str, dict]:
+    """
+    Fill missing NHL_ID in target_path by name from source_path.
+    Skips ambiguous names (where source has >1 NHL_ID for same name).
+    Writes target_path atomically. Returns (ok, message, stats).
+    """
+    stats = {"filled": 0, "skipped_ambiguous": 0, "still_missing": 0}
+    if not os.path.exists(target_path) or not os.path.exists(source_path):
+        return False, "target/source introuvable", stats
+
+    try:
+        tdf = pd.read_csv(target_path, low_memory=False)
+        sdf = pd.read_csv(source_path, low_memory=False)
+    except Exception as e:
+        return False, f"lecture CSV impossible: {e}", stats
+
+    t_name = _detect_col(tdf, ["Player", "Skaters", "Name", "Full Name"])
+    if t_name is None:
+        return False, "colonne Player introuvable dans target", stats
+
+    if "NHL_ID" not in tdf.columns:
+        tdf["NHL_ID"] = ""
+
+    s_name = _detect_col(sdf, ["Player", "Skaters", "Name", "Full Name"])
+    s_id = _detect_col(sdf, ["NHL_ID", "nhl_id", "NHL ID", "playerId", "player_id", "id"])
+    if s_name is None or s_id is None:
+        return False, "colonne Player/NHL_ID introuvable dans source", stats
+
+    tdf["__pname__"] = _normalize_player_series(tdf[t_name])
+    sdf["__sname__"] = _normalize_player_series(sdf[s_name])
+    sdf["__sid__"] = sdf[s_id].astype(str).str.strip()
+    sdf = sdf[sdf["__sid__"].ne("") & sdf["__sid__"].str.lower().ne("nan")]
+
+    amb = sdf.groupby("__sname__")["__sid__"].nunique()
+    ambiguous = set(amb[amb > 1].index.tolist())
+    src_map = sdf.drop_duplicates(subset=["__sname__"])[["__sname__", "__sid__"]]
+
+    # merge
+    merged = tdf.merge(src_map, how="left", left_on="__pname__", right_on="__sname__")
+
+    blank = merged["NHL_ID"].astype(str).str.strip().eq("")
+    got = merged["__sid__"].astype(str).str.strip()
+    # skip ambiguous
+    is_amb = merged["__pname__"].isin(list(ambiguous))
+    fill_mask = blank & (~is_amb) & got.ne("") & got.str.lower().ne("nan")
+
+    stats["filled"] = int(fill_mask.sum())
+    stats["skipped_ambiguous"] = int((blank & is_amb).sum())
+
+    merged.loc[fill_mask, "NHL_ID"] = got[fill_mask]
+
+    # cleanup
+    merged = merged.drop(columns=[c for c in ["__pname__", "__sname__", "__sid__"] if c in merged.columns], errors="ignore")
+    stats["still_missing"] = int(merged["NHL_ID"].astype(str).str.strip().eq("").sum())
+
+    ok, err = _atomic_write_df(merged, target_path)
+    if not ok:
+        return False, f"écriture impossible: {err}", stats
+
+    return True, f"✅ NHL_ID remplis: +{stats['filled']} (ambigus ignorés: {stats['skipped_ambiguous']}, encore manquants: {stats['still_missing']})", stats
+
+
 def _pick_name_col(df: pd.DataFrame) -> str | None:
     if df is None or df.empty:
         return None
@@ -677,6 +819,69 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
     #   - Rapport audit CSV: data/master_build_report.csv
     # =====================================================
     with st.expander("🧱 Master Builder", expanded=False):
+
+        # =====================================================
+        # 🧭 Guide (Étapes) + Auto-détection NHL_ID
+        # =====================================================
+        show_guide = st.toggle("🧭 Guide (Étapes 1 → 5)", value=False, key="mb_show_guide")
+        if show_guide:
+            st.markdown("""
+**Étape 1 — Vérifier la source**
+- **Ce que ça fait :** vérifie si `data/hockey.players.csv` contient déjà des `NHL_ID`.
+- **Résultat :** si `NHL_ID` est vide → l’enrichissement NHL ne démarre pas (normal).
+
+**Étape 2 — Générer une source NHL_ID**
+- **Ce que ça fait :** l’outil “NHL Search” construit une table `Player → NHL_ID`.
+- **Résultat :** un fichier CSV de correspondance (ou une mise à jour d’un fichier cible).
+
+**Étape 3 — Appliquer la source NHL_ID (auto)**
+- **Ce que ça fait :** détecte automatiquement la meilleure source NHL_ID dans `data/` et la fusionne dans `hockey.players.csv`.
+- **Résultat :** `NHL_ID` non vides augmentent (ex: +1234).
+
+**Étape 4 — Construire le master**
+- **Ce que ça fait :** fusionne `hockey.players.csv + PuckPedia2025_26.csv (+ NHL API si NHL_ID)`.
+- **Résultat :** `data/hockey.players_master.csv` est créé / mis à jour.
+
+**Étape 5 — Audit & téléchargements**
+- **Ce que ça fait :** écrit `data/master_build_report.csv` (ajouts / suppressions / champs modifiés).
+- **Résultat :** tu peux télécharger le rapport et le master directement ici.
+""")
+
+        with st.expander("🔎 Auto-détection source NHL_ID", expanded=False):
+            data_dir = DATA_DIR
+            players_path = os.path.join(DATA_DIR, "hockey.players.csv")
+
+            candidates = _auto_detect_nhl_id_sources(data_dir)
+            if candidates:
+                default_src = candidates[0]
+                options = ["(auto) " + os.path.basename(default_src)] + [os.path.basename(p) for p in candidates[1:]]
+                paths = [default_src] + candidates[1:]
+            else:
+                options = ["(auto) aucune source trouvée"]
+                paths = [""]
+
+            sel = st.selectbox(
+                "Source NHL_ID détectée (tu peux en choisir une autre)",
+                options=list(range(len(paths))),
+                format_func=lambda i: options[i],
+                key="mb_src_sel",
+            )
+            src_path = paths[sel] if sel < len(paths) else (paths[0] if paths else "")
+
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                do_apply = st.button("🧷 Appliquer NHL_ID → hockey.players.csv", use_container_width=True, disabled=(not src_path), key="mb_apply_src")
+            with c2:
+                st.caption(f"Source sélectionnée: `{os.path.basename(src_path) if src_path else 'aucune'}`")
+
+            if do_apply:
+                ok2, msg2 = _apply_nhl_id_source_to_players(players_path, src_path)
+                if ok2:
+                    st.success("✅ " + msg2)
+                else:
+                    st.error("❌ " + msg2)
+
+        st.divider()
         master_path = os.path.join(data_dir, "hockey.players_master.csv")
         report_path = os.path.join(data_dir, "master_build_report.csv")
 
@@ -816,6 +1021,44 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 st.caption(f"URL: {dbg.get('url')}")
         else:
             st.success(f"✅ Généré: {dbg.get('rows_saved', 0)} joueurs (pages={dbg.get('pages', 0)}).")
+
+            # -------------------------------------------------
+            # ✅ Vérification couverture NHL_ID (simple)
+            # -------------------------------------------------
+            with st.expander("✅ Vérifier couverture NHL_ID (par rapport à tes joueurs)", expanded=False):
+                target_default = os.path.join(DATA_DIR, "hockey.players.csv")
+                target_path2 = st.text_input("Fichier joueurs à vérifier", value=target_default, key="nhl_cov_target")
+                source_path2 = os.path.join(DATA_DIR, "nhl_search_players.csv")
+                st.caption(f"Source NHL Search utilisée: `{os.path.basename(source_path2)}`")
+
+                if st.button("🔍 Vérifier couverture", use_container_width=True, key="nhl_cov_check"):
+                    rep = _nhl_id_coverage_report(target_path2, source_path2)
+                    if rep.get("error"):
+                        st.error("❌ " + rep["error"])
+                    else:
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Joueurs (target)", rep["target_rows"])
+                        c2.metric("Avec NHL_ID", rep["target_with_id"])
+                        c3.metric("Manquants", rep["target_missing_id"])
+
+                        st.caption(f"Matchables par nom (dans la source) : {rep['matched_by_name']}  •  Ambigus : {len(rep['ambiguous_names'])}")
+
+                        if rep["missing_names"]:
+                            st.warning("Exemples de joueurs sans match dans la source (top 200 normalisés) :")
+                            st.write(rep["missing_names"][:50])
+                        if rep["ambiguous_names"]:
+                            st.info("Noms ambigus (même nom = plusieurs NHL_ID dans la source) — top 200 :")
+                            st.write(rep["ambiguous_names"][:50])
+
+                st.divider()
+                st.markdown("**Option simple :** remplir automatiquement les NHL_ID manquants par *nom* (ignore les noms ambigus).")
+                do_fill = st.button("🧩 Remplir NHL_ID manquants dans hockey.players.csv", use_container_width=True, key="nhl_cov_fill")
+                if do_fill:
+                    okf, msgf, stats = _fill_missing_nhl_ids_from_source(target_default, os.path.join(DATA_DIR, "nhl_search_players.csv"))
+                    if okf:
+                        st.success(msgf)
+                    else:
+                        st.error("❌ " + msgf)
             st.caption(f"Sortie: {out_src}")
             st.caption(f"URL: {dbg.get('url')}")
             if not df_out.empty:
