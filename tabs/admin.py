@@ -1360,7 +1360,13 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                     if not selected:
                         st.warning("Aucun fichier sélectionné.")
                     else:
-                        out_name = st.text_input("Nom local (dans data/)", value=selected.get("name","download.csv"), key="drive_out_name")
+                                                # Option idiot-proof: renommer automatiquement
+                        auto_rename = st.checkbox("Renommer automatiquement en nhl_search_players.csv (recommandé)", value=True, key="drive_auto_rename")
+                        if auto_rename:
+                            out_name = "nhl_search_players.csv"
+                            st.caption("Nom local forcé: `data/nhl_search_players.csv`")
+                        else:
+                            out_name = st.text_input("Nom local (dans data/)", value=selected.get("name","download.csv"), key="drive_out_name")
                         out_path = os.path.join(DATA_DIR, os.path.basename(out_name))
                         st.caption(f"Destination: `{out_path}`")
 
@@ -1369,7 +1375,7 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                                 ok, err = _drive_download_file(selected.get("id",""), out_path)
                             if ok:
                                 st.success(f"✅ Téléchargé: {out_path}")
-                                st.info("Prochain step: retourne dans Master Builder (AUTO-détection locale va le trouver).")
+                                st.info("Prochain step: retourne dans Master Builder — la source `data/nhl_search_players.csv` sera détectée automatiquement.")
                             else:
                                 st.error("❌ Download error: " + err)
                 else:
