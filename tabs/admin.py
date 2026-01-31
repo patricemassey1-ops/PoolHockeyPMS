@@ -419,6 +419,57 @@ def _preview_fill_missing_nhl_ids(target_path: str, source_path: str) -> tuple[b
 
     return True, f"would_fill={stats['would_fill']} (ambigus={stats['skipped_ambiguous']})", stats
 
+
+def _build_fill_preview_table(target_path: str, source_path: str, limit: int = 50) -> pd.DataFrame:
+    """
+    Build a small preview table (top N) of players who would receive a NHL_ID (blank -> value).
+    """
+    if (not target_path) or (not source_path) or (not os.path.exists(target_path)) or (not os.path.exists(source_path)):
+        return pd.DataFrame(columns=["Player", "NHL_ID_before", "NHL_ID_after", "reason"])
+
+    try:
+        tdf = pd.read_csv(target_path, low_memory=False)
+        sdf = pd.read_csv(source_path, low_memory=False)
+    except Exception:
+        return pd.DataFrame(columns=["Player", "NHL_ID_before", "NHL_ID_after", "reason"])
+
+    t_name = _detect_col(tdf, ["Player", "Skaters", "Name", "Full Name"])
+    s_name = _detect_col(sdf, ["Player", "Skaters", "Name", "Full Name"])
+    s_id = _detect_col(sdf, ["NHL_ID", "nhl_id", "NHL ID", "playerId", "player_id", "nhlPlayerId", "id"])
+    if t_name is None or s_name is None or s_id is None:
+        return pd.DataFrame(columns=["Player", "NHL_ID_before", "NHL_ID_after", "reason"])
+
+    if "NHL_ID" not in tdf.columns:
+        tdf["NHL_ID"] = ""
+
+    tdf["__pname__"] = _normalize_player_series(tdf[t_name])
+    sdf["__sname__"] = _normalize_player_series(sdf[s_name])
+    sdf["__sid__"] = sdf[s_id].astype(str).str.strip()
+    sdf = sdf[sdf["__sid__"].ne("") & sdf["__sid__"].str.lower().ne("nan")]
+
+    amb = sdf.groupby("__sname__")["__sid__"].nunique()
+    ambiguous = set(amb[amb > 1].index.tolist())
+    src_map = sdf.drop_duplicates(subset=["__sname__"])[["__sname__", "__sid__"]]
+
+    merged = tdf[[t_name, "NHL_ID", "__pname__"]].copy()
+    merged = merged.merge(src_map, how="left", left_on="__pname__", right_on="__sname__")
+
+    before = merged["NHL_ID"].astype(str).str.strip()
+    after = merged["__sid__"].astype(str).str.strip()
+    is_blank = before.eq("")
+    is_amb = merged["__pname__"].isin(list(ambiguous))
+    can_fill = is_blank & (~is_amb) & after.ne("") & after.str.lower().ne("nan")
+
+    out = pd.DataFrame({
+        "Player": merged[t_name].astype(str),
+        "NHL_ID_before": before,
+        "NHL_ID_after": after.where(can_fill, ""),
+        "reason": ["fill" if cf else ("ambiguous" if (ib and ia) else ("no_match" if ib else "already_has_id"))
+                   for cf, ib, ia in zip(can_fill.tolist(), is_blank.tolist(), is_amb.tolist())]
+    })
+    out = out[out["reason"].eq("fill")].head(int(limit))
+    return out
+
 def _pick_name_col(df: pd.DataFrame) -> str | None:
     if df is None or df.empty:
         return None
@@ -931,7 +982,6 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 default_src = candidates[0]
                 options = ["(auto) " + os.path.basename(default_src)] + [os.path.basename(p) for p in candidates[1:]]
                 paths = [default_src] + candidates[1:]
-            else:
                 options = ["(auto) aucune source trouvée"]
                 paths = [""]
 
@@ -968,9 +1018,12 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             before_df, err = load_csv(master_path)
             if err:
                 st.warning(f"Avant: {err}")
+            elif isinstance(before_df, pd.DataFrame) and (not before_df.empty):
+                st.info(f"Avant: master existant ✅ ({len(before_df)} lignes)")
+                st.info("Avant: master existant ✅")
 
         # -------------------------------------------------
-        # ✅ Statut NHL_ID (idiot-proof)
+        # ✅ Statut NHL_ID (idiot-proof) (idiot-proof)
         # -------------------------------------------------
         players_path_dbg = os.path.join(DATA_DIR, "hockey.players.csv")
         master_path_dbg = os.path.join(DATA_DIR, "hockey.players_master.csv")
@@ -1011,6 +1064,10 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                         rate = (pstats.get("would_fill", 0) / max(1, pstats.get("rows", 1))) * 100.0
                         if rate > float(threshold_pct) and not bool(confirm_big):
                             st.error(f"🛑 Protection activée: {pstats.get('would_fill',0)}/{pstats.get('rows',0)} joueurs (≈{rate:.1f}%) recevraient un NHL_ID. Coche la confirmation pour continuer.")
+                            prev_df = _build_fill_preview_table(players_path_dbg, src_auto, limit=50)
+                            if isinstance(prev_df, pd.DataFrame) and (not prev_df.empty):
+                                st.markdown("**Aperçu (top 50) — joueurs qui vont recevoir un NHL_ID**")
+                                st.dataframe(prev_df, use_container_width=True, height=280)
                             st.stop()
                     okf, msgf, stats = _fill_missing_nhl_ids_from_source(players_path_dbg, src_auto)
                     if okf:
@@ -1027,10 +1084,6 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
         if mstat.get("ok") and mstat.get("rows", 0) > 0:
             st.caption(f"Master NHL_ID: {mstat.get('with_id', 0)}/{mstat.get('rows', 0)} non vides (fichier: hockey.players_master.csv)")
         st.divider()
-            else:
-                st.info(f"Avant: master existant ✅ ({len(before_df)} lignes)")
-        else:
-            st.info("Avant: aucun master trouvé (il sera créé).")
 
         # Colonnes à comparer (diff) — mode lisible
         default_compare = ["Level", "Cap Hit", "Expiry Year", "Expiry Status", "Team", "Position", "Jersey#", "Country", "Status", "NHL_ID"]
@@ -1089,6 +1142,10 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 guard_ok = bool(st.session_state.get("mb_guard_confirm", False))
                 if rate > guard_pct and not guard_ok:
                     st.error(f"🛑 Protection activée: {pstats.get('would_fill',0)}/{pstats.get('rows',0)} joueurs (≈{rate:.1f}%) recevraient un NHL_ID. Coche la confirmation dans Master Builder pour continuer.")
+                    prev_df = _build_fill_preview_table(players_path_dbg, src_auto, limit=50)
+                    if isinstance(prev_df, pd.DataFrame) and (not prev_df.empty):
+                        st.markdown("**Aperçu (top 50) — joueurs qui vont recevoir un NHL_ID**")
+                        st.dataframe(prev_df, use_container_width=True, height=280)
                     st.stop()
             okf, msgf, stats = _fill_missing_nhl_ids_from_source(players_path_dbg, src_auto)
             if not okf:
@@ -1143,7 +1200,6 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                             use_container_width=True,
                             key=WKEY + "dl_master_all",
                         )
-            else:
                 st.error(f"❌ Échec écriture audit: {werr}")
 
             # Mini résumé (simple)
@@ -1162,7 +1218,6 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             except Exception as e:
                 st.error("Impossible d'importer services.master_builder. Assure-toi que le fichier est dans /services/master_builder.py.")
                 st.exception(e)
-            else:
                 cfg = MasterBuildConfig(
                     data_dir=data_dir,
                     enrich_from_nhl=bool(enrich),
