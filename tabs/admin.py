@@ -1,3 +1,4 @@
+
 # tabs/admin.py — SAFE MINI (NHL_ID tools + prod lock + audit/heatmap)
 # ✅ Features:
 #   - Heatmap crash (matplotlib optional)
@@ -7,6 +8,12 @@
 #   - Mode “review collisions” (montre collisions avant write, bloque write)
 #   - 🌐 Générer source NHL_ID (NHL Search API) -> data/nhl_search_players.csv
 #   - 🧬 Enrichir hockey.players.csv avec NHL_ID (depuis nhl_search_players.csv)
+#
+# ✅ FIX IMPORTANT (ton screenshot):
+#   Avant, "Mode review" bloquait l'écriture dès qu'il EXISTAIT des collisions dans la source,
+#   même si ces collisions ne touchaient PAS tes lignes à enrichir.
+#   Maintenant, on calcule "collisions_target" = collisions qui impactent des lignes manquantes du target.
+#   → Le write est bloqué UNIQUEMENT si collisions_target > 0.
 #
 # NOTE: no extra deps (urllib from stdlib).
 
@@ -529,6 +536,10 @@ def recover_from_source(
     match_team_pos_jersey: bool = True,
     max_preview: int = 200,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    ✅ IMPORTANT: collisions_reported = collisions qui IMPACTENT le target (lignes manquantes),
+    pas juste "collisions existantes dans la source".
+    """
     p = players_df.copy()
     s = source_df.copy()
 
@@ -561,7 +572,9 @@ def recover_from_source(
     cur_missing = cur.isna()
 
     filled_total = 0
-    collisions_rows = []
+
+    # collisions that actually touch missing rows in target
+    collisions_touch_rows = []
 
     for tag, key_col, this_conf in maps:
         if not cur_missing.any():
@@ -571,15 +584,23 @@ def recover_from_source(
         if join_map.empty:
             continue
 
-        coll = join_map[join_map["collision_count"] > 1].copy()
-        if not coll.empty:
-            coll["match_type"] = tag
-            collisions_rows.append(coll)
-
+        # Build tmp join for target
         tmp = p_k[[key_col]].copy()
         tmp["_idx"] = p_k.index
         tmp = tmp.merge(join_map, on=key_col, how="left")
 
+        # collision rows in target (missing rows whose key maps to >1 ids in source)
+        col_mask = (
+            cur_missing
+            & tmp["src_nhl_id"].notna().fillna(False).to_numpy()
+            & (tmp["collision_count"].fillna(0).astype(int).to_numpy() > 1)
+        )
+        if col_mask.any():
+            coll_part = tmp.loc[col_mask, [key_col, "collision_count"]].copy()
+            coll_part["match_type"] = tag
+            collisions_touch_rows.append(coll_part)
+
+        # only fill when collision_count == 1
         ok_map = tmp["src_nhl_id"].notna() & (tmp["collision_count"].fillna(0).astype(int) == 1)
         fillable = cur_missing & ok_map.set_axis(p_k.index)
 
@@ -593,10 +614,14 @@ def recover_from_source(
             cur_missing = cur.isna()
 
     collisions_df = pd.DataFrame()
-    if collisions_rows:
-        collisions_df = pd.concat(collisions_rows, ignore_index=True)
-        collisions_df = collisions_df.rename(columns={"src_nhl_id": "example_src_nhl_id"})
-        collisions_df = collisions_df.sort_values(["match_type", "collision_count"], ascending=[True, False])
+    collisions_target = 0
+    if collisions_touch_rows:
+        collisions_df = pd.concat(collisions_touch_rows, ignore_index=True)
+        collisions_df = collisions_df.rename(columns={key_col: "key"})
+        collisions_df = collisions_df.drop_duplicates(subset=["match_type", "key"]).sort_values(
+            ["match_type", "collision_count"], ascending=[True, False]
+        )
+        collisions_target = int(len(collisions_df))
 
     p_k = p_k.drop(columns=[c for c in p_k.columns if c.startswith("_k_")], errors="ignore")
 
@@ -608,7 +633,8 @@ def recover_from_source(
         "target_extras": p_ex,
         "source_extras": s_ex,
         "source_detected": {"id_col": s_id_col, "name_col": s_name_col, "team_col": s_team_col},
-        "collisions": int(len(collisions_df)) if not collisions_df.empty else 0,
+        # ✅ NEW: collisions that matter
+        "collisions_target": collisions_target,
         "collisions_preview": collisions_df.head(max_preview) if not collisions_df.empty else pd.DataFrame(),
     }
 
@@ -657,28 +683,17 @@ def enrich_hockey_players_with_nhl_id(
     allow_name_only: bool = True,
     allow_name_team: bool = True,
     allow_name_dob: bool = True,
-    allow_team_pos_jersey: bool = False,  # IMPORTANT: NHL search jersey often missing; keep False here.
+    allow_team_pos_jersey: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    """
-    Enrichit hockey.players.csv avec NHL_ID à partir de nhl_search_players.csv.
-    Par défaut: pas de team_pos_jersey (source NHL Search a souvent jersey vide).
-    """
-    # Detect target columns for hockey.players
     tmp = hockey_df.copy()
     id_col_t, name_col_t, team_col_t = detect_columns(tmp)
 
-    # Ensure we write into a canonical id col name (keep existing if present)
-    id_col_target = id_col_t
-    name_col_target = name_col_t
-    team_col_target = team_col_t
-
-    # Run recovery
     merged, dbg = recover_from_source(
         tmp,
         nhl_source_df,
-        id_col=id_col_target,
-        name_col=name_col_target,
-        team_col=team_col_target,
+        id_col=id_col_t,
+        name_col=name_col_t,
+        team_col=team_col_t,
         source_tag="nhl_search_players.csv",
         conf=float(conf),
         match_name=bool(allow_name_only),
@@ -688,7 +703,7 @@ def enrich_hockey_players_with_nhl_id(
         max_preview=200,
     )
 
-    dbg["target_cols"] = {"id_col": id_col_target, "name_col": name_col_target, "team_col": team_col_target}
+    dbg["target_cols"] = {"id_col": id_col_t, "name_col": name_col_t, "team_col": team_col_t}
     return merged, dbg
 
 
@@ -708,7 +723,6 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
         st.error("🔒 Mode PROD: accès admin requis.")
         st.stop()
 
-    # Paths
     nhl_source_path = os.path.join(data_dir, "nhl_search_players.csv")
     hockey_players_path = os.path.join(data_dir, "hockey.players.csv")
     equipes_path = os.path.join(data_dir, "equipes_joueurs_2025-2026.csv")
@@ -725,7 +739,7 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
 
     if gen_btn:
         with st.spinner("Appel NHL Search API… génération du CSV…"):
-            df_nhl, dbg, err = generate_nhl_search_source(
+            _, dbg, err = generate_nhl_search_source(
                 nhl_source_path, active_only=True, limit=9999, culture="en-us", q="*"
             )
         if err:
@@ -743,7 +757,6 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
         st.caption(f"Source: {nhl_source_path}")
 
         colA, colB, colC = st.columns([1, 1, 1])
-
         enrich_conf = colA.slider("Confiance appliquée aux IDs enrichis", 0.50, 0.99, 0.95, 0.01)
         enrich_review = colB.checkbox("Mode review (bloque si collisions)", value=True)
         enrich_write_anyway = colC.checkbox("Autoriser write même si collisions", value=False, help="⚠️ Déconseillé.")
@@ -753,11 +766,13 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
         en_name_dob = s1.checkbox("Name + DOB", value=True)
         en_name_team = s2.checkbox("Name + Team", value=True)
         en_name_only = s3.checkbox("Name seul (fallback)", value=True)
-        # Important: NHL Search API jersey often missing -> keep OFF
-        en_team_pos_jersey = s4.checkbox("Team + Pos + Jersey", value=False, help="Désactivé par défaut (jersey souvent vide dans la source NHL Search).")
+        en_team_pos_jersey = s4.checkbox(
+            "Team + Pos + Jersey",
+            value=False,
+            help="Désactivé par défaut (jersey souvent vide dans la source NHL Search).",
+        )
 
         if st.button("🧬 Enrichir hockey.players.csv maintenant", use_container_width=True):
-            # Load files
             hockey_df, e1 = load_csv(hockey_players_path)
             if e1:
                 st.error(e1)
@@ -767,14 +782,14 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
                 st.error(e2)
                 st.stop()
 
-            # Quick sanity
             src_score = score_source(src_df)
             if int(src_score.get("present_ids", 0)) == 0:
                 st.error("La source nhl_search_players.csv ne contient aucun NHL_ID. Clique d'abord sur 🌐 Générer source NHL_ID.")
                 st.stop()
 
-            before_ids = _count_present_ids(hockey_df, detect_columns(hockey_df)[0])
-            before_dup = duplicate_rate(hockey_df, detect_columns(hockey_df)[0])
+            id_col_hp0, _, _ = detect_columns(hockey_df)
+            before_ids = _count_present_ids(hockey_df, id_col_hp0)
+            before_dup = duplicate_rate(hockey_df, id_col_hp0)
 
             merged, dbg = enrich_hockey_players_with_nhl_id(
                 hockey_df,
@@ -786,14 +801,11 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
                 allow_team_pos_jersey=bool(en_team_pos_jersey),
             )
 
-            # Optional cleanup duplicates for hockey.players as well
             id_col_hp, name_col_hp, team_col_hp = detect_columns(merged)
-            cleaned_n = 0
             merged, cleaned_n = cleanup_duplicates_fallback(merged, id_col_hp)
 
             after_ids = _count_present_ids(merged, id_col_hp)
             after_dup = duplicate_rate(merged, id_col_hp)
-            coll_count = int(dbg.get("collisions", 0) or 0)
 
             st.success(
                 f"✅ Enrichissement terminé: +{int(dbg.get('filled', 0))} IDs remplis. "
@@ -801,20 +813,22 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
                 f"Doublons avant={before_dup:.1f}%, après={after_dup:.1f}% (nettoyés={cleaned_n})."
             )
 
-            # Collisions preview
+            coll_count = int(dbg.get("collisions_target", 0) or 0)
             coll_prev = dbg.get("collisions_preview")
+
             if isinstance(coll_prev, pd.DataFrame) and not coll_prev.empty:
                 st.warning(f"⚠️ Collisions détectées (aperçu) — {coll_count} lignes.")
                 st.dataframe(coll_prev, use_container_width=True)
+            else:
+                st.info("✅ Aucune collision impactante détectée.")
 
-            # Audit preview
             audit_hp = build_audit_report(merged, id_col_hp, name_col_hp, team_col_hp)
             st.markdown("#### Audit hockey.players après enrichissement (aperçu)")
             st.dataframe(audit_hp.head(50), use_container_width=True)
 
-            # Write rules
+            # ✅ FIX: block only if collisions touch target missing rows
             if enrich_review and coll_count > 0 and not enrich_write_anyway:
-                st.error("🔒 Write bloqué (mode review). Résous les collisions ou coche 'Autoriser write même si collisions'.")
+                st.error("🔒 Write bloqué (mode review): collisions impactantes à résoudre, ou coche 'Autoriser write même si collisions'.")
                 st.stop()
 
             ok, se = save_csv(merged, hockey_players_path)
@@ -823,25 +837,20 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
                 st.stop()
 
             st.info(f"💾 Sauvegardé: {hockey_players_path}")
-            st.success("👉 Maintenant, utilise hockey.players.csv comme source pour remplir equipes_joueurs_2025-2026.csv (tu auras Team+Pos+Jersey fiable).")
+            st.success("👉 Maintenant, utilise hockey.players.csv comme source pour remplir equipes_joueurs_2025-2026.csv.")
 
     st.divider()
 
     # -----------------------------------
-    # Source selection
+    # Source selection for equipes_joueurs
     # -----------------------------------
     st.markdown("### Source de récupération (optionnel)")
     up = st.file_uploader("Ou uploader un CSV source", type=["csv"])
 
-    # Include generated file if exists
-    src_paths = [
-        equipes_path,
-        hockey_players_path,
-    ]
+    src_paths = [equipes_path, hockey_players_path]
     if os.path.exists(nhl_source_path):
         src_paths.append(nhl_source_path)
 
-    # Auto-pick best source
     best_idx = 0
     scores: List[Dict[str, Any]] = []
     for pth in src_paths:
@@ -876,7 +885,7 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
             st.caption("Tip: la meilleure source est celle avec le plus de NHL_ID présents + colonnes utiles (DOB/pos/jersey).")
 
     # -----------------------------------
-    # Load target (equipes_joueurs)
+    # Load target equipes_joueurs
     # -----------------------------------
     df, err = load_csv(equipes_path)
     if err:
@@ -989,10 +998,7 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
             max_preview=200,
         )
 
-        cleaned_n = 0
-        if do_cleanup:
-            merged, cleaned_n = cleanup_duplicates_fallback(merged, id_col)
-
+        merged, cleaned_n = cleanup_duplicates_fallback(merged, id_col) if do_cleanup else (merged, 0)
         after_dup = duplicate_rate(merged, id_col)
 
         st.success(
@@ -1000,14 +1006,14 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
             f"Doublons avant: {before_dup:.1f}%, après: {after_dup:.1f}% (nettoyés: {cleaned_n})."
         )
 
-        coll_count = int(dbg.get("collisions", 0) or 0)
+        coll_count = int(dbg.get("collisions_target", 0) or 0)
         if review_only:
             coll_prev = dbg.get("collisions_preview")
             if isinstance(coll_prev, pd.DataFrame) and not coll_prev.empty:
                 st.warning(f"⚠️ Collisions détectées (aperçu) — {coll_count} lignes. Résoudre avant write.")
                 st.dataframe(coll_prev, use_container_width=True)
             else:
-                st.info("✅ Aucune collision détectée par les stratégies sélectionnées.")
+                st.info("✅ Aucune collision impactante détectée.")
 
         audit_df = build_audit_report(merged, id_col, name_col, team_col)
         st.markdown("#### 🧾 Audit après récupération (aperçu)")
@@ -1027,7 +1033,7 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
         )
 
         if review_only and coll_count > 0:
-            st.error("🔒 Write bloqué en mode review (collisions à résoudre).")
+            st.error("🔒 Write bloqué en mode review (collisions impactantes à résoudre).")
             st.stop()
 
         if after_dup > float(max_dup_pct):
@@ -1042,7 +1048,6 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
         st.info(f"💾 Sauvegardé: {equipes_path}")
 
 
-# Backward-compat alias (si ton app appelle _render_tools)
 def _render_tools(*args: Any, **kwargs: Any) -> None:
     ctx = None
     if args and isinstance(args[0], dict):
