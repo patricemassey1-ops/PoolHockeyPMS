@@ -1,14 +1,11 @@
 # tabs/admin.py — SAFE MINI (NHL_ID tools + prod lock + audit/heatmap)
 # -----------------------------------------------------------------------------
-# ✅ Fixes included:
-# 1) ✅ StreamlitDuplicateElementId: ajoute des `key=` uniques + un guard par run_id
-#    pour éviter un double-render (si ton app appelle render 2x dans le même run).
-# 2) ✅ Heatmap: fonctionne même sans matplotlib (styler CSS fallback).
-# 3) ✅ nul_id: traité comme colonne "team" si présent.
-# 4) ✅ “Mode review”: bloque l’écriture UNIQUEMENT si collisions IMPACTENT les lignes
-#    à remplir (collisions_target), pas juste des collisions dans la source.
-# 5) ✅ Bouton 🧬 Enrichir hockey.players.csv avec NHL_ID (depuis nhl_search_players.csv)
-#    (par défaut team+pos+jersey OFF car jersey souvent vide côté NHL search).
+# ✅ HOTFIX “écran noir au clic sur Générer”
+# - Ajoute un TRY/EXCEPT global autour de render() → affiche l’erreur au lieu d’un écran noir
+# - Ajoute un anti double-render par run_id (si ton app appelle render() 2x)
+# - Ajoute des keys uniques (prefix) sur TOUS les widgets → évite StreamlitDuplicateElementId
+# - Générateur NHL Search API: timeout + limit configurable + fallback active=False si actif vide
+# - Heatmap: fallback CSS si matplotlib absent
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -26,6 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+WKEY = "admin_nhlid_"  # prefix unique pour tous les widgets de ce module
 
 
 # =========================
@@ -49,9 +48,6 @@ def _get_run_id() -> Optional[str]:
 
 
 def _render_guard(guard_key: str) -> bool:
-    """
-    Returns True if we should render, False if already rendered this run_id.
-    """
     rid = _get_run_id()
     if not rid:
         return True
@@ -74,6 +70,8 @@ def is_prod_env() -> bool:
 # =========================
 def load_csv(path: str) -> Tuple[pd.DataFrame, Optional[str]]:
     try:
+        if not path:
+            return pd.DataFrame(), "Chemin CSV vide."
         if not os.path.exists(path):
             return pd.DataFrame(), f"Fichier introuvable: {path}"
         df = pd.read_csv(path, low_memory=False)
@@ -88,7 +86,7 @@ def save_csv(df: pd.DataFrame, path: str) -> Tuple[bool, Optional[str]]:
         df.to_csv(path, index=False)
         return True, None
     except Exception as e:
-        return False, f"Erreur sauvegarde CSV: {type(e).__name__}: {e}"
+        return False, f"Erreur écriture CSV: {type(e).__name__}: {e}"
 
 
 # =========================
@@ -196,7 +194,6 @@ def detect_columns(df: pd.DataFrame) -> Tuple[str, str, Optional[str]]:
             df[id_col] = np.nan
 
     if name_col is None:
-        # pick first object-like col not id/team
         for c in df.columns:
             if str(c) == id_col or (team_col and str(c) == team_col):
                 continue
@@ -208,7 +205,7 @@ def detect_columns(df: pd.DataFrame) -> Tuple[str, str, Optional[str]]:
             if name_col not in df.columns:
                 df[name_col] = ""
 
-    # nul_id priority for team
+    # nul_id doit être pris comme team si présent
     nul_team = _first_existing(df, ["nul_id", "NUL_ID", "nulId"])
     if nul_team:
         team_col = nul_team
@@ -264,7 +261,7 @@ def score_source(df: pd.DataFrame) -> Dict[str, Any]:
 # =========================
 # NHL Search API (source generator)
 # =========================
-def _http_get_json(url: str, timeout: int = 30) -> Any:
+def _http_get_json(url: str, timeout: int = 20) -> Any:
     req = urllib.request.Request(
         url,
         headers={
@@ -296,9 +293,10 @@ def generate_nhl_search_source(
     out_path: str,
     *,
     active_only: bool = True,
-    limit: int = 9999,
+    limit: int = 4000,
     culture: str = "en-us",
     q: str = "*",
+    timeout_s: int = 20,
     sleep_s: float = 0.0,
 ) -> Tuple[pd.DataFrame, Dict[str, Any], Optional[str]]:
     base = "https://search.d3.nhle.com/api/v1/search/player"
@@ -311,13 +309,14 @@ def generate_nhl_search_source(
     url = f"{base}?{urllib.parse.urlencode(params)}"
 
     try:
-        payload = _http_get_json(url)
+        payload = _http_get_json(url, timeout=timeout_s)
         items = _extract_items(payload)
 
+        # fallback: si actif renvoie vide, tente active=False
         if active_only and len(items) == 0:
             params["active"] = "False"
             url2 = f"{base}?{urllib.parse.urlencode(params)}"
-            payload2 = _http_get_json(url2)
+            payload2 = _http_get_json(url2, timeout=timeout_s)
             items2 = _extract_items(payload2)
             if items2:
                 items = items2
@@ -361,9 +360,9 @@ def generate_nhl_search_source(
 
         ok, err = save_csv(df, out_path)
         if not ok:
-            return pd.DataFrame(), {"url": url, "items": len(items)}, err
+            return pd.DataFrame(), {"url": url, "items_raw": len(items)}, err
 
-        dbg = {"url": url, "items_raw": len(items), "rows_saved": int(len(df)), "out_path": out_path}
+        dbg = {"url": url, "items_raw": int(len(items)), "rows_saved": int(len(df)), "out_path": out_path}
         return df, dbg, None
 
     except Exception as e:
@@ -400,7 +399,6 @@ def build_audit_report(
 
     out["duplicate_id"] = False
     out.loc[~out["missing"], "duplicate_id"] = dup_mask.values
-
     out["confidence"] = np.where(out["missing"], 0.0, np.where(out["duplicate_id"], 0.2, 0.95))
     return out
 
@@ -424,8 +422,7 @@ def confidence_heatmap(df_audit: pd.DataFrame) -> pd.DataFrame:
     for lab in labels:
         if lab not in piv.columns:
             piv[lab] = 0
-    piv = piv[labels].sort_values(by=labels[::-1], ascending=False)
-    return piv
+    return piv[labels].sort_values(by=labels[::-1], ascending=False)
 
 
 def _hex_blend(c1: str, c2: str, t: float) -> str:
@@ -471,19 +468,14 @@ def render_confidence_heatmap(heat: pd.DataFrame) -> None:
     if heat is None or getattr(heat, "empty", True):
         st.info("Heatmap: aucune donnée à afficher.")
         return
-
     try:
         import matplotlib  # noqa: F401
         st.dataframe(heat.style.background_gradient(axis=None), use_container_width=True)
         return
     except Exception:
         pass
-
-    try:
-        st.dataframe(_styler_heatmap_css(heat), use_container_width=True)
-        st.caption("ℹ️ Heatmap en mode SAFE (matplotlib non disponible).")
-    except Exception:
-        st.dataframe(heat, use_container_width=True)
+    st.dataframe(_styler_heatmap_css(heat), use_container_width=True)
+    st.caption("ℹ️ Heatmap en mode SAFE (matplotlib non disponible).")
 
 
 # =========================
@@ -503,7 +495,6 @@ def _prep_keys(
     out["_k_dob"] = _safe_col(out, dob_col).map(_norm_dob) if dob_col and dob_col in out.columns else ""
     out["_k_pos"] = _safe_col(out, pos_col).map(_norm_pos) if pos_col and pos_col in out.columns else ""
     out["_k_jersey"] = _safe_col(out, jersey_col).map(_norm_jersey) if jersey_col and jersey_col in out.columns else ""
-
     out["_k_name_team"] = out["_k_name"] + "||" + out["_k_team"]
     out["_k_name_dob"] = out["_k_name"] + "||" + out["_k_dob"]
     out["_k_team_pos_jersey"] = out["_k_team"] + "||" + out["_k_pos"] + "||" + out["_k_jersey"]
@@ -517,10 +508,8 @@ def _make_join_map(source: pd.DataFrame, key_col: str, id_col: str) -> pd.DataFr
     tmp = tmp[tmp[key_col].astype(str).str.strip() != ""]
     if tmp.empty:
         return pd.DataFrame(columns=[key_col, "src_nhl_id", "collision_count"])
-
     g = tmp.groupby(key_col)[id_col].agg(["nunique"])
     collisions = g.rename(columns={"nunique": "collision_count"}).reset_index()
-
     first_map = tmp.drop_duplicates(subset=[key_col], keep="first").rename(columns={id_col: "src_nhl_id"})
     out = first_map.merge(collisions, on=key_col, how="left")
     out["collision_count"] = out["collision_count"].fillna(1).astype(int)
@@ -542,9 +531,6 @@ def recover_from_source(
     match_team_pos_jersey: bool = True,
     max_preview: int = 200,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    """
-    ✅ collisions_target = collisions qui impactent des lignes manquantes du target
-    """
     p = players_df.copy()
     s = source_df.copy()
 
@@ -559,11 +545,9 @@ def recover_from_source(
     p_k = _prep_keys(p, name_col, team_col, p_ex.get("dob_col"), p_ex.get("pos_col"), p_ex.get("jersey_col"))
     s_id_col, s_name_col, s_team_col = detect_columns(s)
     s_k = _prep_keys(s, s_name_col, s_team_col, s_ex.get("dob_col"), s_ex.get("pos_col"), s_ex.get("jersey_col"))
-
     if s_id_col not in s_k.columns:
         s_k[s_id_col] = np.nan
 
-    # strategy order: safest -> loosest
     strategies: List[Tuple[str, str, float]] = []
     if match_name_dob:
         strategies.append(("name_dob", "_k_name_dob", conf + 0.08))
@@ -592,7 +576,6 @@ def recover_from_source(
         tmp["_idx"] = p_k.index
         tmp = tmp.merge(join_map, on=key_col, how="left")
 
-        # collisions that affect missing rows
         col_mask = (
             cur_missing.to_numpy()
             & tmp["src_nhl_id"].notna().fillna(False).to_numpy()
@@ -604,7 +587,6 @@ def recover_from_source(
             coll_part = coll_part.rename(columns={key_col: "key"})
             collisions_touch_rows.append(coll_part)
 
-        # fill only when unique mapping
         ok_map = tmp["src_nhl_id"].notna() & (tmp["collision_count"].fillna(0).astype(int) == 1)
         fillable = cur_missing & ok_map.set_axis(p_k.index)
 
@@ -640,9 +622,6 @@ def recover_from_source(
     return p_k, dbg
 
 
-# =========================
-# Duplicate cleanup + thresholds
-# =========================
 def duplicate_rate(df: pd.DataFrame, id_col: str) -> float:
     s = _clean_id_series(_safe_col(df, id_col))
     present = s.dropna()
@@ -658,7 +637,6 @@ def cleanup_duplicates_fallback(df: pd.DataFrame, id_col: str) -> Tuple[pd.DataF
     present = s.dropna()
     if present.empty:
         return out, 0
-
     dup_mask = present.duplicated(keep="first")
     dup_ids = present.loc[dup_mask].index
     n = int(len(dup_ids))
@@ -671,9 +649,6 @@ def cleanup_duplicates_fallback(df: pd.DataFrame, id_col: str) -> Tuple[pd.DataF
     return out, n
 
 
-# =========================
-# 🧬 Enrich hockey.players.csv
-# =========================
 def enrich_hockey_players_with_nhl_id(
     hockey_df: pd.DataFrame,
     nhl_source_df: pd.DataFrame,
@@ -686,7 +661,6 @@ def enrich_hockey_players_with_nhl_id(
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     tmp = hockey_df.copy()
     id_col_t, name_col_t, team_col_t = detect_columns(tmp)
-
     merged, dbg = recover_from_source(
         tmp,
         nhl_source_df,
@@ -709,11 +683,19 @@ def enrich_hockey_players_with_nhl_id(
 # UI / render
 # =========================
 def render(ctx: Optional[Dict[str, Any]] = None) -> None:
-    # Anti double-render in same run (fixes StreamlitDuplicateElementId in many apps)
+    # Anti double-render
     if not _render_guard("tabs_admin_render"):
         return
 
-    ctx = ctx or {}
+    # ✅ Catch-all: empêche l’écran noir → affiche l’erreur
+    try:
+        _render_impl(ctx or {})
+    except Exception as e:
+        st.error("Une erreur a été détectée (évite l’écran noir).")
+        st.exception(e)
+
+
+def _render_impl(ctx: Dict[str, Any]) -> None:
     season = str(ctx.get("season") or "2025-2026")
     data_dir = str(ctx.get("data_dir") or "data")
     is_admin = bool(ctx.get("is_admin", True))
@@ -729,56 +711,75 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
     hockey_players_path = os.path.join(data_dir, "hockey.players.csv")
     equipes_path = os.path.join(data_dir, "equipes_joueurs_2025-2026.csv")
 
-    # -------------------------------
-    # 🌐 Generate NHL Search source
-    # -------------------------------
+    # -----------------------------------
+    # 🌐 Generate NHL source (safe UI)
+    # -----------------------------------
     st.markdown("### 🌐 Générer source NHL_ID (NHL Search API)")
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        gen_btn = st.button("🌐 Générer source NHL_ID", use_container_width=True, key="btn_gen_nhl_source")
-    with c2:
-        st.caption(f"Sortie: {nhl_source_path}")
+    g1, g2, g3, g4 = st.columns([1.1, 1, 1, 1])
+    with g2:
+        active_only = st.checkbox("Actifs seulement", value=True, key=WKEY + "gen_active_only")
+    with g3:
+        limit = st.number_input("Limit", min_value=200, max_value=9999, value=4000, step=200, key=WKEY + "gen_limit")
+    with g4:
+        timeout_s = st.number_input("Timeout (s)", min_value=5, max_value=60, value=20, step=5, key=WKEY + "gen_timeout")
+
+    with g1:
+        gen_btn = st.button("🌐 Générer source NHL_ID", use_container_width=True, key=WKEY + "btn_gen_nhl_source")
+
+    st.caption(f"Sortie: {nhl_source_path}")
 
     if gen_btn:
         with st.spinner("Appel NHL Search API… génération du CSV…"):
-            _, dbg, err = generate_nhl_search_source(nhl_source_path, active_only=True, limit=9999, culture="en-us", q="*")
+            df_out, dbg, err = generate_nhl_search_source(
+                nhl_source_path,
+                active_only=bool(active_only),
+                limit=int(limit),
+                timeout_s=int(timeout_s),
+                culture="en-us",
+                q="*",
+            )
         if err:
             st.error(err)
+            st.caption(f"URL: {dbg.get('url')}")
         else:
             st.success(f"✅ Source générée: {dbg.get('rows_saved', 0)} joueurs (API items={dbg.get('items_raw')}).")
             st.caption(f"URL: {dbg.get('url')}")
+            if isinstance(df_out, pd.DataFrame) and not df_out.empty:
+                st.dataframe(df_out.head(10), use_container_width=True)
 
-    # -------------------------------
+    st.divider()
+
+    # -----------------------------------
     # 🧬 Enrich hockey.players.csv
-    # -------------------------------
+    # -----------------------------------
     st.markdown("### 🧬 Enrichir hockey.players.csv avec NHL_ID")
     with st.expander("🧬 Enrichir hockey.players.csv (depuis nhl_search_players.csv)", expanded=True):
         st.caption(f"Target: {hockey_players_path}")
         st.caption(f"Source: {nhl_source_path}")
 
         A, B, C = st.columns([1, 1, 1])
-        enrich_conf = A.slider("Confiance appliquée aux IDs enrichis", 0.50, 0.99, 0.95, 0.01, key="enrich_conf")
-        enrich_review = B.checkbox("Mode review (bloque si collisions)", value=True, key="enrich_review")
+        enrich_conf = A.slider("Confiance appliquée aux IDs enrichis", 0.50, 0.99, 0.95, 0.01, key=WKEY + "enrich_conf")
+        enrich_review = B.checkbox("Mode review (bloque si collisions)", value=True, key=WKEY + "enrich_review")
         enrich_write_anyway = C.checkbox(
             "Autoriser write même si collisions",
             value=False,
-            key="enrich_write_anyway",
+            key=WKEY + "enrich_write_anyway",
             help="⚠️ Déconseillé."
         )
 
         st.markdown("#### Stratégies (pour enrichir hockey.players)")
         s1, s2, s3, s4 = st.columns(4)
-        en_name_dob = s1.checkbox("Name + DOB", value=True, key="enrich_strategy_name_dob")
-        en_name_team = s2.checkbox("Name + Team", value=True, key="enrich_strategy_name_team")
-        en_name_only = s3.checkbox("Name seul (fallback)", value=True, key="enrich_strategy_name")
+        en_name_dob = s1.checkbox("Name + DOB", value=True, key=WKEY + "enrich_s_name_dob")
+        en_name_team = s2.checkbox("Name + Team", value=True, key=WKEY + "enrich_s_name_team")
+        en_name_only = s3.checkbox("Name seul (fallback)", value=True, key=WKEY + "enrich_s_name")
         en_team_pos_jersey = s4.checkbox(
             "Team + Pos + Jersey",
             value=False,
-            key="enrich_strategy_team_pos_jersey",
+            key=WKEY + "enrich_s_team_pos_jersey",
             help="Off par défaut: la source NHL Search a souvent jersey vide."
         )
 
-        if st.button("🧬 Enrichir hockey.players.csv maintenant", use_container_width=True, key="btn_enrich_hockey_players"):
+        if st.button("🧬 Enrichir hockey.players.csv maintenant", use_container_width=True, key=WKEY + "btn_enrich_hockey"):
             hockey_df, e1 = load_csv(hockey_players_path)
             if e1:
                 st.error(e1)
@@ -788,8 +789,7 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
                 st.error(e2)
                 st.stop()
 
-            src_score = score_source(src_df)
-            if int(src_score.get("present_ids", 0)) == 0:
+            if score_source(src_df).get("present_ids", 0) == 0:
                 st.error("La source nhl_search_players.csv ne contient aucun NHL_ID. Clique d'abord sur 🌐 Générer source NHL_ID.")
                 st.stop()
 
@@ -831,7 +831,6 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
             st.markdown("#### Audit hockey.players après enrichissement (aperçu)")
             st.dataframe(audit_hp.head(50), use_container_width=True)
 
-            # ✅ block only if collisions impact target missing rows
             if enrich_review and coll_count > 0 and not enrich_write_anyway:
                 st.error("🔒 Write bloqué (mode review): collisions impactantes à résoudre, ou coche 'Autoriser write même si collisions'.")
                 st.stop()
@@ -846,11 +845,11 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
 
     st.divider()
 
-    # -------------------------------
-    # Source selection (equipes_joueurs)
-    # -------------------------------
+    # -----------------------------------
+    # Source selection for equipes_joueurs
+    # -----------------------------------
     st.markdown("### Source de récupération (optionnel)")
-    up = st.file_uploader("Ou uploader un CSV source", type=["csv"], key="uploader_source_csv")
+    up = st.file_uploader("Ou uploader un CSV source", type=["csv"], key=WKEY + "uploader_source")
 
     src_paths = [equipes_path, hockey_players_path]
     if os.path.exists(nhl_source_path):
@@ -867,7 +866,7 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
         scores.append(sc)
     best_idx = int(np.argmax([s.get("score", -1.0) for s in scores])) if scores else 0
 
-    pick = st.selectbox("Récupérer NHL_ID depuis…", options=src_paths, index=best_idx, key="select_source_path")
+    pick = st.selectbox("Récupérer NHL_ID depuis…", options=src_paths, index=best_idx, key=WKEY + "select_source_path")
 
     with st.expander("🔎 Diagnostic sources (auto)", expanded=False):
         if scores:
@@ -887,9 +886,6 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
             st.dataframe(pd.DataFrame(show), use_container_width=True)
             st.caption("Tip: meilleure source = plus de NHL_ID + colonnes utiles (DOB/pos/jersey).")
 
-    # -------------------------------
-    # Load target equipes_joueurs
-    # -------------------------------
     df, err = load_csv(equipes_path)
     if err:
         st.error(err)
@@ -897,10 +893,7 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
 
     id_col, name_col, team_col = detect_columns(df)
 
-    # -------------------------------
-    # Verify state
-    # -------------------------------
-    if st.button("🔎 Vérifier l'état des NHL_ID", key="btn_verify_state"):
+    if st.button("🔎 Vérifier l'état des NHL_ID", key=WKEY + "btn_verify_state"):
         audit_df = build_audit_report(df, id_col, name_col, team_col)
         total = int(len(audit_df))
         with_id = int((~audit_df["missing"]).sum())
@@ -930,14 +923,10 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
             data=out.getvalue().encode("utf-8"),
             file_name=f"audit_nhl_id_{season}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
-            key="dl_audit_equipes",
+            key=WKEY + "dl_audit_equipes",
         )
 
     st.divider()
-
-    # -------------------------------
-    # Recovery action (equipes_joueurs)
-    # -------------------------------
     st.markdown("### 🔁 Associer / récupérer NHL_ID")
 
     if up is not None:
@@ -961,17 +950,17 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
 
     st.markdown("#### 🧩 Stratégies de matching (equipes_joueurs)")
     CA, CB, CC, CD = st.columns(4)
-    match_name_dob = CA.checkbox("Name + DOB", value=True, key="eq_strategy_name_dob")
-    match_name_team = CB.checkbox("Name + Team", value=True, key="eq_strategy_name_team")
-    match_team_pos_jersey = CC.checkbox("Team + Pos + Jersey", value=True, key="eq_strategy_team_pos_jersey")
-    match_name = CD.checkbox("Name seul (fallback)", value=True, key="eq_strategy_name")
+    match_name_dob = CA.checkbox("Name + DOB", value=True, key=WKEY + "eq_s_name_dob")
+    match_name_team = CB.checkbox("Name + Team", value=True, key=WKEY + "eq_s_name_team")
+    match_team_pos_jersey = CC.checkbox("Team + Pos + Jersey", value=True, key=WKEY + "eq_s_team_pos_jersey")
+    match_name = CD.checkbox("Name seul (fallback)", value=True, key=WKEY + "eq_s_name")
 
-    conf = st.slider("Score de confiance appliqué aux IDs récupérés", 0.50, 0.99, 0.85, 0.01, key="eq_conf")
-    max_dup_pct = st.slider("🛑 Bloquer toute écriture si duplication > X %", 0, 50, 5, 1, key="eq_max_dup")
-    do_cleanup = st.checkbox("🧼 Nettoyage automatique des doublons (fallback) avant write", value=True, key="eq_cleanup")
-    review_only = st.checkbox("🧪 Mode review: montrer collisions avant write", value=True, key="eq_review")
+    conf = st.slider("Score de confiance appliqué aux IDs récupérés", 0.50, 0.99, 0.85, 0.01, key=WKEY + "eq_conf")
+    max_dup_pct = st.slider("🛑 Bloquer toute écriture si duplication > X %", 0, 50, 5, 1, key=WKEY + "eq_max_dup")
+    do_cleanup = st.checkbox("🧼 Nettoyage automatique des doublons (fallback) avant write", value=True, key=WKEY + "eq_cleanup")
+    review_only = st.checkbox("🧪 Mode review: montrer collisions avant write", value=True, key=WKEY + "eq_review")
 
-    if st.button("🧩 Associer NHL_ID (depuis source)", key="btn_associer_nhl_id"):
+    if st.button("🧩 Associer NHL_ID (depuis source)", key=WKEY + "btn_associer_nhl_id"):
         if src_df is None or src_df.empty:
             st.error("Source vide / indisponible.")
             st.stop()
@@ -982,7 +971,6 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
             st.stop()
 
         before_dup = duplicate_rate(df, id_col)
-
         merged, dbg = recover_from_source(
             df,
             src_df,
@@ -1033,7 +1021,7 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
             data=out.getvalue().encode("utf-8"),
             file_name=f"audit_nhl_id_{season}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
-            key="dl_audit_after_recover",
+            key=WKEY + "dl_audit_after_recover",
         )
 
         if review_only and coll_count > 0:
