@@ -303,16 +303,48 @@ def render(ctx: Dict[str, Any] | None = None) -> None:
     prod = is_prod_env()
     st.caption(f"🔒 Prod lock: {'ON' if prod else 'OFF'} (ENV/PMS_ENV).")
 
+
     # --- choose recovery source
     st.markdown("### Source de récupération (optionnel)")
-    candidates = []
-    # season roster exports you uploaded
-    for fn in [f"roster_{season}.csv", f"roster_filtered_{season}.csv", f"equipes_joueurs_{season}.csv"]:
+
+    def _list_csv_in_data_dir(_dir: str) -> list[str]:
+        try:
+            if not _dir or not os.path.isdir(_dir):
+                return []
+            out = []
+            for fn in os.listdir(_dir):
+                if str(fn).lower().endswith(".csv"):
+                    out.append(os.path.join(_dir, fn))
+            return sorted(set(out))
+        except Exception:
+            return []
+
+    # Build candidates from known season files + any CSV in /data (includes nhl_search_players.csv)
+    candidates: list[str] = []
+
+    # season roster exports (preferred)
+    for fn in [f"roster_filtered_{season}.csv", f"roster_{season}.csv", f"equipes_joueurs_{season}.csv"]:
         pth = os.path.join(data_dir, fn)
         if os.path.exists(pth):
             candidates.append(pth)
 
-    upload = st.file_uploader("Ou uploader un CSV source", type=["csv"], accept_multiple_files=False)
+    # always include NHL Search generated source if present
+    nhl_search_path = os.path.join(data_dir, "nhl_search_players.csv")
+    if os.path.exists(nhl_search_path):
+        candidates.append(nhl_search_path)
+
+    # include hockey.players.csv if present (can be used as source once enriched)
+    hockey_players_path = os.path.join(data_dir, "hockey.players.csv")
+    if os.path.exists(hockey_players_path):
+        candidates.append(hockey_players_path)
+
+    # include any other CSV in /data (so dropdown never "forgets" a file)
+    candidates.extend(_list_csv_in_data_dir(data_dir))
+
+    # de-dupe + never allow selecting the target file as the source
+    candidates = [c for c in sorted(set(candidates)) if os.path.abspath(c) != os.path.abspath(players2)]
+
+    upload = st.file_uploader("Ou uploader un CSV source", type=["csv"], accept_multiple_files=False, key="src_upload")
     source_df = None
     source_tag = "unknown"
     conf = 0.70
@@ -326,22 +358,27 @@ def render(ctx: Dict[str, Any] | None = None) -> None:
         except Exception as e:
             st.error(f"Erreur lecture upload: {e}")
 
+    # Choose a smart default: nhl_search_players > hockey.players > roster_filtered > roster > autres
     default_choice = None
-    if candidates:
-        # best default: filtered roster > roster > equipes
-        pref = [f"roster_filtered_{season}.csv", f"roster_{season}.csv", f"equipes_joueurs_{season}.csv"]
-        for pf in pref:
-            pp = os.path.join(data_dir, pf)
-            if pp in candidates:
-                default_choice = pp
-                break
-        default_choice = default_choice or candidates[0]
+    pref = [
+        nhl_search_path,
+        hockey_players_path,
+        os.path.join(data_dir, f"roster_filtered_{season}.csv"),
+        os.path.join(data_dir, f"roster_{season}.csv"),
+        os.path.join(data_dir, f"equipes_joueurs_{season}.csv"),
+    ]
+    for pp in pref:
+        if pp in candidates:
+            default_choice = pp
+            break
+    default_choice = default_choice or (candidates[0] if candidates else None)
 
     if source_df is None:
         choice = st.selectbox(
             "Récupérer NHL_ID depuis…",
             options=["Aucune (API NHL uniquement)"] + candidates,
             index=(1 + candidates.index(default_choice)) if (default_choice and default_choice in candidates) else 0,
+            key="src_choice",
         )
         if choice != "Aucune (API NHL uniquement)":
             source_df, errS = load_csv(choice)
@@ -349,9 +386,14 @@ def render(ctx: Dict[str, Any] | None = None) -> None:
                 st.error(errS)
                 source_df = None
             else:
-                # tag by filename
                 bn = os.path.basename(choice).lower()
-                if "roster" in bn:
+                if bn == "nhl_search_players.csv":
+                    source_tag = "nhl_search_api"
+                    conf = 0.95
+                elif "hockey.players" in bn:
+                    source_tag = "existing"
+                    conf = 0.95
+                elif "roster" in bn:
                     source_tag = "roster"
                     conf = 0.80
                 elif "equipes" in bn:
@@ -362,6 +404,7 @@ def render(ctx: Dict[str, Any] | None = None) -> None:
                     conf = 0.55
 
     # --- verify button (audit)
+
     if st.button("🔎 Vérifier l'état des NHL_ID"):
         df, err = load_csv(players2)
         if err:
@@ -397,7 +440,11 @@ def render(ctx: Dict[str, Any] | None = None) -> None:
             heat = confidence_heatmap(audit_df)
 
             st.markdown("#### 🧩 Heatmap de confiance (par équipe × bucket)")
-            st.dataframe(heat.style.background_gradient(axis=None), use_container_width=True)
+            try:
+                st.dataframe(heat.style.background_gradient(axis=None), use_container_width=True)
+            except Exception:
+                st.dataframe(heat, use_container_width=True)
+                st.caption("ℹ️ Heatmap SAFE: matplotlib indisponible.")
 
             # CSV audit download
             out = io.StringIO()
