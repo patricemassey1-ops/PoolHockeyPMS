@@ -874,3 +874,4 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 # Backward-compat alias (if app expects _render_tools)
 def _render_tools(*args, **kwargs):
     return render(*args, **kwargs)
+
