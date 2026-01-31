@@ -107,7 +107,7 @@ def _make_row_key(df: pd.DataFrame) -> pd.Series:
 def _safe_str_series(s: pd.Series) -> pd.Series:
     return s.fillna("").astype(str).str.strip().replace({"nan": "", "None": ""})
 
-def _build_diff_and_audit(before: pd.DataFrame, after: pd.DataFrame, max_rows: int = 50000) -> Tuple[Dict[str, Any], pd.DataFrame]:
+def _build_diff_and_audit(before: pd.DataFrame, after: pd.DataFrame, max_rows: int = 50000, compare_cols: Optional[List[str]] = None) -> Tuple[Dict[str, Any], pd.DataFrame]:
     """
     Returns (summary_dict, audit_df).
     audit_df columns: key, change_type, field, before, after
@@ -151,11 +151,13 @@ def _build_diff_and_audit(before: pd.DataFrame, after: pd.DataFrame, max_rows: i
     summary["removed"] = len(removed_keys)
 
     # Choose columns to compare (important ones first)
-    cols_interest = [
+    default_cols_interest = [
         "Player", "Joueur", "Team", "Équipe", "Position", "Jersey#", "Country",
         "Level", "Cap Hit", "Length", "Start Year", "Signing Status", "Expiry Year", "Expiry Status",
         "Status",
     ]
+    # If user selected specific columns in Admin, use them; else use defaults.
+    cols_interest = list(compare_cols) if (compare_cols and len(compare_cols) > 0) else default_cols_interest
     # Keep only columns that exist in either frame (case-sensitive)
     cols_existing = []
     for c in cols_interest:
@@ -568,6 +570,22 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
         else:
             st.info("Avant: aucun master trouvé (il sera créé).")
 
+        # Colonnes à comparer (diff) — mode lisible
+        default_compare = ["Level", "Cap Hit", "Expiry Year", "Expiry Status", "Team", "Position", "Jersey#", "Country", "Status", "NHL_ID"]
+        opts_base = []
+        try:
+            if isinstance(before_df, pd.DataFrame) and (not before_df.empty):
+                opts_base = list(before_df.columns)
+        except Exception:
+            opts_base = []
+        opts = sorted(set(opts_base) | set(default_compare) | {"Player"})
+        compare_cols = st.multiselect(
+            "Colonnes à comparer dans le diff (laisser vide = colonnes clés par défaut)",
+            options=opts,
+            default=[c for c in default_compare if c in opts],
+            key=WKEY + "mb_compare_cols",
+        )
+
         colA, colB, colC = st.columns([1.1, 1.1, 1.2])
         with colA:
             enrich = st.checkbox("Enrichir via NHL API", value=True, key=WKEY + "mb_enrich")
@@ -598,12 +616,21 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 st.json(rep)
 
                 # Diff + audit
-                summary, audit_df = _build_diff_and_audit(before_df, after_df, max_rows=50000)
+                summary, audit_df = _build_diff_and_audit(before_df, after_df, max_rows=50000, compare_cols=compare_cols)
 
                 # Write audit report CSV
                 ok, werr = _atomic_write_df(audit_df, report_path)
                 if ok:
                     st.success(f"🧾 Audit écrit: {report_path} ({len(audit_df)} lignes)")
+                    rep_bytes = _read_file_bytes(report_path)
+                    if rep_bytes:
+                        st.download_button(
+                            "📥 Télécharger rapport CSV (audit fusion)",
+                            data=rep_bytes,
+                            file_name=os.path.basename(report_path),
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
                 else:
                     st.error(f"❌ Échec écriture audit: {werr}")
 
@@ -618,16 +645,15 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 
                 if summary.get("audit_truncated"):
                     st.warning("⚠️ Audit tronqué (trop de changements). Le fichier contient la première portion seulement.")
+                # Détails (plus propre) — tout est dans un seul expander
+                with st.expander("📄 Détails (diff + aperçus)", expanded=False):
+                    if not audit_df.empty:
+                        st.markdown("**Aperçu des changements (top 200)**")
+                        st.dataframe(audit_df.head(200), use_container_width=True)
+                    else:
+                        st.info("Aucun changement détecté (ou master créé identique).")
 
-                # Show a quick preview table
-                if not audit_df.empty:
-                    st.markdown("**Aperçu des changements (top 200)**")
-                    st.dataframe(audit_df.head(200), use_container_width=True)
-                else:
-                    st.info("Aucun changement détecté (ou master créé identique).")
-
-                # Optional: show new master head
-                with st.expander("👀 Aperçu du master (top 50)", expanded=False):
+                    st.markdown("**Aperçu du master (top 50)**")
                     st.dataframe(after_df.head(50), use_container_width=True)
 
 
