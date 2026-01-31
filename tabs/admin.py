@@ -39,14 +39,25 @@ def _drive_get_folder_id_default() -> str:
     try:
         sec = getattr(st, "secrets", {}) or {}
         fid = (sec.get("gdrive_oauth", {}) or {}).get("folder_id") or ""
-        return str(fid).strip()
+        fid = str(fid).strip()
+        if fid:
+            return fid
     except Exception:
-        return ""
+        pass
+    # fallback hardcoded default (user folder)
+    return "1hIJovsHid2L1cY_wKM_sY-wVZKXAwrh1"
 
 def _drive_service():
     """
     Returns Google Drive service using OAuth refresh token from st.secrets[gdrive_oauth].
-    Requires google-api-python-client + google-auth installed.
+
+    IMPORTANT (invalid_scope fix):
+      - Ne force pas un scope différent de celui utilisé pour générer le refresh_token.
+      - Si tu forces un scope qui ne correspond pas, Google renvoie: invalid_scope: Bad Request.
+    Stratégie:
+      1) Si secrets[gdrive_oauth].scopes est fourni -> on l'utilise
+      2) Sinon -> on NE PASSE PAS scopes (on utilise les scopes du refresh_token)
+      3) Si la liste échoue par permission, tu pourras ajuster scopes dans secrets.
     """
     if Credentials is None or build is None:
         raise RuntimeError("Libs Google Drive manquantes (google-api-python-client / google-auth).")
@@ -59,18 +70,38 @@ def _drive_service():
     refresh_token = str(g.get("refresh_token") or "").strip()
     token_uri = str(g.get("token_uri") or "https://oauth2.googleapis.com/token").strip()
 
+    # optional override scopes in secrets: a list of urls or a comma-separated string
+    scopes_val = g.get("scopes")
+    scopes = None
+    if isinstance(scopes_val, (list, tuple)) and scopes_val:
+        scopes = [str(s).strip() for s in scopes_val if str(s).strip()]
+    elif isinstance(scopes_val, str) and scopes_val.strip():
+        scopes = [s.strip() for s in scopes_val.split(",") if s.strip()]
+
     if not (client_id and client_secret and refresh_token):
         raise RuntimeError("Secrets OAuth Drive incomplets (client_id/client_secret/refresh_token).")
 
-    creds = Credentials(
-        token=None,
-        refresh_token=refresh_token,
-        token_uri=token_uri,
-        client_id=client_id,
-        client_secret=client_secret,
-        scopes=["https://www.googleapis.com/auth/drive.readonly"],
-    )
+    if scopes:
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri=token_uri,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=scopes,
+        )
+    else:
+        # Do NOT force scopes; use what the refresh token already has.
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri=token_uri,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+
     return build("drive", "v3", credentials=creds)
+
 
 def _drive_list_csv_files(folder_id: str, page_size: int = 200) -> list[dict]:
     """
@@ -1258,6 +1289,11 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 - **Résultat :** si `NHL_ID` est vide → l’enrichissement NHL ne démarre pas (normal).
 
 **Étape 2 — Générer une source NHL_ID**
+
+**Important (dummy-proof)**
+- Pour que le Master Builder voie tes NHL_ID, le fichier cible doit être **`data/hockey.players.csv`**.
+- Si tu écris les NHL_ID dans `equipes_joueurs_*.csv`, tu devras ensuite les **appliquer** dans `hockey.players.csv`.
+
 - **Ce que ça fait :** l’outil “NHL Search” construit une table `Player → NHL_ID`.
 - **Résultat :** un fichier CSV de correspondance (ou une mise à jour d’un fichier cible).
 
@@ -1795,19 +1831,9 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 st.dataframe(df_out.head(10), use_container_width=True)
 
     st.markdown("---")
-
-    # --- Target file
-    csvs = list_data_csvs(data_dir)
-    default_target = os.path.join(data_dir, f"equipes_joueurs_{season}.csv")
-    if not os.path.exists(default_target):
-        default_target = os.path.join(data_dir, "equipes_joueurs_2025-2026.csv") if os.path.exists(os.path.join(data_dir, "equipes_joueurs_2025-2026.csv")) else (csvs[0] if csvs else "")
-
-    target_path = st.selectbox(
-        "Players DB (NHL_ID) — fichier cible",
-        options=csvs if csvs else [default_target],
-        index=(csvs.index(default_target) if csvs and default_target in csvs else 0),
-        key=WKEY + "target",
-    )
+    # --- Target file (FORCÉ dummy-proof)
+    target_path = os.path.join(data_dir, "hockey.players.csv")
+    st.info(f"✅ Fichier cible NHL_ID forcé: `{target_path}` (le Master Builder lit toujours ce fichier).")
 
     max_per_run = st.number_input("Max par run", min_value=50, max_value=20000, value=1000, step=50, key=WKEY + "maxrun")
     dry_run = st.checkbox("Dry-run (ne sauvegarde pas)", value=False, key=WKEY + "dry")
