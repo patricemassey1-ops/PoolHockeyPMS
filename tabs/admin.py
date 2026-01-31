@@ -974,39 +974,44 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 """)
 
         show_autodetect = st.toggle("🔎 Auto-détection source NHL_ID", value=False, key="mb_show_autodetect")
-            if show_autodetect:
-                data_dir = DATA_DIR
-                players_path = os.path.join(DATA_DIR, "hockey.players.csv")
+        if show_autodetect:
+            data_dir = DATA_DIR
+            players_path = os.path.join(DATA_DIR, "hockey.players.csv")
 
-                candidates = _auto_detect_nhl_id_sources(data_dir)
-                if candidates:
+            candidates = _auto_detect_nhl_id_sources(data_dir)
+            if candidates:
                 default_src = candidates[0]
                 options = ["(auto) " + os.path.basename(default_src)] + [os.path.basename(p) for p in candidates[1:]]
                 paths = [default_src] + candidates[1:]
+            else:
                 options = ["(auto) aucune source trouvée"]
                 paths = [""]
 
-                sel = st.selectbox(
+            sel = st.selectbox(
                 "Source NHL_ID détectée (tu peux en choisir une autre)",
                 options=list(range(len(paths))),
                 format_func=lambda i: options[i],
                 key="mb_src_sel",
-                )
-                src_path = paths[sel] if sel < len(paths) else (paths[0] if paths else "")
+            )
+            src_path = paths[sel] if sel < len(paths) else (paths[0] if paths else "")
 
-                c1, c2 = st.columns([1, 2])
-                with c1:
-                do_apply = st.button("🧷 Appliquer NHL_ID → hockey.players.csv", use_container_width=True, disabled=(not src_path), key="mb_apply_src")
-                with c2:
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                do_apply = st.button(
+                    "🧷 Appliquer NHL_ID → hockey.players.csv",
+                    use_container_width=True,
+                    disabled=(not src_path),
+                    key="mb_apply_src",
+                )
+            with c2:
                 st.caption(f"Source sélectionnée: `{os.path.basename(src_path) if src_path else 'aucune'}`")
 
-                if do_apply:
+            if do_apply:
                 ok2, msg2 = _apply_nhl_id_source_to_players(players_path, src_path)
                 if ok2:
                     st.success("✅ " + msg2)
                 else:
                     st.error("❌ " + msg2)
-
         st.divider()
         master_path = os.path.join(data_dir, "hockey.players_master.csv")
         report_path = os.path.join(data_dir, "master_build_report.csv")
