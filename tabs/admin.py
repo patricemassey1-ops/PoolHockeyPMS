@@ -1855,8 +1855,9 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             st.error(f"Upload invalide: {type(e).__name__}: {e}")
 
     # Build source options = all csvs EXCEPT target, plus (None), plus upload option label
-    src_opts = ["(Aucune — API NHL uniquement)"] + [p for p in csvs if p != target_path]
-    # ensure nhl_search_players is present when exists
+    csvs2 = list_data_csvs(data_dir)
+    src_opts = ["(Aucune — API NHL uniquement)"] + [p for p in csvs2 if p != target_path]
+# ensure nhl_search_players is present when exists
     must_src = os.path.join(data_dir, "nhl_search_players.csv")
     if os.path.exists(must_src) and must_src != target_path and must_src not in src_opts:
         src_opts.insert(1, must_src)
