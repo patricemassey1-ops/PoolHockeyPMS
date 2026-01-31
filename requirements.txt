@@ -13,3 +13,6 @@ google-auth-httplib2==0.2.0
 rich==13.9.4
 markdown-it-py==3.0.0
 pygments==2.19.2
+
+matplotlib==3.8.4
+
