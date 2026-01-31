@@ -16,6 +16,7 @@ import re
 import io
 import json
 import time
+import tempfile
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -62,6 +63,181 @@ def save_csv(df: pd.DataFrame, path: str, *, safe_mode: bool = True, allow_zero:
 # =========================
 # Column resolution
 # =========================
+
+# =========================
+# Master Builder helpers
+# =========================
+def _atomic_write_df(df: pd.DataFrame, out_path: str) -> Tuple[bool, str | None]:
+    """Atomic CSV write to avoid partial files if crash."""
+    try:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8", newline="") as tmp:
+            tmp_path = tmp.name
+            df.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, out_path)
+        return True, None
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+def _pick_name_col(df: pd.DataFrame) -> str | None:
+    if df is None or df.empty:
+        return None
+    cmap = {_norm_col(c): c for c in df.columns}
+    for key in ["player", "joueur", "skaters", "name", "full_name", "fullname"]:
+        if key in cmap:
+            return cmap[key]
+    return None
+
+def _make_row_key(df: pd.DataFrame) -> pd.Series:
+    """Stable key for diff: prefer NHL_ID when present, else normalized player name."""
+    if df is None or df.empty:
+        return pd.Series([], dtype=str)
+    name_col = _pick_name_col(df) or df.columns[0]
+    names = df[name_col].astype(str).map(_normalize_player_name)
+
+    if "NHL_ID" in df.columns:
+        ids = df["NHL_ID"].astype(str).str.strip()
+    else:
+        ids = pd.Series([""] * len(df))
+
+    # NHL_ID dominates when present
+    key = np.where(ids.astype(str).str.strip() != "", "NHL:" + ids.astype(str).str.strip(), "NAME:" + names)
+    return pd.Series(key, index=df.index, dtype=str)
+
+def _safe_str_series(s: pd.Series) -> pd.Series:
+    return s.fillna("").astype(str).str.strip().replace({"nan": "", "None": ""})
+
+def _build_diff_and_audit(before: pd.DataFrame, after: pd.DataFrame, max_rows: int = 50000) -> Tuple[Dict[str, Any], pd.DataFrame]:
+    """
+    Returns (summary_dict, audit_df).
+    audit_df columns: key, change_type, field, before, after
+    """
+    summary: Dict[str, Any] = {
+        "before_rows": int(len(before)) if isinstance(before, pd.DataFrame) else 0,
+        "after_rows": int(len(after)) if isinstance(after, pd.DataFrame) else 0,
+        "added": 0,
+        "removed": 0,
+        "modified_rows": 0,
+        "audit_truncated": False,
+    }
+
+    if not isinstance(after, pd.DataFrame) or after.empty:
+        return summary, pd.DataFrame(columns=["key", "change_type", "field", "before", "after"])
+
+    before = before if isinstance(before, pd.DataFrame) else pd.DataFrame()
+    after = after.copy()
+
+    bkey = _make_row_key(before) if not before.empty else pd.Series([], dtype=str)
+    akey = _make_row_key(after)
+
+    if not before.empty:
+        b = before.copy()
+        b["_row_key"] = bkey.values
+    else:
+        b = pd.DataFrame(columns=["_row_key"])
+
+    a = after.copy()
+    a["_row_key"] = akey.values
+
+    # Key sets
+    bset = set(b["_row_key"].dropna().astype(str).tolist()) if "_row_key" in b.columns else set()
+    aset = set(a["_row_key"].dropna().astype(str).tolist()) if "_row_key" in a.columns else set()
+
+    added_keys = sorted(list(aset - bset))
+    removed_keys = sorted(list(bset - aset))
+    common_keys = sorted(list(aset & bset))
+
+    summary["added"] = len(added_keys)
+    summary["removed"] = len(removed_keys)
+
+    # Choose columns to compare (important ones first)
+    cols_interest = [
+        "Player", "Joueur", "Team", "Équipe", "Position", "Jersey#", "Country",
+        "Level", "Cap Hit", "Length", "Start Year", "Signing Status", "Expiry Year", "Expiry Status",
+        "Status",
+    ]
+    # Keep only columns that exist in either frame (case-sensitive)
+    cols_existing = []
+    for c in cols_interest:
+        if c in after.columns or (not before.empty and c in before.columns):
+            cols_existing.append(c)
+
+    # Also include NHL_ID if present
+    if "NHL_ID" in after.columns or (not before.empty and "NHL_ID" in before.columns):
+        cols_existing = ["NHL_ID"] + [c for c in cols_existing if c != "NHL_ID"]
+
+    # Build index by key for before/after (dedupe by first occurrence)
+    if not b.empty:
+        b_idx = b.drop_duplicates("_row_key", keep="first").set_index("_row_key", drop=True)
+    else:
+        b_idx = pd.DataFrame().set_index(pd.Index([], name="_row_key"))
+
+    a_idx = a.drop_duplicates("_row_key", keep="first").set_index("_row_key", drop=True)
+
+    audit_rows: List[Dict[str, Any]] = []
+
+    def _row_json(df_row: pd.Series) -> str:
+        try:
+            d = {k: ("" if pd.isna(v) else v) for k, v in df_row.to_dict().items()}
+            # don't include huge blobs
+            d.pop("_row_key", None)
+            return json.dumps(d, ensure_ascii=False)
+        except Exception:
+            return ""
+
+    # Added / Removed
+    for k in added_keys:
+        if len(audit_rows) >= max_rows:
+            summary["audit_truncated"] = True
+            break
+        row = a_idx.loc[k] if k in a_idx.index else None
+        audit_rows.append({"key": k, "change_type": "added", "field": "__row__", "before": "", "after": _row_json(row)})
+
+    for k in removed_keys:
+        if len(audit_rows) >= max_rows:
+            summary["audit_truncated"] = True
+            break
+        row = b_idx.loc[k] if (not b.empty and k in b_idx.index) else None
+        audit_rows.append({"key": k, "change_type": "removed", "field": "__row__", "before": _row_json(row), "after": ""})
+
+    # Modified fields (common)
+    modified_rows_set = set()
+    for k in common_keys:
+        if len(audit_rows) >= max_rows:
+            summary["audit_truncated"] = True
+            break
+        brow = b_idx.loc[k] if (not b.empty and k in b_idx.index) else None
+        arow = a_idx.loc[k] if k in a_idx.index else None
+        if brow is None or arow is None:
+            continue
+
+        for col in cols_existing:
+            if len(audit_rows) >= max_rows:
+                summary["audit_truncated"] = True
+                break
+            bval = _to_str(brow.get(col, ""))
+            aval = _to_str(arow.get(col, ""))
+            # Normalize common empties
+            if bval.lower() in ["nan", "none"]:
+                bval = ""
+            if aval.lower() in ["nan", "none"]:
+                aval = ""
+            if bval != aval:
+                modified_rows_set.add(k)
+                audit_rows.append({
+                    "key": k,
+                    "change_type": "modified",
+                    "field": col,
+                    "before": bval,
+                    "after": aval,
+                })
+
+    summary["modified_rows"] = len(modified_rows_set)
+
+    audit_df = pd.DataFrame(audit_rows, columns=["key", "change_type", "field", "before", "after"])
+    return summary, audit_df
+
+
 def _norm_col(s: str) -> str:
     s = str(s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
@@ -368,6 +544,92 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
     data_dir = str(ctx.get("data_dir") or "data")
 
     st.subheader("🛠️ Outils — synchros (NHL_ID)")
+
+    # =====================================================
+    # 🧱 Master Builder (hockey.players_master.csv)
+    #   - Fusion hockey.players.csv + PuckPedia2025_26.csv + NHL API (optionnel)
+    #   - Aperçu diff avant/après
+    #   - Rapport audit CSV: data/master_build_report.csv
+    # =====================================================
+    with st.expander("🧱 Master Builder", expanded=False):
+        master_path = os.path.join(data_dir, "hockey.players_master.csv")
+        report_path = os.path.join(data_dir, "master_build_report.csv")
+
+        st.caption("Fusionne **hockey.players.csv + PuckPedia2025_26.csv + NHL API** → **hockey.players_master.csv**.")
+        st.caption("📄 Audit écrit dans **data/master_build_report.csv** (ajouts / suppressions / champs modifiés).")
+
+        before_df = pd.DataFrame()
+        if os.path.exists(master_path):
+            before_df, err = load_csv(master_path)
+            if err:
+                st.warning(f"Avant: {err}")
+            else:
+                st.info(f"Avant: master existant ✅ ({len(before_df)} lignes)")
+        else:
+            st.info("Avant: aucun master trouvé (il sera créé).")
+
+        colA, colB, colC = st.columns([1.1, 1.1, 1.2])
+        with colA:
+            enrich = st.checkbox("Enrichir via NHL API", value=True, key=WKEY + "mb_enrich")
+        with colB:
+            max_calls = st.number_input("Max appels NHL", min_value=0, max_value=5000, value=250, step=50, key=WKEY + "mb_max_calls")
+        with colC:
+            st.write("")
+            st.write("")
+            run_btn = st.button("🧱 Construire / Mettre à jour Master", type="primary", key=WKEY + "mb_build")
+
+        if run_btn:
+            # lazy import (évite crash si module absent)
+            try:
+                from services.master_builder import build_master, MasterBuildConfig
+            except Exception as e:
+                st.error("Impossible d'importer services.master_builder. Assure-toi que le fichier est dans /services/master_builder.py.")
+                st.exception(e)
+            else:
+                cfg = MasterBuildConfig(
+                    data_dir=data_dir,
+                    enrich_from_nhl=bool(enrich),
+                    max_nhl_calls=int(max_calls),
+                )
+                with st.spinner("Fusion + enrichissement…"):
+                    after_df, rep = build_master(cfg)
+
+                st.success("✅ Master généré: data/hockey.players_master.csv")
+                st.json(rep)
+
+                # Diff + audit
+                summary, audit_df = _build_diff_and_audit(before_df, after_df, max_rows=50000)
+
+                # Write audit report CSV
+                ok, werr = _atomic_write_df(audit_df, report_path)
+                if ok:
+                    st.success(f"🧾 Audit écrit: {report_path} ({len(audit_df)} lignes)")
+                else:
+                    st.error(f"❌ Échec écriture audit: {werr}")
+
+                # Preview diff (avant/après)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Lignes avant", summary.get("before_rows", 0))
+                c2.metric("Lignes après", summary.get("after_rows", 0))
+                c3.metric("Ajouts", summary.get("added", 0))
+                c4.metric("Suppressions", summary.get("removed", 0))
+
+                st.metric("Lignes modifiées (au moins 1 champ)", summary.get("modified_rows", 0))
+
+                if summary.get("audit_truncated"):
+                    st.warning("⚠️ Audit tronqué (trop de changements). Le fichier contient la première portion seulement.")
+
+                # Show a quick preview table
+                if not audit_df.empty:
+                    st.markdown("**Aperçu des changements (top 200)**")
+                    st.dataframe(audit_df.head(200), use_container_width=True)
+                else:
+                    st.info("Aucun changement détecté (ou master créé identique).")
+
+                # Optional: show new master head
+                with st.expander("👀 Aperçu du master (top 50)", expanded=False):
+                    st.dataframe(after_df.head(50), use_container_width=True)
+
 
     # --- Generator (optional)
     st.markdown("### 🌐 Générer source NHL_ID (NHL Search API)")
