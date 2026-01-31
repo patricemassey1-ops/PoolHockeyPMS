@@ -1,21 +1,35 @@
-# tabs/admin.py — SAFE MINI (NHL_ID tools + prod lock + audit/heatmap)
-# NOTE: This file is intentionally self-contained to avoid NameError/indent issues.
+# tabs/admin.py — NHL_ID Tools (SAFE) + Source Dropdown Fix + No "écran noir"
+# -----------------------------------------------------------------------------
+# Goals:
+# 1) Never crash UI (global try/except in render)
+# 2) Fix StreamlitDuplicateElementId (unique keys everywhere)
+# 3) Source dropdown lists ALL CSVs in /data AND always includes nhl_search_players.csv + equipes_joueurs_*.csv
+# 4) Associer NHL_ID works even if NHL_ID column is absent in target (it will be created)
+# 5) Supports french column "Joueur" (and many others) as name column
+# 6) SAFE MODE prevents catastrophic write (0 NHL_ID after operation)
+# -----------------------------------------------------------------------------
 
 from __future__ import annotations
 
 import os
 import re
 import io
+import json
+import time
+import urllib.parse
+import urllib.request
 from datetime import datetime
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional, List
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
+WKEY = "admin_nhlid_"  # widget key prefix (unique)
+
 
 # =========================
-# Small I/O helpers
+# I/O
 # =========================
 def load_csv(path: str) -> Tuple[pd.DataFrame, str | None]:
     try:
@@ -26,32 +40,30 @@ def load_csv(path: str) -> Tuple[pd.DataFrame, str | None]:
         df = pd.read_csv(path, low_memory=False)
         return df, None
     except Exception as e:
-        return pd.DataFrame(), f"Erreur lecture CSV: {e}"
+        return pd.DataFrame(), f"Erreur lecture CSV: {type(e).__name__}: {e}"
 
 
-def save_csv(df: pd.DataFrame, path: str, *, safe_mode: bool = True) -> str | None:
-    """SAFE MODE = protège contre écrasement catastrophique (ex: perte NHL_ID)."""
+def save_csv(df: pd.DataFrame, path: str, *, safe_mode: bool = True, allow_zero: bool = False) -> str | None:
+    """SAFE MODE: refuse to write if NHL_ID exists but would be 0% filled (unless allow_zero)."""
     try:
-        if safe_mode:
-            # minimal guard: refuse if NHL_ID col exists but is entirely empty
+        if safe_mode and not allow_zero:
             id_col = _resolve_nhl_id_col(df)
-            if id_col:
+            if id_col and id_col in df.columns:
                 s = pd.to_numeric(df[id_col], errors="coerce")
                 if int(s.notna().sum()) == 0:
                     return "SAFE MODE: Refus d'écrire — NHL_ID serait 0/100% (colonne vide)."
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         df.to_csv(path, index=False)
         return None
     except Exception as e:
-        return f"Erreur écriture CSV: {e}"
+        return f"Erreur écriture CSV: {type(e).__name__}: {e}"
 
 
 # =========================
 # Column resolution
 # =========================
 def _norm_col(s: str) -> str:
-    s = str(s or "")
-    s = s.strip().lower()
+    s = str(s or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
     return s
 
@@ -60,12 +72,15 @@ def _resolve_nhl_id_col(df: pd.DataFrame) -> str | None:
     if df is None or df.empty:
         return None
     cmap = {_norm_col(c): c for c in df.columns}
-    for key in ["nhl_id", "nhlid", "id_nhl", "player_id", "playerid", "nhlplayerid", "nhl_id_api"]:
+    for key in [
+        "nhl_id", "nhlid", "id_nhl", "player_id", "playerid", "nhlplayerid",
+        "nhl_id_api", "nhl_id_nhl", "nhl_player_id",
+    ]:
         if key in cmap:
             return cmap[key]
-    # tolerate exact
+    # common variants with spaces
     for c in df.columns:
-        if str(c).strip().lower() in ("nhl_id", "nhl id"):
+        if str(c).strip().lower() in ("nhl_id", "nhl id", "nhl-id"):
             return c
     return None
 
@@ -74,47 +89,133 @@ def _resolve_player_name_col(df: pd.DataFrame) -> str | None:
     if df is None or df.empty:
         return None
     cmap = {_norm_col(c): c for c in df.columns}
-    for key in ["player", "joueur", "name", "nom", "player_name", "full_name"]:
+    # include french 'joueur'
+    for key in ["joueur", "player", "player_name", "nom", "name", "full_name", "playername"]:
         if key in cmap:
             return cmap[key]
     return None
 
 
 def _resolve_team_col(df: pd.DataFrame) -> str | None:
+    """Prefer nul_id as team column if present (per user requirement)."""
     if df is None or df.empty:
         return None
     cmap = {_norm_col(c): c for c in df.columns}
-    for key in ["team", "equipe", "club", "nhl_team", "team_abbrev"]:
+    for key in ["nul_id", "nulid"]:
+        if key in cmap:
+            return cmap[key]
+    for key in ["team", "equipe", "club", "nhl_team", "team_abbrev", "owner", "proprietaire"]:
         if key in cmap:
             return cmap[key]
     return None
 
 
-def _normalize_player_name(x: str) -> str:
+def _normalize_player_name(x: Any) -> str:
     x = str(x or "").strip().lower()
     x = re.sub(r"\s+", " ", x)
-    # support "Last, First"
+    # handle "Last, First"
     if "," in x:
-        parts = [p.strip() for p in x.split(",", 1)]
-        if len(parts) == 2 and parts[0] and parts[1]:
-            x = f"{parts[1]} {parts[0]}"
-    # remove accents-ish and punctuation
+        a, b = [p.strip() for p in x.split(",", 1)]
+        if a and b:
+            x = f"{b} {a}"
     x = re.sub(r"[^a-z0-9 ]+", "", x)
     x = re.sub(r"\s+", " ", x).strip()
     return x
 
 
 # =========================
-# Audit + confidence
+# Source dropdown discovery
 # =========================
-CONF_BY_SOURCE = {
-    "existing": 0.95,
-    "roster": 0.80,
-    "equipes": 0.75,
-    "manual": 0.70,
-    "fallback": 0.55,
-    "unknown": 0.50,
-}
+def list_data_csvs(data_dir: str = "data") -> List[str]:
+    """Return sorted list of CSV paths in data_dir, ensuring key files are present if they exist."""
+    paths: List[str] = []
+    try:
+        if os.path.isdir(data_dir):
+            for fn in os.listdir(data_dir):
+                if fn.lower().endswith(".csv"):
+                    paths.append(os.path.join(data_dir, fn))
+    except Exception:
+        pass
+
+    # ensure important sources are present if exist
+    must = [
+        os.path.join(data_dir, "nhl_search_players.csv"),
+        os.path.join(data_dir, "nhl_search_players_2025-2026.csv"),
+        os.path.join(data_dir, "equipes_joueurs_2025-2026.csv"),
+        os.path.join(data_dir, "hockey.players.csv"),
+    ]
+    for p in must:
+        if os.path.exists(p) and p not in paths:
+            paths.append(p)
+
+    # stable sort: important first, then alpha
+    def _rank(p: str) -> Tuple[int, str]:
+        base = os.path.basename(p).lower()
+        if base.startswith("nhl_search_players"):
+            r = 0
+        elif base.startswith("hockey.players"):
+            r = 1
+        elif base.startswith("equipes_joueurs"):
+            r = 2
+        else:
+            r = 9
+        return (r, base)
+
+    paths = sorted(set(paths), key=_rank)
+    return paths
+
+
+# =========================
+# Matching from source
+# =========================
+def recover_from_source(
+    target_df: pd.DataFrame,
+    source_df: pd.DataFrame,
+    *,
+    target_id_col: str,
+    target_name_col: str,
+    source_id_col: str,
+    source_name_col: str,
+    conf: float,
+    source_tag: str,
+    max_fill: int = 0,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    out = target_df.copy()
+
+    # ensure NHL_ID exists
+    if target_id_col not in out.columns:
+        out[target_id_col] = np.nan
+
+    # tracking cols
+    if "nhl_id_source" not in out.columns:
+        out["nhl_id_source"] = ""
+    if "nhl_id_confidence" not in out.columns:
+        out["nhl_id_confidence"] = np.nan
+
+    s = source_df.copy()
+    s["_k_name"] = s[source_name_col].map(_normalize_player_name)
+    s["_id"] = pd.to_numeric(s[source_id_col], errors="coerce")
+    s = s.dropna(subset=["_id"]).drop_duplicates(subset=["_k_name"], keep="first")
+
+    out["_k_name"] = out[target_name_col].map(_normalize_player_name)
+    cur = pd.to_numeric(out[target_id_col], errors="coerce")
+
+    miss_mask = cur.isna()
+    idx_miss = out.index[miss_mask].tolist()
+    if max_fill and len(idx_miss) > int(max_fill):
+        idx_miss = idx_miss[: int(max_fill)]
+
+    miss_slice = out.loc[idx_miss, ["_k_name"]].merge(s[["_k_name", "_id"]], on="_k_name", how="left")
+    fill_mask = miss_slice["_id"].notna()
+
+    filled = int(fill_mask.sum())
+    if filled:
+        out.loc[miss_slice.index[fill_mask], target_id_col] = miss_slice.loc[fill_mask, "_id"].values
+        out.loc[miss_slice.index[fill_mask], "nhl_id_source"] = source_tag
+        out.loc[miss_slice.index[fill_mask], "nhl_id_confidence"] = float(conf)
+
+    out = out.drop(columns=["_k_name"], errors="ignore")
+    return out, {"filled": filled}
 
 
 def audit_nhl_ids(df: pd.DataFrame, id_col: str) -> Dict[str, Any]:
@@ -130,454 +231,332 @@ def audit_nhl_ids(df: pd.DataFrame, id_col: str) -> Dict[str, Any]:
         "with_id": with_id,
         "missing": missing,
         "missing_pct": miss_pct,
-        "dup": dup_cnt,
+        "dup_cnt": dup_cnt,
         "dup_pct": dup_pct,
     }
 
 
-def build_audit_report(df: pd.DataFrame, id_col: str, name_col: str | None, team_col: str | None) -> pd.DataFrame:
-    out = pd.DataFrame()
-    out["row"] = np.arange(len(df))
-    if name_col and name_col in df.columns:
-        out["player"] = df[name_col].astype(str)
-    if team_col and team_col in df.columns:
-        out["team"] = df[team_col].astype(str)
-    out["nhl_id"] = pd.to_numeric(df[id_col], errors="coerce")
-    out["missing"] = out["nhl_id"].isna()
-    out["dup"] = out["nhl_id"].notna() & out["nhl_id"].duplicated(keep=False)
-
-    if "nhl_id_source" in df.columns:
-        out["source"] = df["nhl_id_source"].astype(str)
-    else:
-        out["source"] = ""
-
-    if "nhl_id_confidence" in df.columns:
-        out["confidence"] = pd.to_numeric(df["nhl_id_confidence"], errors="coerce")
-    else:
-        out["confidence"] = np.nan
-
-    return out
-
-
-def confidence_heatmap(df_audit: pd.DataFrame) -> pd.DataFrame:
-    # bins
-    bins = [0.0, 0.6, 0.75, 0.85, 1.01]
-    labels = ["<0.60", "0.60-0.75", "0.75-0.85", ">=0.85"]
-    conf = pd.to_numeric(df_audit.get("confidence", np.nan), errors="coerce")
-    bucket = pd.cut(conf.fillna(0.0), bins=bins, labels=labels, right=False)
-    teams = df_audit.get("team", pd.Series(["(none)"] * len(df_audit))).fillna("(none)").astype(str)
-    piv = pd.pivot_table(
-        pd.DataFrame({"team": teams, "bucket": bucket.astype(str)}),
-        index="team",
-        columns="bucket",
-        values="bucket",
-        aggfunc="count",
-        fill_value=0,
+# =========================
+# NHL Search API generator (optional)
+# =========================
+def _http_get_json(url: str, timeout: int = 20) -> Any:
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (PoolHockeyPMS)", "Accept": "application/json,text/plain,*/*"},
+        method="GET",
     )
-    # stable column order
-    for lab in labels:
-        if lab not in piv.columns:
-            piv[lab] = 0
-    piv = piv[labels]
-    piv = piv.sort_values(by=labels[::-1], ascending=False)
-    return piv
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return json.loads(raw)
 
 
-# =========================
-# Recovery from source
-# =========================
-def recover_from_source(
-    players_df: pd.DataFrame,
-    source_df: pd.DataFrame,
+def _extract_items(payload: Any) -> List[dict]:
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    if isinstance(payload, dict):
+        for k in ["data", "players", "items", "results"]:
+            v = payload.get(k)
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+    return []
+
+
+def generate_nhl_search_source(
+    out_path: str,
     *,
-    id_col: str,
-    name_col: str,
-    team_col: str | None,
-    source_tag: str,
-    conf: float,
-) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    p = players_df.copy()
-    s = source_df.copy()
+    active_only: bool = True,
+    limit: int = 1000,
+    timeout_s: int = 20,
+    max_pages: int = 20,
+    culture: str = "en-us",
+    q: str = "*",
+) -> Tuple[pd.DataFrame, Dict[str, Any], Optional[str]]:
+    base = "https://search.d3.nhle.com/api/v1/search/player"
+    all_rows: List[dict] = []
+    seen_ids: set[int] = set()
+    pages = 0
+    start = 0
+    used_url = ""
 
-    if "nhl_id_source" not in p.columns:
-        p["nhl_id_source"] = ""
-    if "nhl_id_confidence" not in p.columns:
-        p["nhl_id_confidence"] = np.nan
+    try:
+        while pages < max_pages:
+            params = {
+                "culture": culture,
+                "limit": str(int(limit)),
+                "q": q,
+                "active": "True" if active_only else "False",
+                "start": str(int(start)),
+            }
+            url = f"{base}?{urllib.parse.urlencode(params)}"
+            used_url = url
 
-    s_id = _resolve_nhl_id_col(s)
-    s_name = _resolve_player_name_col(s) or name_col
-    s_team = _resolve_team_col(s) if team_col else None
-    if not s_id:
-        return p, {"filled": 0, "reason": "Aucune colonne NHL_ID détectée dans la source."}
+            payload = _http_get_json(url, timeout=timeout_s)
+            items = _extract_items(payload)
 
-    # mapping key -> id
-    s_ids = pd.to_numeric(s[s_id], errors="coerce")
-    s_names = s[s_name].astype(str).apply(_normalize_player_name)
-    if s_team and s_team in s.columns:
-        s_teams = s[s_team].astype(str).str.upper().str.strip()
-    else:
-        s_teams = pd.Series([""] * len(s), index=s.index)
+            if pages == 0 and active_only and len(items) == 0:
+                active_only = False
+                continue
 
-    src_map: Dict[str, int] = {}
-    for nm, tm, pid in zip(s_names.tolist(), s_teams.tolist(), s_ids.tolist()):
-        if pd.isna(pid) or int(pid) <= 0:
-            continue
-        k = f"{tm}||{nm}"
-        if k not in src_map:
-            src_map[k] = int(pid)
+            if not items:
+                break
 
-    p_ids = pd.to_numeric(p[id_col], errors="coerce")
-    missing_mask = p_ids.isna()
+            new_count = 0
+            for it in items:
+                nhl_id = it.get("playerId", it.get("id", it.get("player_id", it.get("NHL_ID"))))
+                try:
+                    nhl_id_int = int(nhl_id)
+                except Exception:
+                    continue
+                if nhl_id_int in seen_ids:
+                    continue
+                seen_ids.add(nhl_id_int)
+                new_count += 1
 
-    p_names = p[name_col].astype(str).apply(_normalize_player_name)
-    if team_col and team_col in p.columns:
-        p_teams = p[team_col].astype(str).str.upper().str.strip()
-    else:
-        p_teams = pd.Series([""] * len(p), index=p.index)
+                all_rows.append(
+                    {
+                        "NHL_ID": nhl_id_int,
+                        "Player": it.get("name", it.get("fullName", it.get("playerName", ""))),
+                        "Team": it.get("teamAbbrev", it.get("team", "")),
+                        "Position": it.get("positionCode", it.get("position", "")),
+                        "Jersey#": it.get("sweaterNumber", it.get("jerseyNumber", "")),
+                        "DOB": it.get("birthDate", it.get("dob", "")),
+                        "_source": "nhl_search_api",
+                    }
+                )
 
-    filled = 0
-    for ix in p.index[missing_mask]:
-        k = f"{p_teams.at[ix]}||{p_names.at[ix]}"
-        if k in src_map:
-            p.at[ix, id_col] = src_map[k]
-            p.at[ix, "nhl_id_source"] = source_tag
-            p.at[ix, "nhl_id_confidence"] = float(conf)
-            filled += 1
+            pages += 1
+            if new_count == 0:
+                break
+            if len(items) < int(limit):
+                break
+            start += int(limit)
+            time.sleep(0.05)
 
-    # mark existing
-    p_ids2 = pd.to_numeric(p[id_col], errors="coerce")
-    for ix in p.index[p_ids2.notna()]:
-        if not str(p.at[ix, "nhl_id_source"] or "").strip():
-            p.at[ix, "nhl_id_source"] = "existing"
-            p.at[ix, "nhl_id_confidence"] = 0.95
+        df = pd.DataFrame(all_rows)
+        if not df.empty:
+            df["NHL_ID"] = pd.to_numeric(df["NHL_ID"], errors="coerce").astype("Int64")
+            df = df.dropna(subset=["NHL_ID"]).drop_duplicates(subset=["NHL_ID"], keep="first")
 
-    return p, {"filled": filled, "unique_keys": len(src_map)}
+        errw = save_csv(df, out_path, safe_mode=False, allow_zero=True)
+        if errw:
+            return pd.DataFrame(), {"url": used_url, "pages": pages, "rows": int(len(df))}, errw
+
+        return df, {"url": used_url, "pages": pages, "rows_saved": int(len(df)), "out_path": out_path}, None
+
+    except Exception as e:
+        return pd.DataFrame(), {"url": used_url, "pages": pages}, f"Erreur NHL Search API: {type(e).__name__}: {e}"
 
 
 # =========================
-# Prod lock
+# UI (render)
 # =========================
-def is_prod_env() -> bool:
-    v = (os.getenv("PMS_ENV") or os.getenv("ENV") or "").strip().lower()
-    if v in ("prod", "production", "cloud", "streamlit"):
-        return True
-    # secrets opt-in
-    sv = str(st.secrets.get("ENV", "") if hasattr(st, "secrets") else "").strip().lower()
-    return sv in ("prod", "production")
+def render(*args, **kwargs):
+    try:
+        return _render_impl(*args, **kwargs)
+    except Exception as e:
+        st.error("Une erreur a été détectée (évite l’écran noir).")
+        st.exception(e)
+        return None
 
 
-# =========================
-# UI render
-# =========================
-def render(ctx: Dict[str, Any] | None = None) -> None:
+def _render_impl(ctx: Optional[Dict[str, Any]] = None):
     ctx = ctx or {}
+    season = str(ctx.get("season") or "2025-2026")
     data_dir = str(ctx.get("data_dir") or "data")
-    season = str(ctx.get("season") or ctx.get("season_lbl") or "2025-2026")
 
-    st.title("🛠️ Gestion Admin")
+    st.subheader("🛠️ Outils — synchros (NHL_ID)")
 
-    tab = st.radio("Sections", ["Backups", "Joueurs", "Outils"], horizontal=True, key="admin_section")
-    if tab == "Backups":
-        st.subheader("📦 Backups")
-        st.info("Mini-version SAFE: la section Backups est volontairement légère ici.")
-        st.caption("Tu peux réintégrer la version Drive complète ensuite — on sécurise d'abord NHL_ID.")
-        return
+    # --- Generator (optional)
+    st.markdown("### 🌐 Générer source NHL_ID (NHL Search API)")
+    out_src = os.path.join(data_dir, "nhl_search_players.csv")
+    c1, c2, c3, c4 = st.columns([1.1, 1, 1, 1])
+    with c2:
+        active_only = st.checkbox("Actifs seulement", value=True, key=WKEY + "gen_active")
+    with c3:
+        limit = st.number_input("Chunk limit", min_value=200, max_value=2000, value=1000, step=100, key=WKEY + "gen_limit")
+    with c4:
+        timeout_s = st.number_input("Timeout (s)", min_value=5, max_value=60, value=20, step=5, key=WKEY + "gen_timeout")
 
-    if tab == "Joueurs":
-        st.subheader("👥 Joueurs")
-        st.info("Mini-version SAFE: pas de gestion avancée ici (encore).")
-        return
-
-    # -------- Outils / NHL_ID
-    st.subheader("🧰 Outils — synchros")
-
-    players_path = os.path.join(data_dir, "hockey.players.csv")
-    players2 = st.text_input("Players DB (NHL_ID)", value=players_path)
-
-    limit = st.number_input("Max par run", min_value=100, max_value=5000, step=100, value=1000)
-    dry = st.checkbox("Dry-run (ne sauvegarde pas)", value=False)
-
-    # SAFE MODE: protect writes
-    override_safe = st.checkbox("Override SAFE MODE (autoriser une baisse NHL_ID)", value=False)
-
-    prod = is_prod_env()
-    st.caption(f"🔒 Prod lock: {'ON' if prod else 'OFF'} (ENV/PMS_ENV).")
-
-
-    # --- choose recovery source
-    st.markdown("### Source de récupération (optionnel)")
-
-    def _list_csv_in_data_dir(_dir: str) -> list[str]:
-        try:
-            if not _dir or not os.path.isdir(_dir):
-                return []
-            out = []
-            for fn in os.listdir(_dir):
-                if str(fn).lower().endswith(".csv"):
-                    out.append(os.path.join(_dir, fn))
-            return sorted(set(out))
-        except Exception:
-            return []
-
-    # Build candidates from known season files + any CSV in /data (includes nhl_search_players.csv)
-    candidates: list[str] = []
-
-    # season roster exports (preferred)
-    for fn in [f"roster_filtered_{season}.csv", f"roster_{season}.csv", f"equipes_joueurs_{season}.csv"]:
-        pth = os.path.join(data_dir, fn)
-        if os.path.exists(pth):
-            candidates.append(pth)
-
-    # always include NHL Search generated source if present
-    nhl_search_path = os.path.join(data_dir, "nhl_search_players.csv")
-    if os.path.exists(nhl_search_path):
-        candidates.append(nhl_search_path)
-
-    # include hockey.players.csv if present (can be used as source once enriched)
-    hockey_players_path = os.path.join(data_dir, "hockey.players.csv")
-    if os.path.exists(hockey_players_path):
-        candidates.append(hockey_players_path)
-
-    # include any other CSV in /data (so dropdown never "forgets" a file)
-    candidates.extend(_list_csv_in_data_dir(data_dir))
-
-    # de-dupe + normalize paths + try to locate special sources even if written in another /data
-    def _abs(p: str) -> str:
-        try:
-            return os.path.abspath(p)
-        except Exception:
-            return str(p)
-
-    # look for nhl_search_players.csv in common locations (some deployments write to another cwd)
-    special_names = ["nhl_search_players.csv"]
-    probe_dirs = [
-        data_dir,
-        os.path.join(os.getcwd(), "data"),
-        "/mount/src/poolhockeypms/data",
-        "/mount/src/poolhockey/data",
-        "/mount/src/poolhockeypms/Data",
-        "/mount/src/poolhockey/Data",
-    ]
-    for d in probe_dirs:
-        for sn in special_names:
-            p = os.path.join(d, sn)
-            if os.path.exists(p):
-                candidates.append(p)
-
-    # normalize + unique
-    cand_abs = {}
-    for c in candidates:
-        cand_abs[_abs(c)] = c
-    candidates = [cand_abs[k] for k in sorted(cand_abs.keys())]
-
-    # helpful diagnostics for missing sources
-    with st.expander("🔎 Diagnostic sources (auto)", expanded=False):
-        st.write("data_dir:", data_dir)
-        st.write("cwd:", os.getcwd())
-        st.write("probe_dirs:", probe_dirs)
-        found_nhl = [os.path.join(d, "nhl_search_players.csv") for d in probe_dirs if os.path.exists(os.path.join(d, "nhl_search_players.csv"))]
-        st.write("found nhl_search_players.csv:", found_nhl if found_nhl else "NONE")
-        st.write("candidates (csv):", candidates)
-
-    upload = st.file_uploader("Ou uploader un CSV source", type=["csv"], accept_multiple_files=False, key="src_upload")
-    source_df = None
-    source_tag = "unknown"
-    conf = 0.70
-
-    if upload is not None:
-        try:
-            source_df = pd.read_csv(upload, low_memory=False)
-            source_tag = "manual"
-            conf = 0.70
-            st.success("Source uploadée prête.")
-        except Exception as e:
-            st.error(f"Erreur lecture upload: {e}")
-
-    # Choose a smart default: nhl_search_players > hockey.players > roster_filtered > roster > autres
-    default_choice = None
-    pref = [
-        nhl_search_path,
-        hockey_players_path,
-        os.path.join(data_dir, f"roster_filtered_{season}.csv"),
-        os.path.join(data_dir, f"roster_{season}.csv"),
-        os.path.join(data_dir, f"equipes_joueurs_{season}.csv"),
-    ]
-    for pp in pref:
-        if pp in candidates:
-            default_choice = pp
-            break
-    default_choice = default_choice or (candidates[0] if candidates else None)
-
-    if source_df is None:
-        choice = st.selectbox(
-            "Récupérer NHL_ID depuis…",
-            options=["Aucune (API NHL uniquement)"] + candidates,
-            index=(1 + candidates.index(default_choice)) if (default_choice and default_choice in candidates) else 0,
-            key="src_choice",
-        )
-        if choice != "Aucune (API NHL uniquement)":
-            # prevent choosing the target file as its own source (would be a no-op / confusing)
-            if os.path.abspath(choice) == os.path.abspath(players2):
-                st.warning("Source = fichier cible. Choisis une autre source (ex: nhl_search_players.csv).")
-                source_df = None
-            else:
-                source_df, errS = load_csv(choice)
-            if errS:
-                st.error(errS)
-                source_df = None
-            else:
-                bn = os.path.basename(choice).lower()
-                if bn == "nhl_search_players.csv":
-                    source_tag = "nhl_search_api"
-                    conf = 0.95
-                elif "hockey.players" in bn:
-                    source_tag = "existing"
-                    conf = 0.95
-                elif "roster" in bn:
-                    source_tag = "roster"
-                    conf = 0.80
-                elif "equipes" in bn:
-                    source_tag = "equipes"
-                    conf = 0.75
-                else:
-                    source_tag = "fallback"
-                    conf = 0.55
-
-    # --- verify button (audit)
-
-    if st.button("🔎 Vérifier l'état des NHL_ID"):
-        df, err = load_csv(players2)
+    if c1.button("🌐 Générer source NHL_ID", use_container_width=True, key=WKEY + "btn_gen"):
+        with st.spinner("Génération en cours…"):
+            df_out, dbg, err = generate_nhl_search_source(
+                out_src, active_only=bool(active_only), limit=int(limit), timeout_s=int(timeout_s), max_pages=25
+            )
         if err:
             st.error(err)
+            if dbg.get("url"):
+                st.caption(f"URL: {dbg.get('url')}")
         else:
-            id_col = _resolve_nhl_id_col(df) or "NHL_ID"
-            name_col = _resolve_player_name_col(df) or "Player"
-            team_col = _resolve_team_col(df)
-            # ✅ Vérifier doit être tolérant: on peut ne pas avoir encore NHL_ID.
-            if name_col not in df.columns:
-                st.error("Colonne joueur introuvable (ex: Joueur / Player / player_name).")
-                st.stop()
-            if id_col not in df.columns:
-                df[id_col] = np.nan
-                st.info(f"Colonne {id_col} absente → créée (tous manquants pour l’instant).")
-            a = audit_nhl_ids(df, id_col)
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total joueurs", a["total"])
-            c2.metric("Avec ID (NHL_ID)", a["with_id"])
-            c3.metric("Manquants", a["missing"])
-            c4.metric("% manquants", f"{a['missing_pct']:.1f}%")
-            st.warning(f"IDs dupliqués détectés: {a['dup']}  (≈{a['dup_pct']:.1f}% des IDs présents).")
-
-            # audit report + heatmap
-            name_col = _resolve_player_name_col(df)
-            team_col = _resolve_team_col(df)
-            audit_df = build_audit_report(df, id_col, name_col, team_col)
-
-            # ensure confidence exists for display
-            if "nhl_id_confidence" not in df.columns:
-                audit_df["confidence"] = np.where(audit_df["missing"], 0.0, 0.95)
-
-            heat = confidence_heatmap(audit_df)
-
-            st.markdown("#### 🧩 Heatmap de confiance (par équipe × bucket)")
-            try:
-                st.dataframe(heat.style.background_gradient(axis=None), use_container_width=True)
-            except Exception:
-                st.dataframe(heat, use_container_width=True)
-                st.caption("ℹ️ Heatmap SAFE: matplotlib indisponible.")
-
-            # CSV audit download
-            out = io.StringIO()
-            audit_df.to_csv(out, index=False)
-            st.download_button(
-                "🧾 Télécharger rapport d'audit NHL_ID (CSV)",
-                data=out.getvalue().encode("utf-8"),
-                file_name=f"audit_nhl_id_{season}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-            )
+            st.success(f"✅ Généré: {dbg.get('rows_saved', 0)} joueurs (pages={dbg.get('pages', 0)}).")
+            st.caption(f"Sortie: {out_src}")
+            st.caption(f"URL: {dbg.get('url')}")
+            if not df_out.empty:
+                st.dataframe(df_out.head(10), use_container_width=True)
 
     st.markdown("---")
 
-    # --- apply recovery + (optionally) API later
-    lock_dup_pct = st.slider("🛑 Seuil blocage duplication (%)", min_value=0.5, max_value=20.0, value=5.0, step=0.5)
-    allow_prod_override = st.checkbox("Déverrouiller en prod (admin)", value=False, disabled=(not prod))
+    # --- Target file
+    csvs = list_data_csvs(data_dir)
+    default_target = os.path.join(data_dir, f"equipes_joueurs_{season}.csv")
+    if not os.path.exists(default_target):
+        default_target = os.path.join(data_dir, "equipes_joueurs_2025-2026.csv") if os.path.exists(os.path.join(data_dir, "equipes_joueurs_2025-2026.csv")) else (csvs[0] if csvs else "")
 
-    if st.button("🔗 Associer NHL_ID"):
-        df, err = load_csv(players2)
-        if err:
-            st.error(err)
+    target_path = st.selectbox(
+        "Players DB (NHL_ID) — fichier cible",
+        options=csvs if csvs else [default_target],
+        index=(csvs.index(default_target) if csvs and default_target in csvs else 0),
+        key=WKEY + "target",
+    )
+
+    max_per_run = st.number_input("Max par run", min_value=50, max_value=20000, value=1000, step=50, key=WKEY + "maxrun")
+    dry_run = st.checkbox("Dry-run (ne sauvegarde pas)", value=False, key=WKEY + "dry")
+    override_safe = st.checkbox("Override SAFE MODE (autoriser une baisse NHL_ID)", value=False, key=WKEY + "override_safe")
+
+    st.caption(f"🔒 Prod lock: OFF (ENV/PMS_ENV).")
+
+    # --- Source dropdown (optional)
+    st.markdown("### Source de récupération (optionnel)")
+    upload = st.file_uploader("Ou uploader un CSV source", type=["csv"], key=WKEY + "upload")
+    uploaded_df = None
+    uploaded_name = None
+    if upload is not None:
+        try:
+            uploaded_df = pd.read_csv(upload, low_memory=False)
+            uploaded_name = f"upload:{upload.name}"
+            st.success(f"✅ Upload chargé: {upload.name} ({len(uploaded_df)} lignes)")
+        except Exception as e:
+            st.error(f"Upload invalide: {type(e).__name__}: {e}")
+
+    # Build source options = all csvs EXCEPT target, plus (None), plus upload option label
+    src_opts = ["(Aucune — API NHL uniquement)"] + [p for p in csvs if p != target_path]
+    # ensure nhl_search_players is present when exists
+    must_src = os.path.join(data_dir, "nhl_search_players.csv")
+    if os.path.exists(must_src) and must_src != target_path and must_src not in src_opts:
+        src_opts.insert(1, must_src)
+
+    default_src = must_src if (os.path.exists(must_src) and must_src != target_path) else ("(Aucune — API NHL uniquement)")
+    src_choice = st.selectbox(
+        "Récupérer NHL_ID depuis…",
+        options=src_opts,
+        index=(src_opts.index(default_src) if default_src in src_opts else 0),
+        key=WKEY + "source",
+    )
+
+    # Load target
+    df_t, err_t = load_csv(target_path)
+    if err_t:
+        st.error(err_t)
+        return
+
+    # Resolve columns on target
+    t_name_col = _resolve_player_name_col(df_t)
+    if not t_name_col:
+        st.error("Colonne nom joueur introuvable dans le fichier cible (ex: Joueur / Player / player_name).")
+        st.caption(f"Colonnes détectées: {list(df_t.columns)}")
+        return
+
+    # Determine NHL_ID column name for target (create if missing)
+    t_id_col = _resolve_nhl_id_col(df_t) or "NHL_ID"
+    created_id = False
+    if t_id_col not in df_t.columns:
+        df_t[t_id_col] = np.nan
+        created_id = True
+        st.info("Colonne NHL_ID absente → créée (prête à remplir).")
+
+    # Load source df
+    source_df = None
+    source_tag = ""
+    if uploaded_df is not None:
+        source_df = uploaded_df
+        source_tag = uploaded_name or "upload"
+    elif src_choice and src_choice != "(Aucune — API NHL uniquement)":
+        source_df, err_s = load_csv(src_choice)
+        if err_s:
+            st.error(err_s)
+            source_df = None
+        else:
+            source_tag = os.path.basename(src_choice)
+
+    # If source==target (should not happen, but guard)
+    if src_choice == target_path:
+        st.warning("Source = fichier cible. Choisis une autre source (ex: nhl_search_players.csv).")
+        source_df = None
+
+    # Controls
+    conf = st.slider("Score de confiance appliqué aux IDs récupérés", 0.50, 0.99, 0.85, 0.01, key=WKEY + "conf")
+    dup_lock = st.slider("🔴 Seuil blocage duplication (%)", 0.5, 20.0, 5.0, 0.5, key=WKEY + "duplock")
+
+    # Button
+    if st.button("🔗 Associer NHL_ID", key=WKEY + "btn_assoc"):
+        if source_df is None or source_df.empty:
+            st.warning("Aucune source exploitable sélectionnée. Sélectionne nhl_search_players.csv ou upload un CSV avec NHL_ID.")
             return
 
-        id_col = _resolve_nhl_id_col(df) or "NHL_ID"
-        name_col = _resolve_player_name_col(df) or "Player"
-        team_col = _resolve_team_col(df)
+        s_id_col = _resolve_nhl_id_col(source_df)
+        s_name_col = _resolve_player_name_col(source_df)
 
-        # ✅ Associer doit être tolérant: NHL_ID peut ne pas exister encore.
-        if name_col not in df.columns:
-            st.error("Colonne joueur introuvable (ex: Joueur / Player / player_name).")
+        if not s_id_col or s_id_col not in source_df.columns:
+            st.error("Source: colonne NHL_ID introuvable.")
+            st.caption(f"Colonnes source: {list(source_df.columns)}")
             return
-        if id_col not in df.columns:
-            df[id_col] = np.nan
-            st.info(f"Colonne {id_col} absente → créée (prête à remplir).")
-
-        # init tracking cols
-        if "nhl_id_source" not in df.columns:
-            df["nhl_id_source"] = ""
-        if "nhl_id_confidence" not in df.columns:
-            df["nhl_id_confidence"] = np.nan
-
-        # recover
-        filled = 0
-        if source_df is not None and not source_df.empty:
-            df, stats = recover_from_source(
-                df,
-                source_df,
-                id_col=id_col,
-                name_col=name_col,
-                team_col=team_col,
-                source_tag=source_tag,
-                conf=conf,
-            )
-            filled = int(stats.get("filled", 0))
-
-        # recompute audit + locks
-        a = audit_nhl_ids(df, id_col)
-        dup_pct = float(a["dup_pct"])
-        if prod and (dup_pct > lock_dup_pct) and not allow_prod_override:
-            st.error(
-                f"🔒 PROD LOCK: écriture bloquée — duplication {dup_pct:.1f}% > seuil {lock_dup_pct:.1f}%."
-            )
-            st.info("Corrige la source (mauvais match) ou coche 'Déverrouiller en prod (admin)'.")
+        if not s_name_col or s_name_col not in source_df.columns:
+            st.error("Source: colonne nom joueur introuvable (Player/Joueur/Name).")
+            st.caption(f"Colonnes source: {list(source_df.columns)}")
             return
 
-        # write (unless dry-run)
-        if dry:
-            st.info(f"Dry-run: +{filled} NHL_ID récupérés (aucune écriture).")
+        df2, stats = recover_from_source(
+            df_t,
+            source_df,
+            target_id_col=t_id_col,
+            target_name_col=t_name_col,
+            source_id_col=s_id_col,
+            source_name_col=s_name_col,
+            conf=float(conf),
+            source_tag=source_tag or "source",
+            max_fill=int(max_per_run) if int(max_per_run) > 0 else 0,
+        )
+
+        a = audit_nhl_ids(df2, t_id_col)
+        st.success(f"✅ Récupération terminée: +{int(stats.get('filled', 0))} IDs remplis. Doublons: {a['dup_cnt']} (~{a['dup_pct']:.1f}%).")
+
+        if a["dup_pct"] > float(dup_lock):
+            st.error(f"🛑 Blocage duplication: {a['dup_pct']:.1f}% > seuil {dup_lock:.1f}%. Ajuste la source/stratégie avant write.")
+            # do not write
             return
 
-        errw = save_csv(df, players2, safe_mode=(not override_safe))
+        if dry_run:
+            st.info("Dry-run: aucune écriture.")
+            return
+
+        errw = save_csv(df2, target_path, safe_mode=(not override_safe), allow_zero=False)
         if errw:
             st.error(errw)
             return
 
-        st.success(f"✅ Terminé — +{filled} NHL_ID récupérés. Duplication: {dup_pct:.1f}%.")
+        st.success(f"💾 Sauvegardé: {target_path}")
 
-        # Show audit + downloads after write
-        audit_df = build_audit_report(df, id_col, name_col, team_col)
-        heat = confidence_heatmap(audit_df)
-        st.markdown("#### 🧩 Heatmap de confiance (par équipe × bucket)")
-        st.dataframe(heat.style.background_gradient(axis=None), use_container_width=True)
-
-        out = io.StringIO()
-        audit_df.to_csv(out, index=False)
+        # Download small audit report
+        audit_df = pd.DataFrame({
+            "player_name": df2[t_name_col].astype(str),
+            "nhl_id": pd.to_numeric(df2[t_id_col], errors="coerce"),
+            "missing": pd.to_numeric(df2[t_id_col], errors="coerce").isna(),
+            "source": df2.get("nhl_id_source", ""),
+            "confidence": df2.get("nhl_id_confidence", np.nan),
+        })
+        buf = io.StringIO()
+        audit_df.to_csv(buf, index=False)
         st.download_button(
-            "🧾 Télécharger rapport d'audit NHL_ID (CSV)",
-            data=out.getvalue().encode("utf-8"),
+            "🧾 Télécharger audit NHL_ID (CSV)",
+            data=buf.getvalue().encode("utf-8"),
             file_name=f"audit_nhl_id_{season}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
+            key=WKEY + "dl_audit",
         )
 
 
-# Backward-compat alias (si ton app appelle _render_tools)
+# Backward-compat alias (if app expects _render_tools)
 def _render_tools(*args, **kwargs):
     return render(*args, **kwargs)
