@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import glob
 import re
 import io
 import json
@@ -94,6 +95,112 @@ def _atomic_write_df(df: pd.DataFrame, out_path: str) -> Tuple[bool, str | None]
         return True, None
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+def _list_csv_files(data_dir: str) -> list[str]:
+    try:
+        paths = sorted(glob.glob(os.path.join(data_dir, "*.csv")))
+        return [p for p in paths if os.path.isfile(p)]
+    except Exception:
+        return []
+
+def _auto_detect_nhl_id_sources(data_dir: str) -> list[str]:
+    """
+    Heuristic: prefer files with both 'nhl' and 'id' in filename, then anything with 'nhl' or 'id'.
+    """
+    files = _list_csv_files(data_dir)
+    scored = []
+    for p in files:
+        name = os.path.basename(p).lower()
+        score = 0
+        if "nhl" in name and "id" in name:
+            score += 50
+        if "nhl" in name:
+            score += 10
+        if "id" in name:
+            score += 8
+        if "source" in name:
+            score += 4
+        if "cache" in name:
+            score -= 2
+        if "report" in name:
+            score -= 5
+        if "master" in name:
+            score -= 10
+        scored.append((score, p))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = [p for s, p in scored if s >= 10]
+    return top if top else [p for _, p in scored]
+
+def _detect_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    cols = {c.lower(): c for c in df.columns}
+    for cand in candidates:
+        c = cols.get(cand.lower())
+        if c:
+            return c
+    return None
+
+def _normalize_player_series(s: pd.Series) -> pd.Series:
+    s2 = s.astype(str).fillna("").str.strip().str.lower()
+    s2 = s2.str.replace(r"\s+", " ", regex=True)
+    s2 = s2.str.replace(r"[^a-z0-9 \-'.]", "", regex=True)
+    return s2
+
+def _apply_nhl_id_source_to_players(players_path: str, source_path: str) -> tuple[bool, str]:
+    """
+    Merge NHL_ID from a detected source CSV into hockey.players.csv (by Player name).
+    Returns (ok, message).
+    """
+    if not os.path.exists(players_path):
+        return False, f"players file introuvable: {players_path}"
+    if not source_path or not os.path.exists(source_path):
+        return False, f"source introuvable: {source_path}"
+
+    try:
+        players = pd.read_csv(players_path, low_memory=False)
+        src = pd.read_csv(source_path, low_memory=False)
+    except Exception as e:
+        return False, f"lecture CSV impossible: {e}"
+
+    p_name = _detect_col(players, ["Player", "Skaters", "Name", "Full Name"])
+    s_name = _detect_col(src, ["Player", "Skaters", "Name", "Full Name"])
+    s_id = _detect_col(src, ["NHL_ID", "nhl_id", "NHL ID", "playerId", "player_id", "nhlPlayerId", "id"])
+    if s_id is None:
+        return False, "colonne NHL_ID introuvable dans la source (ex: NHL_ID / playerId)."
+    if p_name is None or s_name is None:
+        return False, "impossible de matcher: colonne Player manquante dans players ou la source."
+
+    if "NHL_ID" not in players.columns:
+        players["NHL_ID"] = ""
+
+    before_filled = int(players["NHL_ID"].astype(str).str.strip().ne("").sum())
+
+    src2 = src.copy()
+    src2["__sname__"] = _normalize_player_series(src2[s_name])
+    src2["__sid__"] = src2[s_id].astype(str).str.strip()
+    src2 = src2[src2["__sid__"].ne("") & src2["__sid__"].str.lower().ne("nan")]
+    src_map = src2.drop_duplicates(subset=["__sname__"])[["__sname__", "__sid__"]]
+
+    merged = players.copy()
+    merged["__pname__"] = _normalize_player_series(merged[p_name])
+    merged = merged.merge(src_map, how="left", left_on="__pname__", right_on="__sname__")
+
+    blank = merged["NHL_ID"].astype(str).str.strip().eq("")
+    got = merged["__sid__"].astype(str).str.strip()
+    okmask = got.ne("") & got.str.lower().ne("nan")
+    merged.loc[blank & okmask, "NHL_ID"] = got[blank & okmask]
+
+    merged = merged.drop(columns=[c for c in ["__pname__", "__sname__", "__sid__"] if c in merged.columns], errors="ignore")
+
+    after_filled = int(merged["NHL_ID"].astype(str).str.strip().ne("").sum())
+    added = after_filled - before_filled
+
+    ok, err = _atomic_write_df(merged, players_path)
+    if not ok:
+        return False, f"écriture players impossible: {err}"
+
+    return True, f"NHL_ID appliqués: +{added} (total NHL_ID non vides: {after_filled})"
+
 
 def _pick_name_col(df: pd.DataFrame) -> str | None:
     if df is None or df.empty:
