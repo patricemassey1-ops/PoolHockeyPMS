@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+DATA_DIR = os.getenv("DATA_DIR", "data")
 import os
 import glob
 import re
