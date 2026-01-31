@@ -507,6 +507,10 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             st.caption(f"Colonnes source: {list(source_df.columns)}")
             return
 
+        # --- Stats AVANT
+        a0 = audit_nhl_ids(df_t, t_id_col)
+        st.caption(f"Avant: total={a0['total']}, avec NHL_ID={a0['with_id']}, manquants={a0['missing']} ({a0['missing_pct']:.1f}%), doublons={a0['dup_cnt']} ({a0['dup_pct']:.1f}%).")
+
         df2, stats = recover_from_source(
             df_t,
             source_df,
