@@ -60,8 +60,22 @@ def _safe_read_csv(path: str) -> pd.DataFrame:
         return pd.read_csv(path, low_memory=False, encoding="latin-1")
 
 def _atomic_write_csv(df: pd.DataFrame, out_path: str) -> None:
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8", newline="") as tmp:
+    """Write CSV atomically on the SAME filesystem as out_path.
+
+    Streamlit Cloud / some Linux setups may mount /tmp on a different device than your repo,
+    causing: OSError: [Errno 18] Invalid cross-device link.
+    Fix: create the temp file in the target directory, then os.replace().
+    """
+    out_dir = os.path.dirname(out_path) or "."
+    os.makedirs(out_dir, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        delete=False,
+        suffix=".csv",
+        dir=out_dir,
+        encoding="utf-8",
+        newline="",
+    ) as tmp:
         tmp_path = tmp.name
         df.to_csv(tmp_path, index=False)
     os.replace(tmp_path, out_path)
