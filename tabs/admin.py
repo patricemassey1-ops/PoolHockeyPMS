@@ -1,5 +1,8 @@
 # tabs/admin.py — SAFE MINI (NHL_ID tools + prod lock + audit/heatmap)
-# NOTE: This file is intentionally self-contained to avoid NameError/indent issues.
+# Corrige:
+# - Crash heatmap (matplotlib optionnel)
+# - Mauvais mapping de colonnes (ex: "nul_id" doit être dans team)
+# - Évite le fallback dangereux cols[0] pour id/name
 
 from __future__ import annotations
 
@@ -57,8 +60,102 @@ def _safe_col(df: pd.DataFrame, col: str) -> pd.Series:
 
 
 def _is_prod() -> bool:
-    # simple prod detector (env var)
     return str(os.environ.get("PMS_ENV", "")).strip().lower() in {"prod", "production"}
+
+
+# =========================
+# Column detection (robuste)
+# =========================
+def _first_existing(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    cols = set(map(str, df.columns))
+    for c in candidates:
+        if c in cols:
+            return c
+    # try case-insensitive
+    low_map = {str(c).lower(): str(c) for c in df.columns}
+    for c in candidates:
+        if c.lower() in low_map:
+            return low_map[c.lower()]
+    return None
+
+
+def detect_columns(df: pd.DataFrame) -> Tuple[str, str, str | None]:
+    """
+    Retourne (id_col, name_col, team_col) avec heuristiques.
+    Important: si 'nul_id' existe, c'est un candidat fort pour 'team'.
+    """
+    id_candidates = [
+        "NHL_ID", "nhl_id", "nhlid", "NHLID", "nhlId", "NHL Id", "NHL-ID", "player_id", "id_nhl"
+    ]
+    name_candidates = [
+        "Player", "player", "player_name", "name", "Name", "Full Name", "full_name",
+        "Nom", "nom", "Joueur", "joueur"
+    ]
+    team_candidates = [
+        "Team", "team", "Equipe", "équipe", "team_name", "TeamName", "club",
+        "Owner", "owner", "GM", "gm",
+        # ton cas: nul_id représente l'équipe
+        "nul_id", "NUL_ID", "nulId"
+    ]
+
+    id_col = _first_existing(df, id_candidates)
+    name_col = _first_existing(df, name_candidates)
+    team_col = _first_existing(df, team_candidates)
+
+    # Fallbacks raisonnables: ne JAMAIS mapper id_col sur cols[0]
+    if id_col is None:
+        id_col = "NHL_ID"
+        if id_col not in df.columns:
+            df[id_col] = np.nan
+
+    if name_col is None:
+        # tente une autre stratégie: trouver une colonne "texte" qui n'est pas team/id
+        for c in df.columns:
+            if str(c) == id_col or (team_col and str(c) == team_col):
+                continue
+            s = df[c]
+            if s.dtype == object:
+                name_col = str(c)
+                break
+        if name_col is None:
+            # dernier recours: crée une colonne vide
+            name_col = "Player"
+            if name_col not in df.columns:
+                df[name_col] = ""
+
+    # Heuristique: si name_col ressemble à des noms d'équipe (Whalers, Canadiens, etc.)
+    # et qu'on n'a pas de team_col correct, on swap.
+    known_teams = {
+        "whalers", "red_wings", "predateurs", "nordiques", "cracheurs", "canadiens",
+        "red wings", "predators", "canadiens", "nordiques"
+    }
+
+    def _teamish_ratio(series: pd.Series) -> float:
+        if series is None or series.empty:
+            return 0.0
+        vals = series.astype(str).fillna("").str.strip().str.lower()
+        vals = vals[vals != ""]
+        if vals.empty:
+            return 0.0
+        return float(vals.isin(known_teams).mean())
+
+    # Si "nul_id" existe, on force team_col = nul_id (c'est ton besoin)
+    nul_team = _first_existing(df, ["nul_id", "NUL_ID", "nulId"])
+    if nul_team:
+        team_col = nul_team
+
+    # Sinon, si name_col est très team-ish et team_col est None -> swap vers une autre colonne name.
+    if team_col is None:
+        r = _teamish_ratio(df[name_col]) if name_col in df.columns else 0.0
+        if r >= 0.30:
+            # name_col contient probablement l'équipe
+            team_col = name_col
+            # cherche une vraie colonne joueur
+            alt_name = _first_existing(df, name_candidates)
+            if alt_name and alt_name != team_col:
+                name_col = alt_name
+
+    return id_col, name_col, team_col
 
 
 # =========================
@@ -71,8 +168,14 @@ def build_audit_report(
     team_col: str | None = None,
 ) -> pd.DataFrame:
     df = players_df.copy()
-    if team_col and team_col not in df.columns:
-        team_col = None
+
+    # si team_col absent, tenter de le détecter (incluant nul_id)
+    if team_col is None or team_col not in df.columns:
+        _, _, auto_team = detect_columns(df)
+        if auto_team in df.columns:
+            team_col = auto_team
+        else:
+            team_col = None
 
     out = pd.DataFrame(
         {
@@ -82,31 +185,27 @@ def build_audit_report(
         }
     )
 
-    # basic missing
-    out["missing"] = out["nhl_id"].isna() | (out["nhl_id"].astype(str).str.strip() == "") | (out["nhl_id"].astype(str).str.lower() == "nan")
+    out["missing"] = out["nhl_id"].isna() | (
+        out["nhl_id"].astype(str).str.strip().str.lower().isin({"", "nan", "none"})
+    )
 
-    # duplicates among present IDs
     present = out.loc[~out["missing"], "nhl_id"].astype(str).str.strip()
     dup_mask = present.duplicated(keep=False)
     out["duplicate_id"] = False
     out.loc[~out["missing"], "duplicate_id"] = dup_mask.values
 
-    # confidence heuristic:
-    #  - missing -> 0.0
-    #  - duplicate -> 0.2
-    #  - otherwise -> 0.95
     out["confidence"] = np.where(out["missing"], 0.0, np.where(out["duplicate_id"], 0.2, 0.95))
-
     return out
 
 
 def confidence_heatmap(df_audit: pd.DataFrame) -> pd.DataFrame:
-    # bins
     bins = [0.0, 0.6, 0.75, 0.85, 1.01]
     labels = ["<0.60", "0.60-0.75", "0.75-0.85", ">=0.85"]
     conf = pd.to_numeric(df_audit.get("confidence", np.nan), errors="coerce")
     bucket = pd.cut(conf.fillna(0.0), bins=bins, labels=labels, right=False)
+
     teams = df_audit.get("team", pd.Series(["(none)"] * len(df_audit))).fillna("(none)").astype(str)
+
     piv = pd.pivot_table(
         pd.DataFrame({"team": teams, "bucket": bucket.astype(str)}),
         index="team",
@@ -115,7 +214,7 @@ def confidence_heatmap(df_audit: pd.DataFrame) -> pd.DataFrame:
         aggfunc="count",
         fill_value=0,
     )
-    # stable column order
+
     for lab in labels:
         if lab not in piv.columns:
             piv[lab] = 0
@@ -139,7 +238,6 @@ def _hex_blend(c1: str, c2: str, t: float) -> str:
 
 
 def _styler_heatmap_css(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
-    # CSS heatmap (red -> amber -> green), works without matplotlib
     vals = df.to_numpy(dtype=float)
     finite = np.isfinite(vals)
     vmin = float(np.nanmin(vals)) if finite.any() else 0.0
@@ -156,9 +254,9 @@ def _styler_heatmap_css(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
         t = (xv - vmin) / denom
         t = max(0.0, min(1.0, float(t)))
         if t < 0.5:
-            c = _hex_blend("#7f1d1d", "#92400e", t / 0.5)  # red -> amber
+            c = _hex_blend("#7f1d1d", "#92400e", t / 0.5)
         else:
-            c = _hex_blend("#92400e", "#14532d", (t - 0.5) / 0.5)  # amber -> green
+            c = _hex_blend("#92400e", "#14532d", (t - 0.5) / 0.5)
         return f"background-color:{c};color:#f9fafb;font-weight:700;text-align:center;"
 
     def apply_fn(_: pd.DataFrame):
@@ -168,12 +266,10 @@ def _styler_heatmap_css(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
 
 
 def render_confidence_heatmap(heat: pd.DataFrame) -> None:
-    """Render heatmap safely. Uses background_gradient if matplotlib exists, else CSS fallback."""
     if heat is None or getattr(heat, "empty", True):
         st.info("Heatmap: aucune donnée à afficher.")
         return
 
-    # Prefer pandas background_gradient if matplotlib is available (nicer)
     try:
         import matplotlib  # noqa: F401
         st.dataframe(heat.style.background_gradient(axis=None), use_container_width=True)
@@ -181,7 +277,6 @@ def render_confidence_heatmap(heat: pd.DataFrame) -> None:
     except Exception:
         pass
 
-    # Fallback: CSS-only styler (no matplotlib)
     try:
         st.dataframe(_styler_heatmap_css(heat), use_container_width=True)
         st.caption("ℹ️ Heatmap affichée en mode SAFE (matplotlib non disponible).")
@@ -216,16 +311,14 @@ def recover_from_source(
     s_id = _safe_col(s, id_col).astype(str).str.strip()
     s_id = s_id.where(~s_id.str.lower().isin({"", "nan", "none"}), other=np.nan)
 
-    # name-only join
     join = s[["_nname"]].copy()
     join["src_nhl_id"] = s_id
     join = join.dropna(subset=["src_nhl_id"]).drop_duplicates(subset=["_nname"], keep="first")
 
     merged = p.merge(join, on="_nname", how="left")
 
-    # fill only missing IDs
     cur = _safe_col(merged, id_col).astype(str).str.strip()
-    cur_missing = cur.str.lower().isin({"", "nan", "none"}) | cur.isna()
+    cur_missing = cur.isna() | cur.str.lower().isin({"", "nan", "none"})
 
     fillable = cur_missing & merged["src_nhl_id"].notna()
     filled_n = int(fillable.sum())
@@ -261,7 +354,6 @@ def cleanup_duplicates_fallback(df: pd.DataFrame, id_col: str) -> Tuple[pd.DataF
     if present.empty:
         return out, 0
 
-    # if dup, blank the later occurrences (fallback cleanup)
     dup_mask = present.duplicated(keep="first")
     dup_ids = present.loc[dup_mask].index
     n = int(len(dup_ids))
@@ -278,13 +370,6 @@ def cleanup_duplicates_fallback(df: pd.DataFrame, id_col: str) -> Tuple[pd.DataF
 # Main render (call this from app.py)
 # =========================
 def render(ctx: Optional[Dict[str, Any]] = None) -> None:
-    """
-    ctx expected keys (optional):
-      - season: str
-      - data_dir: str
-      - is_admin: bool
-      - prod_lock: bool
-    """
     ctx = ctx or {}
     season = str(ctx.get("season") or "2025-2026")
     data_dir = str(ctx.get("data_dir") or "data")
@@ -297,29 +382,24 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
         st.error("🔒 Mode PROD: accès admin requis.")
         st.stop()
 
-    # ---- source selection
     st.markdown("### Source de récupération (optionnel)")
     up = st.file_uploader("Ou uploader un CSV source", type=["csv"])
+
     src_paths = [
         os.path.join(data_dir, "equipes_joueurs_2025-2026.csv"),
         os.path.join(data_dir, "hockey.players.csv"),
     ]
     pick = st.selectbox("Récupérer NHL_ID depuis…", options=src_paths, index=0)
 
-    # load target
     target_path = os.path.join(data_dir, "equipes_joueurs_2025-2026.csv")
     df, err = load_csv(target_path)
     if err:
         st.error(err)
         st.stop()
 
-    # detect columns
-    cols = list(df.columns)
-    id_col = "NHL_ID" if "NHL_ID" in cols else ("nhl_id" if "nhl_id" in cols else cols[0])
-    name_col = "Player" if "Player" in cols else ("player_name" if "player_name" in cols else cols[0])
-    team_col = "Team" if "Team" in cols else ("team" if "team" in cols else None)
+    # robust detect
+    id_col, name_col, team_col = detect_columns(df)
 
-    # ---- verify
     if st.button("🔎 Vérifier l'état des NHL_ID"):
         audit_df = build_audit_report(df, id_col, name_col, team_col)
 
@@ -342,7 +422,6 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
         st.markdown("#### 🧩 Heatmap de confiance (par équipe × bucket)")
         render_confidence_heatmap(heat)
 
-        # CSV audit download
         out = io.StringIO()
         audit_df.to_csv(out, index=False)
         st.download_button(
@@ -354,7 +433,6 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
 
     st.divider()
 
-    # ---- recovery action
     st.markdown("### 🔁 Associer / récupérer NHL_ID")
     if up is not None:
         src_df = pd.read_csv(up, low_memory=False)
@@ -366,18 +444,14 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
             src_df = pd.DataFrame()
         src_tag = os.path.basename(pick)
 
-    # pick source cols (best effort)
-    src_cols = list(src_df.columns) if isinstance(src_df, pd.DataFrame) else []
-    src_id_col = "NHL_ID" if "NHL_ID" in src_cols else ("nhl_id" if "nhl_id" in src_cols else (src_cols[0] if src_cols else id_col))
-    src_name_col = "Player" if "Player" in src_cols else ("player_name" if "player_name" in src_cols else (src_cols[0] if src_cols else name_col))
-    src_team_col = "Team" if "Team" in src_cols else ("team" if "team" in src_cols else None)
+    # detect cols for source too (robuste)
+    if isinstance(src_df, pd.DataFrame) and not src_df.empty:
+        src_id_col, src_name_col, src_team_col = detect_columns(src_df)
+    else:
+        src_id_col, src_name_col, src_team_col = id_col, name_col, team_col
 
-    # confidence slider
     conf = st.slider("Score de confiance appliqué aux IDs récupérés", min_value=0.50, max_value=0.99, value=0.85, step=0.01)
-
-    # duplication guard
     max_dup_pct = st.slider("🛑 Bloquer toute écriture si duplication > X %", min_value=0, max_value=50, value=5, step=1)
-
     do_cleanup = st.checkbox("🧼 Nettoyage automatique des doublons (fallback) avant write", value=True)
 
     if st.button("🧩 Associer NHL_ID (depuis source)"):
@@ -387,10 +461,9 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
 
         before_dup = duplicate_rate(df, id_col)
 
-        # match by name only for now (safe mini)
         merged, dbg = recover_from_source(
             df,
-            src_df,
+            src_df.rename(columns={src_id_col: id_col, src_name_col: name_col}, errors="ignore"),
             id_col=id_col,
             name_col=name_col,
             team_col=team_col,
@@ -398,19 +471,19 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
             conf=float(conf),
         )
 
-        # optional fallback cleanup
         cleaned_n = 0
         if do_cleanup:
             merged, cleaned_n = cleanup_duplicates_fallback(merged, id_col)
 
         after_dup = duplicate_rate(merged, id_col)
 
-        st.success(f"✅ Récupération terminée: {dbg.get('filled', 0)} IDs remplis. Doublons avant: {before_dup:.1f}%, après: {after_dup:.1f}% (nettoyés: {cleaned_n}).")
+        st.success(
+            f"✅ Récupération terminée: {dbg.get('filled', 0)} IDs remplis. "
+            f"Doublons avant: {before_dup:.1f}%, après: {after_dup:.1f}% (nettoyés: {cleaned_n})."
+        )
 
-        # block write if too many duplicates
-        dup_pct = after_dup
-        if dup_pct > float(max_dup_pct):
-            st.error(f"🔒 Écriture BLOQUÉE: duplication {dup_pct:.1f}% > seuil {max_dup_pct}%.")
+        if after_dup > float(max_dup_pct):
+            st.error(f"🔒 Écriture BLOQUÉE: duplication {after_dup:.1f}% > seuil {max_dup_pct}%.")
             st.stop()
 
         ok, save_err = save_csv(merged, target_path)
@@ -420,8 +493,7 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
 
         st.info(f"💾 Sauvegardé: {target_path}")
 
-        # Show audit + downloads after write
-        audit_df = build_audit_report(df, id_col, name_col, team_col)
+        audit_df = build_audit_report(merged, id_col, name_col, team_col)
         heat = confidence_heatmap(audit_df)
         st.markdown("#### 🧩 Heatmap de confiance (par équipe × bucket)")
         render_confidence_heatmap(heat)
@@ -436,7 +508,6 @@ def render(ctx: Optional[Dict[str, Any]] = None) -> None:
         )
 
 
-# Backward-compat alias (si ton app appelle _render_tools)
 def _render_tools(*args: Any, **kwargs: Any) -> None:
     ctx = None
     if args and isinstance(args[0], dict):
