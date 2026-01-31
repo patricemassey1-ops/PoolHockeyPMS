@@ -68,10 +68,18 @@ def save_csv(df: pd.DataFrame, path: str, *, safe_mode: bool = True, allow_zero:
 # Master Builder helpers
 # =========================
 def _atomic_write_df(df: pd.DataFrame, out_path: str) -> Tuple[bool, str | None]:
-    """Atomic CSV write to avoid partial files if crash."""
+    """Atomic CSV write on the SAME filesystem as out_path (avoids Errno 18 cross-device link)."""
     try:
-        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8", newline="") as tmp:
+        out_dir = os.path.dirname(out_path) or "."
+        os.makedirs(out_dir, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            delete=False,
+            suffix=".csv",
+            dir=out_dir,
+            encoding="utf-8",
+            newline="",
+        ) as tmp:
             tmp_path = tmp.name
             df.to_csv(tmp_path, index=False)
         os.replace(tmp_path, out_path)
