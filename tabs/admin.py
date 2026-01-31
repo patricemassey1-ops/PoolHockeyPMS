@@ -341,8 +341,43 @@ def render(ctx: Dict[str, Any] | None = None) -> None:
     # include any other CSV in /data (so dropdown never "forgets" a file)
     candidates.extend(_list_csv_in_data_dir(data_dir))
 
-    # de-dupe + never allow selecting the target file as the source
-    candidates = [c for c in sorted(set(candidates)) if os.path.abspath(c) != os.path.abspath(players2)]
+    # de-dupe + normalize paths + try to locate special sources even if written in another /data
+    def _abs(p: str) -> str:
+        try:
+            return os.path.abspath(p)
+        except Exception:
+            return str(p)
+
+    # look for nhl_search_players.csv in common locations (some deployments write to another cwd)
+    special_names = ["nhl_search_players.csv"]
+    probe_dirs = [
+        data_dir,
+        os.path.join(os.getcwd(), "data"),
+        "/mount/src/poolhockeypms/data",
+        "/mount/src/poolhockey/data",
+        "/mount/src/poolhockeypms/Data",
+        "/mount/src/poolhockey/Data",
+    ]
+    for d in probe_dirs:
+        for sn in special_names:
+            p = os.path.join(d, sn)
+            if os.path.exists(p):
+                candidates.append(p)
+
+    # normalize + unique
+    cand_abs = {}
+    for c in candidates:
+        cand_abs[_abs(c)] = c
+    candidates = [cand_abs[k] for k in sorted(cand_abs.keys())]
+
+    # helpful diagnostics for missing sources
+    with st.expander("🔎 Diagnostic sources (auto)", expanded=False):
+        st.write("data_dir:", data_dir)
+        st.write("cwd:", os.getcwd())
+        st.write("probe_dirs:", probe_dirs)
+        found_nhl = [os.path.join(d, "nhl_search_players.csv") for d in probe_dirs if os.path.exists(os.path.join(d, "nhl_search_players.csv"))]
+        st.write("found nhl_search_players.csv:", found_nhl if found_nhl else "NONE")
+        st.write("candidates (csv):", candidates)
 
     upload = st.file_uploader("Ou uploader un CSV source", type=["csv"], accept_multiple_files=False, key="src_upload")
     source_df = None
@@ -381,7 +416,12 @@ def render(ctx: Dict[str, Any] | None = None) -> None:
             key="src_choice",
         )
         if choice != "Aucune (API NHL uniquement)":
-            source_df, errS = load_csv(choice)
+            # prevent choosing the target file as its own source (would be a no-op / confusing)
+            if os.path.abspath(choice) == os.path.abspath(players2):
+                st.warning("Source = fichier cible. Choisis une autre source (ex: nhl_search_players.csv).")
+                source_df = None
+            else:
+                source_df, errS = load_csv(choice)
             if errS:
                 st.error(errS)
                 source_df = None
