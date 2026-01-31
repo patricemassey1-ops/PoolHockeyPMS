@@ -14,12 +14,149 @@ from __future__ import annotations
 import os
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
+
+# Google Drive (optional)
+try:
+    from google.oauth2.credentials import Credentials  # type: ignore
+    from googleapiclient.discovery import build  # type: ignore
+    from googleapiclient.http import MediaIoBaseDownload  # type: ignore
+except Exception:
+    Credentials = None  # type: ignore
+    build = None  # type: ignore
+    MediaIoBaseDownload = None  # type: ignore
+
+
+def _drive_oauth_available() -> bool:
+    try:
+        sec = getattr(st, "secrets", {}) or {}
+        # expected keys in secrets:
+        # [gdrive_oauth] client_id, client_secret, refresh_token, token_uri (optional), folder_id (optional)
+        return ("gdrive_oauth" in sec) and bool(sec["gdrive_oauth"].get("client_id")) and bool(sec["gdrive_oauth"].get("client_secret")) and bool(sec["gdrive_oauth"].get("refresh_token"))
+    except Exception:
+        return False
+
+def _drive_get_folder_id_default() -> str:
+    try:
+        sec = getattr(st, "secrets", {}) or {}
+        fid = (sec.get("gdrive_oauth", {}) or {}).get("folder_id") or ""
+        return str(fid).strip()
+    except Exception:
+        return ""
+
+def _drive_service():
+    """
+    Returns Google Drive service using OAuth refresh token from st.secrets[gdrive_oauth].
+    Requires google-api-python-client + google-auth installed.
+    """
+    if Credentials is None or build is None:
+        raise RuntimeError("Libs Google Drive manquantes (google-api-python-client / google-auth).")
+
+    sec = getattr(st, "secrets", {}) or {}
+    g = sec.get("gdrive_oauth", {}) or {}
+
+    client_id = str(g.get("client_id") or "").strip()
+    client_secret = str(g.get("client_secret") or "").strip()
+    refresh_token = str(g.get("refresh_token") or "").strip()
+    token_uri = str(g.get("token_uri") or "https://oauth2.googleapis.com/token").strip()
+
+    if not (client_id and client_secret and refresh_token):
+        raise RuntimeError("Secrets OAuth Drive incomplets (client_id/client_secret/refresh_token).")
+
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri=token_uri,
+        client_id=client_id,
+        client_secret=client_secret,
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    return build("drive", "v3", credentials=creds)
+
+def _drive_list_csv_files(folder_id: str, page_size: int = 200) -> list[dict]:
+    """
+    List CSV files in a Drive folder. Returns list of dicts: id,name,modifiedTime,size,webViewLink (if available).
+    """
+    svc = _drive_service()
+    q = f"'{folder_id}' in parents and trashed=false and mimeType='text/csv'"
+    res = []
+    page_token = None
+    while True:
+        resp = svc.files().list(
+            q=q,
+            fields="nextPageToken, files(id,name,modifiedTime,size,webViewLink)",
+            pageSize=page_size,
+            pageToken=page_token,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        res.extend(resp.get("files", []) or [])
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return res
+
+def _score_drive_file(name: str) -> int:
+    n = (name or "").lower()
+    score = 0
+    if "nhl_search" in n:
+        score += 80
+    if "nhl" in n and "id" in n:
+        score += 60
+    if "hockey.players" in n and "master" not in n:
+        score += 50
+    if "puckpedia" in n:
+        score += 40
+    if "master" in n:
+        score += 15
+    if "report" in n or "audit" in n:
+        score += 10
+    if n.endswith(".csv"):
+        score += 5
+    return score
+
+def _drive_pick_auto(files: list[dict]) -> dict | None:
+    """
+    Pick best file automatically by (score, modifiedTime).
+    """
+    if not files:
+        return None
+    def parse_time(t):
+        try:
+            # drive uses RFC3339
+            return datetime.fromisoformat(t.replace("Z", "+00:00"))
+        except Exception:
+            return datetime(1970,1,1,tzinfo=timezone.utc)
+    ranked = sorted(
+        files,
+        key=lambda f: (_score_drive_file(f.get("name","")), parse_time(f.get("modifiedTime",""))),
+        reverse=True,
+    )
+    return ranked[0]
+
+def _drive_download_file(file_id: str, out_path: str) -> tuple[bool, str]:
+    """
+    Download a Drive file to out_path.
+    """
+    try:
+        svc = _drive_service()
+        request = svc.files().get_media(fileId=file_id, supportsAllDrives=True)
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
 import glob
 import re
 import io
 import json
 import time
 import tempfile
+from datetime import datetime, timezone
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -470,6 +607,168 @@ def _build_fill_preview_table(target_path: str, source_path: str, limit: int = 5
                    for cf, ib, ia in zip(can_fill.tolist(), is_blank.tolist(), is_amb.tolist())]
     })
     out = out[out["reason"].eq("fill")].head(int(limit))
+    return out
+
+
+def _audit_nhl_id_suspects(players_path: str, master_path: str, nhl_search_path: str, after_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """
+    Audit NHL_ID suspect (idiot-proof):
+      - même NHL_ID attribué à plusieurs noms (duplicate id)
+      - même nom attribué à plusieurs NHL_ID (duplicate name)
+      - mismatch Team/Position/Jersey entre master et nhl_search (si dispo)
+    Retourne un DataFrame (toutes anomalies) avec une colonne 'issue'.
+    """
+    def _safe_read(path: str) -> pd.DataFrame:
+        try:
+            if path and os.path.exists(path):
+                return pd.read_csv(path, low_memory=False)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    dfp = _safe_read(players_path)
+    dfm = after_df if isinstance(after_df, pd.DataFrame) and (not after_df.empty) else _safe_read(master_path)
+    dfs = _safe_read(nhl_search_path)
+
+    # pick best table for checking attributes (prefer master)
+    df = dfm if not dfm.empty else dfp
+    if df.empty:
+        return pd.DataFrame(columns=["issue","NHL_ID","Player","detail"])
+
+    # standardize cols
+    name_col = _detect_col(df, ["Player","Skaters","Name","Full Name"]) or "Player"
+    if name_col not in df.columns:
+        df[name_col] = ""
+    if "NHL_ID" not in df.columns:
+        df["NHL_ID"] = ""
+
+    out_rows = []
+
+    # 1) Duplicate NHL_ID -> multiple players
+    tmp = df[[name_col, "NHL_ID"]].copy()
+    tmp["NHL_ID"] = tmp["NHL_ID"].astype(str).str.strip()
+    tmp[name_col] = tmp[name_col].astype(str).str.strip()
+    tmp = tmp[tmp["NHL_ID"].ne("") & tmp["NHL_ID"].str.lower().ne("nan")]
+    if not tmp.empty:
+        g = tmp.groupby("NHL_ID")[name_col].nunique().reset_index(name="unique_players")
+        dup_ids = g[g["unique_players"] > 1]["NHL_ID"].tolist()
+        if dup_ids:
+            for nhl_id in dup_ids[:5000]:
+                players = tmp[tmp["NHL_ID"] == nhl_id][name_col].dropna().astype(str).tolist()
+                players = sorted(list(dict.fromkeys([p for p in players if p.strip()])))[:25]
+                out_rows.append({
+                    "issue": "duplicate_nhl_id",
+                    "NHL_ID": nhl_id,
+                    "Player": " | ".join(players),
+                    "detail": f"{len(players)}+ noms pour le même NHL_ID"
+                })
+
+    # 2) Duplicate name -> multiple NHL_ID
+    tmp2 = df[[name_col, "NHL_ID"]].copy()
+    tmp2["NHL_ID"] = tmp2["NHL_ID"].astype(str).str.strip()
+    tmp2[name_col] = tmp2[name_col].astype(str).str.strip()
+    tmp2 = tmp2[tmp2[name_col].ne("") & tmp2[name_col].str.lower().ne("nan")]
+    if not tmp2.empty:
+        g2 = tmp2.groupby(name_col)["NHL_ID"].nunique().reset_index(name="unique_ids")
+        dup_names = g2[g2["unique_ids"] > 1][name_col].tolist()
+        if dup_names:
+            for nm in dup_names[:5000]:
+                ids = tmp2[tmp2[name_col] == nm]["NHL_ID"].dropna().astype(str).tolist()
+                ids = sorted(list(dict.fromkeys([i for i in ids if i.strip()])))[:25]
+                out_rows.append({
+                    "issue": "duplicate_player_name",
+                    "NHL_ID": " | ".join(ids),
+                    "Player": nm,
+                    "detail": f"{len(ids)}+ NHL_ID pour le même nom"
+                })
+
+    # 3) Mismatch Team/Position/Jersey between master and nhl_search (if available)
+    if not dfm.empty and not dfs.empty:
+        # detect cols
+        team_m = _detect_col(dfm, ["Team","TeamAbbrev","teamAbbrev","NHL Team"])
+        pos_m  = _detect_col(dfm, ["Position","Pos"])
+        jer_m  = _detect_col(dfm, ["Jersey#","Jersey","SweaterNumber"])
+        dob_m  = _detect_col(dfm, ["DOB","BirthDate","birthDate"])
+
+        team_s = _detect_col(dfs, ["Team","team","teamAbbrev"])
+        pos_s  = _detect_col(dfs, ["Position","Pos","position"])
+        jer_s  = _detect_col(dfs, ["Jersey#","Jersey","sweaterNumber"])
+        dob_s  = _detect_col(dfs, ["DOB","BirthDate","birthDate"])
+
+        # only if we have NHL_ID
+        if "NHL_ID" in dfm.columns and "NHL_ID" in dfs.columns:
+            msub = dfm.copy()
+            ssub = dfs.copy()
+            msub["NHL_ID"] = msub["NHL_ID"].astype(str).str.strip()
+            ssub["NHL_ID"] = ssub["NHL_ID"].astype(str).str.strip()
+            msub = msub[msub["NHL_ID"].ne("") & msub["NHL_ID"].str.lower().ne("nan")]
+            ssub = ssub[ssub["NHL_ID"].ne("") & ssub["NHL_ID"].str.lower().ne("nan")]
+
+            join_cols = ["NHL_ID"]
+            keep_m = ["NHL_ID", name_col]
+            keep_s = ["NHL_ID"]
+            if team_m: keep_m.append(team_m)
+            if pos_m: keep_m.append(pos_m)
+            if jer_m: keep_m.append(jer_m)
+            if dob_m: keep_m.append(dob_m)
+            if team_s: keep_s.append(team_s)
+            if pos_s: keep_s.append(pos_s)
+            if jer_s: keep_s.append(jer_s)
+            if dob_s: keep_s.append(dob_s)
+
+            msub = msub[keep_m].copy()
+            ssub = ssub[keep_s].copy()
+
+            j = msub.merge(ssub, how="inner", on="NHL_ID", suffixes=("_m","_s"))
+
+            def _cmp(a, b):
+                aa = a.astype(str).str.strip()
+                bb = b.astype(str).str.strip()
+                ok = aa.ne("") & aa.str.lower().ne("nan") & bb.ne("") & bb.str.lower().ne("nan")
+                return ok & (aa != bb)
+
+            # Team mismatch
+            if team_m and team_s:
+                mism = j[_cmp(j[f"{team_m}_m"], j[f"{team_s}_s"])].head(5000)
+                for _, r in mism.iterrows():
+                    out_rows.append({
+                        "issue": "mismatch_team",
+                        "NHL_ID": r["NHL_ID"],
+                        "Player": r.get(name_col, ""),
+                        "detail": f"master={r.get(team_m + '_m','')} vs search={r.get(team_s + '_s','')}"
+                    })
+            # Position mismatch
+            if pos_m and pos_s:
+                mism = j[_cmp(j[f"{pos_m}_m"], j[f"{pos_s}_s"])].head(5000)
+                for _, r in mism.iterrows():
+                    out_rows.append({
+                        "issue": "mismatch_position",
+                        "NHL_ID": r["NHL_ID"],
+                        "Player": r.get(name_col, ""),
+                        "detail": f"master={r.get(pos_m + '_m','')} vs search={r.get(pos_s + '_s','')}"
+                    })
+            # Jersey mismatch
+            if jer_m and jer_s:
+                mism = j[_cmp(j[f"{jer_m}_m"], j[f"{jer_s}_s"])].head(5000)
+                for _, r in mism.iterrows():
+                    out_rows.append({
+                        "issue": "mismatch_jersey",
+                        "NHL_ID": r["NHL_ID"],
+                        "Player": r.get(name_col, ""),
+                        "detail": f"master={r.get(jer_m + '_m','')} vs search={r.get(jer_s + '_s','')}"
+                    })
+            # DOB mismatch (rare but strong signal)
+            if dob_m and dob_s:
+                mism = j[_cmp(j[f"{dob_m}_m"], j[f"{dob_s}_s"])].head(5000)
+                for _, r in mism.iterrows():
+                    out_rows.append({
+                        "issue": "mismatch_dob",
+                        "NHL_ID": r["NHL_ID"],
+                        "Player": r.get(name_col, ""),
+                        "detail": f"master={r.get(dob_m + '_m','')} vs search={r.get(dob_s + '_s','')}"
+                    })
+
+    out = pd.DataFrame(out_rows) if out_rows else pd.DataFrame(columns=["issue","NHL_ID","Player","detail"])
     return out
 
 def _pick_name_col(df: pd.DataFrame) -> str | None:
@@ -1015,6 +1314,67 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 else:
                     st.error("❌ " + msg2)
         st.divider()
+
+    # =====================================================
+    # 📥 Import Drive (CSV) — AUTO + choix manuel (dummy-proof)
+    # =====================================================
+    with st.expander("📥 Importer un CSV depuis Google Drive (AUTO)", expanded=False):
+        st.caption("Import **lecture seule**: liste les CSV d'un dossier Drive et télécharge dans `data/`. Mode AUTO choisit le meilleur fichier (ex: nhl_search_players).")
+        if not _drive_oauth_available():
+            st.warning("Drive OAuth non configuré. Ajoute `st.secrets[gdrive_oauth]` (client_id, client_secret, refresh_token, folder_id).")
+        else:
+            folder_id = st.text_input("Folder ID (Drive)", value=_drive_get_folder_id_default(), key="drive_folder_id")
+            if not folder_id.strip():
+                st.warning("Entre le Folder ID (ou mets-le dans secrets: gdrive_oauth.folder_id).")
+            else:
+                col1, col2 = st.columns([1,1])
+                with col1:
+                    do_list = st.button("🔄 Lister les CSV Drive", use_container_width=True, key="drive_list")
+                with col2:
+                    auto_mode = st.checkbox("AUTO (recommandé)", value=True, key="drive_auto")
+
+                files = st.session_state.get("drive_files_cache", None)
+                if do_list or files is None:
+                    with st.spinner("Liste des fichiers Drive…"):
+                        try:
+                            files = _drive_list_csv_files(folder_id)
+                            st.session_state["drive_files_cache"] = files
+                        except Exception as e:
+                            st.error("❌ Drive list error: " + str(e))
+                            files = []
+
+                if files:
+                    st.success(f"✅ {len(files)} CSV trouvés dans le dossier.")
+                    auto_pick = _drive_pick_auto(files)
+                    if auto_pick:
+                        st.info(f"AUTO sélection: **{auto_pick.get('name','')}** (modifié: {auto_pick.get('modifiedTime','')})")
+
+                    # manual choice (still available)
+                    names = [f.get("name","") for f in files]
+                    idx = 0
+                    if auto_pick and auto_pick.get("name") in names:
+                        idx = names.index(auto_pick.get("name"))
+                    choice = st.selectbox("Choisir un fichier (optionnel)", options=list(range(len(files))), index=idx, format_func=lambda i: files[i].get("name",""), key="drive_choice")
+
+                    selected = auto_pick if auto_mode else files[choice]
+                    if not selected:
+                        st.warning("Aucun fichier sélectionné.")
+                    else:
+                        out_name = st.text_input("Nom local (dans data/)", value=selected.get("name","download.csv"), key="drive_out_name")
+                        out_path = os.path.join(DATA_DIR, os.path.basename(out_name))
+                        st.caption(f"Destination: `{out_path}`")
+
+                        if st.button("⬇️ Télécharger dans data/", type="primary", use_container_width=True, key="drive_download"):
+                            with st.spinner("Téléchargement Drive → data/ …"):
+                                ok, err = _drive_download_file(selected.get("id",""), out_path)
+                            if ok:
+                                st.success(f"✅ Téléchargé: {out_path}")
+                                st.info("Prochain step: retourne dans Master Builder (AUTO-détection locale va le trouver).")
+                            else:
+                                st.error("❌ Download error: " + err)
+                else:
+                    st.info("Aucun fichier listé (clique ‘Lister’).")
+
         master_path = os.path.join(data_dir, "hockey.players_master.csv")
         report_path = os.path.join(data_dir, "master_build_report.csv")
 
@@ -1175,7 +1535,63 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                     enrich_from_nhl=bool(enrich),
                     max_nhl_calls=int(max_calls),
                 )
-                after_df, rep = build_master(cfg)
+                after_df, rep = build_master(cfg, write_output=False)
+
+                # -------------------------------------------------
+                # 🔎 Audit NHL_ID suspect + Mode review (bloque si duplicates)
+                # -------------------------------------------------
+                nhl_search_path = os.path.join(DATA_DIR, "nhl_search_players.csv")
+                suspects_df = _audit_nhl_id_suspects(players_path_dbg, master_path, nhl_search_path, after_df=after_df)
+
+                dup_ids = int((suspects_df["issue"] == "duplicate_nhl_id").sum()) if (isinstance(suspects_df, pd.DataFrame) and "issue" in suspects_df.columns) else 0
+                mism = int(suspects_df["issue"].astype(str).str.startswith("mismatch").sum()) if (isinstance(suspects_df, pd.DataFrame) and "issue" in suspects_df.columns) else 0
+
+                # Always write suspects report (safe)
+                suspects_path = os.path.join(DATA_DIR, "nhl_id_suspects.csv")
+                _atomic_write_df(suspects_df, suspects_path)
+
+                # Block overwrite if duplicate NHL_ID detected (idiot-proof)
+                block_overwrite = st.toggle("🔒 Bloquer l'écriture si NHL_ID suspects", value=True, key=WKEY + "block_suspects")
+                if block_overwrite and dup_ids > 0:
+                    st.error(f"🛑 Écriture bloquée: {dup_ids} cas de NHL_ID dupliqués détectés. Corrige ou confirme manuellement.")
+                    st.caption(f"Rapport: {suspects_path}")
+
+                    # Preview duplicates
+                    st.markdown("**Aperçu (top 200) — NHL_ID suspects**")
+                    st.dataframe(suspects_df.head(200), use_container_width=True, height=320)
+
+                    sus_bytes = _read_file_bytes(suspects_path)
+                    if sus_bytes:
+                        st.download_button(
+                            "📥 Télécharger audit NHL_ID suspect (CSV)",
+                            data=sus_bytes,
+                            file_name=os.path.basename(suspects_path),
+                            mime="text/csv",
+                            use_container_width=True,
+                            key=WKEY + "dl_suspects_block",
+                        )
+
+                    # Write pending files instead of overwriting master
+                    blocked, msgb, pending_master, pending_report = _write_pending_and_gate(after_df, suspects_df, master_path, report_path)
+                    if blocked and msgb not in ("ok", ""):
+                        if msgb not in ("blocked_for_review",):
+                            st.error("❌ " + msgb)
+
+                    confirm_force = st.checkbox("Je confirme sauvegarder le master malgré des NHL_ID suspects", value=False, key=WKEY + "confirm_force_suspects")
+                    if st.button("✅ Sauver master malgré suspects", type="primary", use_container_width=True, disabled=(not confirm_force), key=WKEY + "force_save_master"):
+                        # write the real master now
+                        okm, erm = _atomic_write_df(after_df, master_path)
+                        if okm:
+                            st.success(f"✅ Master écrit malgré suspects: {master_path}")
+                        else:
+                            st.error(f"❌ Échec écriture master: {erm}")
+                    st.stop()
+
+                # If not blocked, proceed to write master
+                okm, erm = _atomic_write_df(after_df, master_path)
+                if not okm:
+                    st.error(f"❌ Échec écriture master: {erm}")
+                    st.stop()
 
             st.success("✅ Étape 3/4 OK — Master généré: " + master_path)
 
@@ -1221,20 +1637,31 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 
         if run_btn:
             # lazy import (évite crash si module absent)
+            # lazy import (évite crash si module absent)
             try:
                 from services.master_builder import build_master, MasterBuildConfig
             except Exception as e:
                 st.error("Impossible d'importer services.master_builder. Assure-toi que le fichier est dans /services/master_builder.py.")
                 st.exception(e)
+                st.stop()
+
+            cfg = MasterBuildConfig(
+                data_dir=data_dir,
+                enrich_from_nhl=bool(enrich),
+                max_nhl_calls=int(max_calls),
+            )
+            with st.spinner("Fusion + enrichissement…"):
+                after_df, rep = build_master(cfg, write_output=False)
+
                 cfg = MasterBuildConfig(
                     data_dir=data_dir,
                     enrich_from_nhl=bool(enrich),
                     max_nhl_calls=int(max_calls),
                 )
                 with st.spinner("Fusion + enrichissement…"):
-                    after_df, rep = build_master(cfg)
+                    after_df, rep = build_master(cfg, write_output=False)
 
-                st.success("✅ Master généré: data/hockey.players_master.csv")
+                st.success("✅ Master écrit: data/hockey.players_master.csv")
                 st.json(rep)
 
                 # Diff + audit
@@ -1529,3 +1956,22 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 # Backward-compat alias (if app expects _render_tools)
 def _render_tools(*args, **kwargs):
     return render(*args, **kwargs)
+
+
+def _write_pending_and_gate(after_df: pd.DataFrame, suspects_df: pd.DataFrame, master_path: str, report_path: str) -> tuple[bool, str, str, str]:
+    """
+    If suspects present, write pending master/audit instead of overwriting the real master.
+    Returns (blocked, message, pending_master_path, pending_report_path)
+    """
+    pending_master = os.path.join(os.path.dirname(master_path) or ".", "_pending_hockey.players_master.csv")
+    pending_report = os.path.join(os.path.dirname(report_path) or ".", "_pending_master_build_report.csv")
+
+    if suspects_df is None or suspects_df.empty:
+        return False, "ok", "", ""
+
+    # Write pending master for review
+    ok1, err1 = _atomic_write_df(after_df, pending_master)
+    if not ok1:
+        return True, f"Impossible d'écrire le master pending: {err1}", "", ""
+
+    return True, "blocked_for_review", pending_master, pending_report
