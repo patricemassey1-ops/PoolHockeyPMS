@@ -26,6 +26,14 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+
+def _read_file_bytes(path: str) -> bytes:
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except Exception:
+        return b""
+
 WKEY = "admin_nhlid_"  # widget key prefix (unique)
 
 
@@ -874,4 +882,3 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 # Backward-compat alias (if app expects _render_tools)
 def _render_tools(*args, **kwargs):
     return render(*args, **kwargs)
-
