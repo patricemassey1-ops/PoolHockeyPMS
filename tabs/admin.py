@@ -1289,6 +1289,7 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 - **Résultat :** si `NHL_ID` est vide → l’enrichissement NHL ne démarre pas (normal).
 
 **Étape 2 — Générer une source NHL_ID**
+- **Où ça écrit :** toujours dans **`data/hockey.players.csv`** (forcé).
 
 **Important (dummy-proof)**
 - Pour que le Master Builder voie tes NHL_ID, le fichier cible doit être **`data/hockey.players.csv`**.
@@ -1298,6 +1299,7 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 - **Résultat :** un fichier CSV de correspondance (ou une mise à jour d’un fichier cible).
 
 **Étape 3 — Appliquer la source NHL_ID (auto)**
+- **Dans la section NHL Search :** choisis `data/nhl_search_players.csv`, puis clique le **gros bouton rouge 🟥 ASSOCIER NHL_ID** (et coche la case ✅ si demandée).
 - **Ce que ça fait :** détecte automatiquement la meilleure source NHL_ID dans `data/` et la fusionne dans `hockey.players.csv`.
 - **Résultat :** `NHL_ID` non vides augmentent (ex: +1234).
 
@@ -1914,11 +1916,45 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
     conf = st.slider("Score de confiance appliqué aux IDs récupérés", 0.50, 0.99, 0.85, 0.01, key=WKEY + "conf")
     dup_lock = st.slider("🔴 Seuil blocage duplication (%)", 0.5, 20.0, 5.0, 0.5, key=WKEY + "duplock")
 
-    # Button
-    if st.button("🔗 Associer NHL_ID", key=WKEY + "btn_assoc"):
+    # Button (dummy-proof)
+    expected_src = os.path.join(DATA_DIR, "nhl_search_players.csv")
+    st.caption(f"Source attendue (recommandé): `{expected_src}`")
+
+    # Simple checkbox de sécurité (empêche les clicks “par erreur”)
+    # Auto-check: on coche automatiquement seulement si la source choisie est nhl_search_players.csv
+    is_expected_src = False
+    try:
+        if src_choice and src_choice != "(Aucune — API NHL uniquement)":
+            is_expected_src = (os.path.basename(str(src_choice)) == "nhl_search_players.csv")
+    except Exception:
+        is_expected_src = False
+
+    if is_expected_src:
+        st.success("✅ Bonne source détectée: nhl_search_players.csv")
+        confirm_src = True
+        st.caption("Sécurité auto: OK (pas besoin de cocher).")
+    else:
+        st.warning("⚠️ Pour être 100% sûr: choisis `data/nhl_search_players.csv` dans “Récupérer NHL_ID depuis…”.")
+        confirm_src = st.checkbox(
+            "✅ OK, je confirme que la source est correcte et je veux écrire dans hockey.players.csv",
+            value=False,
+            key=WKEY + "confirm_assoc",
+            help="Ce bouton écrit dans data/hockey.players.csv. Coche seulement si tu es sûr.",
+        )
+
+    # Disable if no source or not confirmed
+    disable_assoc = (source_df is None) or bool(getattr(source_df, "empty", True)) or (not bool(confirm_src))
+
+    
+    st.markdown("### ✅ Ici c’est simple :")
+    st.markdown("1) **Choisis** `data/nhl_search_players.csv` dans **Récupérer NHL_ID depuis…**")
+    st.markdown("2) **Clique** le bouton rouge **🟥 ASSOCIER NHL_ID**")
+    st.caption("Ensuite, remonte dans Master Builder et clique 🚀 Tout faire automatiquement.")
+
+    if st.button("🟥 ASSOCIER NHL_ID (écrit dans hockey.players.csv)", key=WKEY + "btn_assoc", type="primary", use_container_width=True, disabled=disable_assoc):
         if source_df is None or source_df.empty:
             st.warning("Aucune source exploitable sélectionnée. Sélectionne nhl_search_players.csv ou upload un CSV avec NHL_ID.")
-            return
+            st.stop()
 
         s_id_col = _resolve_nhl_id_col(source_df)
         s_name_col = _resolve_player_name_col(source_df)
