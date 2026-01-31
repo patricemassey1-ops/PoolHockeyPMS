@@ -631,6 +631,18 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                             mime="text/csv",
                             use_container_width=True,
                         )
+
+                    # 📥 Télécharger le master (si dispo)
+                    if os.path.exists(master_path):
+                        master_bytes = _read_file_bytes(master_path)
+                        if master_bytes:
+                            st.download_button(
+                                "📥 Télécharger hockey.players_master.csv",
+                                data=master_bytes,
+                                file_name=os.path.basename(master_path),
+                                mime="text/csv",
+                                use_container_width=True,
+                            )
                 else:
                     st.error(f"❌ Échec écriture audit: {werr}")
 
