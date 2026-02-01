@@ -3,6 +3,129 @@ from __future__ import annotations
 
 import os
 import tempfile
+import json
+from datetime import datetime
+
+def _pick_history_path(data_dir: str) -> str:
+    candidates = [
+        os.path.join(data_dir, "historique_admin.csv"),
+        os.path.join(data_dir, "historique.csv"),
+        os.path.join(data_dir, "history.csv"),
+        os.path.join(data_dir, "transactions.csv"),
+        os.path.join(data_dir, "backup_history.csv"),
+        os.path.join(data_dir, "historique_transactions.csv"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return candidates[0]
+
+
+def _append_history_event(data_dir: str, action: str, reason: str, team: str, note: str, extra: dict | None = None) -> None:
+    path = _pick_history_path(data_dir)
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    row = {
+        "ts_utc": ts,
+        "action": str(action),
+        "reason": str(reason),
+        "team": str(team),
+        "player": "",
+        "nhl_id": "",
+        "note": str(note),
+    }
+    if extra and isinstance(extra, dict):
+        for k, v in extra.items():
+            if k not in row:
+                row[str(k)] = str(v)
+
+    df = _load_csv_safe(path) if os.path.exists(path) else pd.DataFrame()
+    if df.empty:
+        df = pd.DataFrame(columns=list(row.keys()))
+    for c in row.keys():
+        if c not in df.columns:
+            df[c] = ""
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    _atomic_write_df(df, path)
+
+
+def _snap_state_path(data_dir: str, season: str) -> str:
+    safe = season.replace("/", "-").replace("\\", "-").replace(" ", "")
+    return os.path.join(data_dir, f"classement_snapshot_state_{safe}.json")
+
+
+def _load_json(path: str) -> dict:
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_json(path: str, data: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _auto_log_classement_snapshots(data_dir: str, season: str, pivot_sorted: pd.DataFrame) -> None:
+    if pivot_sorted is None or pivot_sorted.empty:
+        return
+
+    # Summary top 6
+    try:
+        top = pivot_sorted.reset_index().head(6)
+        team_col = "owner" if "owner" in top.columns else top.columns[0]
+        total_col = "Total_Final" if "Total_Final" in top.columns else ("Total" if "Total" in top.columns else None)
+        if not total_col:
+            return
+        parts = []
+        for _, r in top.iterrows():
+            t = str(r.get(team_col, "")).strip()
+            v = r.get(total_col, 0)
+            try:
+                v = float(v)
+            except Exception:
+                v = 0.0
+            parts.append(f"{t}={v:.2f}")
+        summary = "Top6: " + " | ".join(parts)
+        if len(summary) > 450:
+            summary = summary[:450] + "…"
+    except Exception:
+        return
+
+    now = datetime.utcnow()
+    day_key = now.strftime("%Y-%m-%d")
+    iso_year, iso_week, _ = now.isocalendar()
+    week_key = f"{iso_year}-W{iso_week:02d}"
+    month_key = now.strftime("%Y-%m")
+
+    sp = _snap_state_path(data_dir, season)
+    state = _load_json(sp)
+
+    def _log_once(key: str, label: str):
+        if str(state.get(key, "")).strip() == label:
+            return
+        _append_history_event(
+            data_dir=data_dir,
+            action="CLASSEMENT_SNAPSHOT",
+            reason="classement_total",
+            team="ALL",
+            note=f"[{label}] {summary}",
+            extra={"season": season, "period": key, "label": label},
+        )
+        state[key] = label
+        state["updated_at_utc"] = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    _log_once("day", day_key)
+    _log_once("week", week_key)
+    _log_once("month", month_key)
+    _save_json(sp, state)
+
 from datetime import datetime
 
 import pandas as pd
@@ -246,6 +369,7 @@ def render(ctx: dict) -> None:
 
     # Sort by Total_Final
     pivot_sorted = pivot.sort_values("Total_Final", ascending=False)
+    _auto_log_classement_snapshots(data_dir, season, pivot_sorted)
 
     # Info + download gm_points.csv (idiot-proof)
     with st.expander("🏆 Points GM (bonus) — info", expanded=False):
