@@ -1400,6 +1400,214 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
     st.subheader("🛠️ Outils — synchros (NHL_ID)")
 
     # =====================================================
+    # 🧭 MODE ÉTAPES 1 → 4 (dummy-proof) — sans scroller
+    # =====================================================
+    use_steps = st.toggle("🧭 Mode Étapes 1→4 (recommandé — tout en ordre)", value=True, key="steps_mode")
+    if use_steps:
+        st.markdown("### 🧭 Étapes 1 → 4 (dans l’ordre)")
+        st.caption("Lis, clique, et avance. Rien d’autre. (Tu peux désactiver ce mode pour voir toutes les sections originales.)")
+
+        tab1, tab2, tab3, tab4 = st.tabs(["1️⃣ Source NHL_ID", "2️⃣ Associer NHL_ID", "3️⃣ Enrichir NHL (progressif)", "4️⃣ Master + Audit"])
+
+        players_path = os.path.join(DATA_DIR, "hockey.players.csv")
+        nhl_src_path = os.path.join(DATA_DIR, "nhl_search_players.csv")
+        master_path = os.path.join(DATA_DIR, "hockey.players_master.csv")
+        report_path = os.path.join(DATA_DIR, "master_build_report.csv")
+        suspects_path = os.path.join(DATA_DIR, "nhl_id_suspects.csv")
+
+        with tab1:
+            st.subheader("1️⃣ Source NHL_ID")
+            st.markdown("**But :** avoir le fichier `data/nhl_search_players.csv`.")
+            if os.path.exists(nhl_src_path):
+                st.success(f"✅ Source présente: `{nhl_src_path}`")
+            else:
+                st.warning(f"⚠️ Source absente: `{nhl_src_path}`")
+
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                st.markdown("**Option A (Drive AUTO)**")
+                if st.button("⬇️ Télécharger depuis Drive (AUTO → nhl_search_players.csv)", use_container_width=True, key="steps_drive_dl"):
+                    try:
+                        if not _drive_oauth_available():
+                            st.error("Drive OAuth non configuré (voir bloc Drive plus bas).")
+                            st.stop()
+                        folder_id = _drive_get_folder_id_default()
+                        files = _drive_list_csv_files(folder_id)
+                        auto_pick = _drive_pick_auto(files)
+                        if not auto_pick:
+                            st.error("Aucun CSV trouvé dans le dossier Drive.")
+                            st.stop()
+                        ok, err = _drive_download_file(auto_pick.get("id",""), nhl_src_path)
+                        if ok:
+                            st.success(f"✅ Téléchargé: {nhl_src_path} (AUTO={auto_pick.get('name','')})")
+                            st.rerun()
+                        else:
+                            st.error("❌ " + err)
+                    except Exception as e:
+                        st.error("❌ Drive error: " + str(e))
+            with c2:
+                st.markdown("**Option B (API NHL Search)**")
+                if st.button("🌐 Générer source NHL_ID (API NHL Search)", type="primary", use_container_width=True, key="steps_gen_src"):
+                    df_src, meta, err = generate_nhl_search_source(
+                        nhl_src_path,
+                        active_only=True,
+                        limit=1000,
+                        timeout_s=20,
+                        max_pages=25,
+                    )
+                    if err:
+                        st.error("❌ " + err)
+                    else:
+                        st.success(f"✅ Généré → {nhl_src_path} (rows={meta.get('rows_saved',0)}, pages={meta.get('pages',0)})")
+                        st.rerun()
+
+            st.info("➡️ Quand la source est ✅, va à l’onglet **2️⃣ Associer NHL_ID**.")
+
+        with tab2:
+            st.subheader("2️⃣ Associer NHL_ID")
+            st.markdown("**But :** écrire les NHL_ID dans `data/hockey.players.csv`.")
+            if not os.path.exists(nhl_src_path):
+                st.error("🛑 Il manque `data/nhl_search_players.csv`. Va à l’onglet 1️⃣.")
+            else:
+                pstat = _quick_nhl_id_stats(players_path)
+                st.metric("Players avec NHL_ID", pstat.get("with_id", 0))
+                st.metric("Players manquants", pstat.get("missing", 0))
+                st.markdown("### ✅ Ici c’est simple :")
+                st.markdown("1) La source est **déjà la bonne** (`nhl_search_players.csv`).")
+                st.markdown("2) Clique le bouton rouge 🟥 pour écrire dans `hockey.players.csv`.")
+                if st.button("🟥 ASSOCIER NHL_ID (écrit dans hockey.players.csv)", type="primary", use_container_width=True, key="steps_assoc"):
+                    okf, msgf, stats = _fill_missing_nhl_ids_from_source(players_path, nhl_src_path)
+                    if okf:
+                        st.success(msgf)
+                        st.rerun()
+                    else:
+                        st.error("❌ " + msgf)
+
+            st.info("➡️ Quand NHL_ID est ✅, va à l’onglet **3️⃣** (optionnel) ou **4️⃣**.")
+
+        with tab3:
+            st.subheader("3️⃣ Enrichir NHL (progressif)")
+            st.markdown("**But :** remplir le cache NHL petit à petit (safe).")
+            try:
+                from services.master_builder import MasterBuildConfig, enrich_nhl_cache
+            except Exception:
+                MasterBuildConfig = None  # type: ignore
+                enrich_nhl_cache = None  # type: ignore
+
+            if MasterBuildConfig is None or enrich_nhl_cache is None:
+                st.warning("Installe `services/master_builder.py` = master_builder_v5 (contient enrich_nhl_cache).")
+            else:
+                try:
+                    dfp = pd.read_csv(players_path, low_memory=False)
+                except Exception as e:
+                    st.error("Lecture hockey.players.csv impossible: " + str(e))
+                    dfp = pd.DataFrame()
+
+                ids = []
+                if isinstance(dfp, pd.DataFrame) and (not dfp.empty) and ("NHL_ID" in dfp.columns):
+                    ids = dfp["NHL_ID"].astype(str).tolist()
+
+                max_calls = st.number_input("Max appels NHL (par run)", min_value=0, max_value=5000, value=250, step=50, key="steps_enrich_calls")
+                if st.button("🔁 Continuer enrichissement NHL (cache)", type="primary", use_container_width=True, key="steps_enrich_go"):
+                    cfg = MasterBuildConfig(data_dir=DATA_DIR, enrich_from_nhl=True, max_nhl_calls=int(max_calls))
+                    stats = enrich_nhl_cache(cfg, nhl_ids=ids, max_calls=int(max_calls))
+                    st.success(f"✅ Cache mis à jour: fetched={stats.get('fetched')} calls={stats.get('calls')} hits={stats.get('hits')}")
+                    st.caption(f"Restants estimés: {stats.get('missing_remaining_estimate')} / {stats.get('ids_total')}")
+                    st.rerun()
+
+            st.info("➡️ Ensuite va à l’onglet **4️⃣ Master + Audit**.")
+
+        with tab4:
+            st.subheader("4️⃣ Master + Audit")
+            st.markdown("**But :** construire `hockey.players_master.csv` + audit + suspects.")
+            enrich = st.checkbox("Enrichir via NHL API", value=True, key="steps_mb_enrich")
+            max_calls = st.number_input("Max appels NHL (build)", min_value=0, max_value=5000, value=250, step=50, key="steps_mb_calls")
+
+            # Compare columns
+            default_compare = ["NHL_ID", "Team", "Position", "Jersey#", "Country", "Level", "Cap Hit", "Expiry Year", "Expiry Status", "Status"]
+            try:
+                opts = sorted(list(set(default_compare)))
+            except Exception:
+                opts = default_compare
+            compare_cols = st.multiselect("Colonnes diff (optionnel)", options=opts, default=default_compare, key="steps_mb_cols")
+
+            block_overwrite = st.toggle("🔒 Bloquer l'écriture si NHL_ID suspects", value=True, key="steps_block_sus")
+            if st.button("🚀 Construire Master + Audit", type="primary", use_container_width=True, key="steps_build_all"):
+                # Load before master
+                before_df = pd.DataFrame()
+                if os.path.exists(master_path):
+                    try:
+                        before_df = pd.read_csv(master_path, low_memory=False)
+                    except Exception:
+                        before_df = pd.DataFrame()
+
+                try:
+                    from services.master_builder import build_master, MasterBuildConfig
+                except Exception as e:
+                    st.error("Impossible d'importer services.master_builder (mets master_builder_v5 dans /services/master_builder.py).")
+                    st.exception(e)
+                    st.stop()
+
+                cfg = MasterBuildConfig(data_dir=DATA_DIR, enrich_from_nhl=bool(enrich), max_nhl_calls=int(max_calls), write_output=False)
+                with st.spinner("Étape A — Fusion + enrichissement…"):
+                    after_df, rep = build_master(cfg, write_output=False)
+
+                # suspects
+                nhl_search_path = nhl_src_path
+                suspects_df = _audit_nhl_id_suspects(players_path, master_path, nhl_search_path, after_df=after_df)
+                _atomic_write_df(suspects_df, suspects_path)
+
+                dup_ids = int((suspects_df["issue"] == "duplicate_nhl_id").sum()) if (isinstance(suspects_df, pd.DataFrame) and "issue" in suspects_df.columns) else 0
+                if block_overwrite and dup_ids > 0:
+                    st.error(f"🛑 Écriture bloquée: {dup_ids} NHL_ID dupliqués. Télécharge le rapport ou utilise l'auto-fix.")
+                    st.dataframe(suspects_df.head(200), use_container_width=True, height=320)
+                    b = _read_file_bytes(suspects_path)
+                    if b:
+                        st.download_button("📥 Télécharger audit NHL_ID suspect (CSV)", data=b, file_name=os.path.basename(suspects_path), mime="text/csv", use_container_width=True, key="steps_dl_sus")
+                    # Auto-fix button (if available)
+                    if "_autofix_duplicate_nhl_ids" in globals():
+                        if st.button("🧹 Auto-corriger les doublons NHL_ID", type="primary", use_container_width=True, key="steps_autofix"):
+                            okx, msgx, fixed_players, fix_report = _autofix_duplicate_nhl_ids(players_path, nhl_search_path)
+                            if okx:
+                                _atomic_write_df(fixed_players, players_path)
+                                st.success("✅ " + msgx + " Relance le build.")
+                                st.rerun()
+                            else:
+                                st.error("❌ " + msgx)
+                    st.stop()
+
+                # write master
+                okm, erm = _atomic_write_df(after_df, master_path)
+                if not okm:
+                    st.error("❌ Échec écriture master: " + str(erm))
+                    st.stop()
+                st.success(f"✅ Master écrit: {master_path}")
+
+                # audit diff
+                summary, audit_df = _build_diff_and_audit(before_df, after_df, max_rows=50000, compare_cols=compare_cols)
+                _atomic_write_df(audit_df, report_path)
+                st.success(f"✅ Audit écrit: {report_path} ({len(audit_df)} lignes)")
+
+                # downloads
+                mb = _read_file_bytes(master_path)
+                if mb:
+                    st.download_button("📥 Télécharger hockey.players_master.csv", data=mb, file_name=os.path.basename(master_path), mime="text/csv", use_container_width=True, key="steps_dl_master")
+                rb = _read_file_bytes(report_path)
+                if rb:
+                    st.download_button("📥 Télécharger audit fusion (CSV)", data=rb, file_name=os.path.basename(report_path), mime="text/csv", use_container_width=True, key="steps_dl_audit")
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Avant", summary.get("before_rows", 0))
+                c2.metric("Après", summary.get("after_rows", 0))
+                c3.metric("Ajouts", summary.get("added", 0))
+                c4.metric("Modifiés", summary.get("modified_rows", 0))
+
+        st.divider()
+        st.info("✅ Mode Étapes terminé. (Désactive le toggle pour voir toutes les sections originales.)")
+        return
+
+
+    # =====================================================
     # 🧱 Master Builder (hockey.players_master.csv)
     #   - Fusion hockey.players.csv + PuckPedia2025_26.csv + NHL API (optionnel)
     #   - Aperçu diff avant/après
@@ -1779,10 +1987,6 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                         # write the real master now
                         okm, erm = _atomic_write_df(after_df, master_path)
                         if okm:
-                            try:
-                                rep["master_written"] = True
-                            except Exception:
-                                pass
                             st.success(f"✅ Master écrit malgré suspects: {master_path}")
                         else:
                             st.error(f"❌ Échec écriture master: {erm}")
@@ -2224,4 +2428,3 @@ def _write_pending_and_gate(after_df: pd.DataFrame, suspects_df: pd.DataFrame, m
         return True, f"Impossible d'écrire le master pending: {err1}", "", ""
 
     return True, "blocked_for_review", pending_master, pending_report
-
