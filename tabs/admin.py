@@ -38,6 +38,7 @@ def _require_admin_password(owner: str) -> None:
     if st.session_state.get("admin_ok", False):
         return
 
+    st.markdown("<div style=\"height:32px\"></div>", unsafe_allow_html=True)
     st.subheader("🔒 Admin — mot de passe")
     st.caption("Entrez le mot de passe pour accéder aux outils Admin (Whalers seulement).")
     entered = st.text_input("Mot de passe", type="password", key="admin_pw_input")
