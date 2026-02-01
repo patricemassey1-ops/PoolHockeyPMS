@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import os
+import tempfile
+from datetime import datetime
+
 import pandas as pd
 import streamlit as st
 
@@ -18,13 +21,46 @@ def _points_path(data_dir: str, season: str) -> str:
     return os.path.join(data_dir, f"points_periods_{season}.csv")
 
 
+def _gm_points_path(data_dir: str) -> str:
+    return os.path.join(data_dir, "gm_points.csv")
+
+
 def _load_csv_safe(path: str) -> pd.DataFrame:
     try:
         if path and os.path.exists(path):
-            return pd.read_csv(path)
+            return pd.read_csv(path, low_memory=False)
     except Exception:
         pass
     return pd.DataFrame()
+
+
+def _read_file_bytes(path: str) -> bytes:
+    try:
+        if path and os.path.exists(path):
+            with open(path, "rb") as f:
+                return f.read()
+    except Exception:
+        pass
+    return b""
+
+
+def _atomic_write_df(df: pd.DataFrame, out_path: str) -> tuple[bool, str]:
+    """Write CSV atomically in the same directory (avoid partial writes)."""
+    try:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        d = os.path.dirname(out_path) or "."
+        with tempfile.NamedTemporaryFile("w", delete=False, dir=d, suffix=".tmp", encoding="utf-8", newline="") as tf:
+            tmp_path = tf.name
+            df.to_csv(tf, index=False)
+        os.replace(tmp_path, out_path)
+        return True, ""
+    except Exception as e:
+        try:
+            if "tmp_path" in locals() and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        return False, str(e)
 
 
 def _fmt_pts(x) -> str:
@@ -37,6 +73,57 @@ def _fmt_pts(x) -> str:
     return f"{v:.2f}"
 
 
+def _normalize_gm_points_df(df: pd.DataFrame) -> pd.DataFrame:
+    # Accept common column names
+    cols = {c.lower().strip(): c for c in df.columns}
+    gm_col = cols.get("gm") or cols.get("owner") or cols.get("equipe") or cols.get("équipe")
+    pts_col = cols.get("points") or cols.get("pts") or cols.get("score")
+
+    out = df.copy()
+    if gm_col and gm_col != "GM":
+        out = out.rename(columns={gm_col: "GM"})
+    if pts_col and pts_col != "Points":
+        out = out.rename(columns={pts_col: "Points"})
+
+    if "GM" not in out.columns:
+        out["GM"] = ""
+    if "Points" not in out.columns:
+        out["Points"] = 0
+
+    out["GM"] = out["GM"].astype(str).str.strip()
+    out["Points"] = pd.to_numeric(out["Points"], errors="coerce").fillna(0).astype(int)
+    out = out[out["GM"].ne("")]
+    return out[["GM", "Points"]]
+
+
+def _load_or_create_gm_points(data_dir: str, owners: list[str]) -> tuple[pd.DataFrame, str, bool]:
+    """Return (gm_points_df, path, created). Auto-create zeros if missing."""
+    path = _gm_points_path(data_dir)
+    created = False
+
+    if os.path.exists(path):
+        df = _load_csv_safe(path)
+        if df.empty:
+            df = pd.DataFrame({"GM": owners, "Points": [0] * len(owners)})
+    else:
+        df = pd.DataFrame({"GM": owners, "Points": [0] * len(owners)})
+        ok, err = _atomic_write_df(df, path)
+        # Even if write fails, we still return df in memory
+        created = ok
+
+    df = _normalize_gm_points_df(df)
+
+    # Ensure every owner exists
+    existing = set(df["GM"].tolist())
+    missing = [o for o in owners if o not in existing]
+    if missing:
+        df = pd.concat([df, pd.DataFrame({"GM": missing, "Points": [0] * len(missing)})], ignore_index=True)
+        df = _normalize_gm_points_df(df)
+        _atomic_write_df(df, path)
+
+    return df, path, created
+
+
 def render(ctx: dict) -> None:
     st.header("🏆 Classement")
     season = _season(ctx)
@@ -44,6 +131,9 @@ def render(ctx: dict) -> None:
 
     st.caption(f"Saison: **{season}**")
 
+    # -----------------------------
+    # 1) Charger les points par période
+    # -----------------------------
     p_path = _points_path(data_dir, season)
     pts = _load_csv_safe(p_path)
 
@@ -87,7 +177,7 @@ def render(ctx: dict) -> None:
         .rename(columns={"points_start": "team_points"})
     )
 
-    # Ordonner périodes chronologiquement (avec mapping)
+    # Ordonner périodes chronologiquement
     period_order = (
         df[["period", "_ts"]]
         .drop_duplicates()
@@ -97,8 +187,6 @@ def render(ctx: dict) -> None:
 
     # Pivot: rows=owner, cols=period, values=team_points
     pivot = agg.pivot_table(index="owner", columns="period", values="team_points", aggfunc="sum", fill_value=0.0)
-
-    # Réordonner colonnes selon temps
     pivot = pivot.reindex(columns=periods)
 
     # Total = dernier snapshot (dernière colonne)
@@ -108,29 +196,51 @@ def render(ctx: dict) -> None:
     else:
         pivot["Total"] = 0.0
 
-    # Classement: tri par Total desc
-    pivot_sorted = pivot.sort_values("Total", ascending=False).copy()
+    # -----------------------------
+    # 2) Points GM (bonus/malus) depuis data/gm_points.csv
+    # -----------------------------
+    owners = [str(o) for o in pivot.index.tolist()]
+    gm_df, gm_path, gm_created = _load_or_create_gm_points(data_dir, owners)
+    gm_map = dict(zip(gm_df["GM"].tolist(), gm_df["Points"].tolist()))
 
-    # KPIs
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Équipes", int(pivot_sorted.shape[0]))
-    with c2:
-        st.metric("Périodes (snapshots)", int(len(periods)))
-    with c3:
-        st.metric("Dernière période", str(periods[-1]) if periods else "—")
+    pivot["GM_Points"] = [int(gm_map.get(str(o), 0)) for o in pivot.index.tolist()]
+    pivot["Total_Final"] = pivot["Total"] + pivot["GM_Points"]
 
-    st.divider()
+    # Sort by Total_Final
+    pivot_sorted = pivot.sort_values("Total_Final", ascending=False)
 
-    # 1) Classement (dernier snapshot)
-    st.subheader("📌 Classement — Dernier snapshot")
-    rank_df = pivot_sorted[["Total"]].reset_index().rename(columns={"owner": "Équipe"})
+    # Info + download gm_points.csv (idiot-proof)
+    with st.expander("🏆 Points GM (bonus) — info", expanded=False):
+        if os.path.exists(gm_path):
+            st.caption(f"Fichier: `{gm_path}`")
+            if gm_created:
+                st.success("✅ gm_points.csv a été créé automatiquement (points=0).")
+            b = _read_file_bytes(gm_path)
+            if b:
+                st.download_button(
+                    "📥 Télécharger gm_points.csv (mets-le dans ton repo /data/)",
+                    data=b,
+                    file_name="gm_points.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.caption("✅ Option A: mets `data/gm_points.csv` dans ton repo (commit/push) pour ne pas le perdre après redémarrage.")
+        st.dataframe(gm_df.sort_values(["Points","GM"], ascending=[False, True]), use_container_width=True, hide_index=True)
+
+    # -----------------------------
+    # 3) Affichages
+    # -----------------------------
+    st.subheader("🏅 Classement (Total + Bonus GM)")
+    rank_df = pivot_sorted[["Total", "GM_Points", "Total_Final"]].reset_index().rename(columns={"owner": "Équipe"})
     rank_df["Total"] = rank_df["Total"].apply(_fmt_pts)
+    rank_df["GM_Points"] = rank_df["GM_Points"].apply(_fmt_pts)
+    rank_df["Total_Final"] = rank_df["Total_Final"].apply(_fmt_pts)
+    rank_df = rank_df.rename(columns={"GM_Points": "Bonus GM", "Total_Final": "Total (final)"})
     st.dataframe(rank_df, use_container_width=True, hide_index=True)
 
-    # Movers (si on a au moins 2 périodes)
+    # Movers (si on a au moins 2 périodes) — variation sans bonus GM (plus logique)
     if len(periods) >= 2:
-        st.subheader("📈 Variation (dernier - précédent)")
+        st.subheader("📈 Variation (dernier - précédent) — sans bonus GM")
         prev_period = periods[-2]
         delta = (pivot_sorted[periods[-1]] - pivot_sorted[prev_period]).rename("Δ").reset_index()
         delta = delta.rename(columns={"owner": "Équipe"})
@@ -139,9 +249,15 @@ def render(ctx: dict) -> None:
 
     st.divider()
 
-    # 2) Table par périodes + total
+    # Table par périodes + total
     st.subheader("🧾 Points par période + Total")
     view = pivot_sorted.reset_index().rename(columns={"owner": "Équipe"}).copy()
+
+    # Reorder columns: periods, Total, Bonus, Total_Final
+    cols = ["Équipe"] + periods + ["Total", "GM_Points", "Total_Final"]
+    cols = [c for c in cols if c in view.columns]
+    view = view[cols].copy()
+    view = view.rename(columns={"GM_Points": "Bonus GM", "Total_Final": "Total (final)"})
 
     # Format
     for c in view.columns:
@@ -151,6 +267,7 @@ def render(ctx: dict) -> None:
     st.dataframe(view, use_container_width=True, hide_index=True)
 
     with st.expander("🔎 Debug fichier", expanded=False):
-        st.caption(f"Source: `{p_path}`")
-        st.write("Colonnes:", list(pts.columns))
+        st.caption(f"Source points: `{p_path}`")
+        st.caption(f"Source GM points: `{gm_path}`")
+        st.write("Colonnes points:", list(pts.columns))
         st.write("Périodes détectées:", periods)
