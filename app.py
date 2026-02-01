@@ -449,12 +449,16 @@ def main() -> None:
     # Theme injection (once)
     apply_theme()
 
-    # Sidebar
-    active_label = sidebar_nav()
+    # Sidebar (pro)
+    sb = render_sidebar({"DATA_DIR": DATA_DIR})
+    # Map to old-style active_tab label for compatibility
+    active_label = sb.get("nav", "Home")
 
     # Build ctx
     owner = st.session_state.get("owner") or "Whalers"
-    season = st.session_state.get("season_lbl") or DEFAULT_SEASON
+    season = st.session_state.get("season") or st.session_state.get("season_lbl") or DEFAULT_SEASON
+    # keep season_lbl synced for legacy code
+    st.session_state["season_lbl"] = season
     ctx = AppCtx(
         data_dir=DATA_DIR,
         season_lbl=str(season),
@@ -465,8 +469,17 @@ def main() -> None:
 
     # Route
     modules = _import_tabs()
-    key = dict(TABS).get(active_label, "home")
-
+    nav_to_key = {
+        "Home": "home",
+        "GM": "gm",
+        "Joueurs": "joueurs",
+        "Alignement": "alignement",
+        "Transactions": "transactions",
+        "Historique": "historique",
+        "Classement": "classement",
+        "Admin": "admin",
+    }
+    key = nav_to_key.get(str(active_label), "home")
     try:
         if key == "home":
             _render_home(ctx)
