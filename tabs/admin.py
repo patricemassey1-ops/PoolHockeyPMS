@@ -19,6 +19,66 @@ def _to_str(x):
     try:
         if x is None:
             return ""
+
+
+def _pick_history_path(data_dir: str) -> str:
+    """
+    Choose an existing history-like CSV if present, else create a dedicated one.
+    Priority (existing):
+      historique_admin.csv, historique.csv, history.csv, transactions.csv, backup_history.csv, historique_transactions.csv
+    """
+    candidates = [
+        os.path.join(data_dir, "historique_admin.csv"),
+        os.path.join(data_dir, "historique.csv"),
+        os.path.join(data_dir, "history.csv"),
+        os.path.join(data_dir, "transactions.csv"),
+        os.path.join(data_dir, "backup_history.csv"),
+        os.path.join(data_dir, "historique_transactions.csv"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return candidates[0]  # default create
+
+def _append_history_event(data_dir: str, action: str, team: str, player: str, nhl_id: str = "", note: str = "", extra: dict | None = None) -> tuple[bool, str, str]:
+    """
+    Append one row to the history CSV (idiot-proof).
+    Returns (ok, message, path)
+    """
+    path = _pick_history_path(data_dir)
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    row = {
+        "ts_utc": ts,
+        "action": _to_str(action),
+        "team": _to_str(team),
+        "player": _to_str(player),
+        "nhl_id": _to_str(nhl_id),
+        "note": _to_str(note),
+    }
+    if extra and isinstance(extra, dict):
+        for k, v in extra.items():
+            if k not in row:
+                row[str(k)] = _to_str(v)
+
+    if os.path.exists(path):
+        df, _ = load_csv(path)
+        if df is None:
+            df = pd.DataFrame()
+    else:
+        df = pd.DataFrame()
+
+    if df.empty:
+        df = pd.DataFrame(columns=list(row.keys()))
+    for c in row.keys():
+        if c not in df.columns:
+            df[c] = ""
+
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    ok, err = _atomic_write_df(df, path)
+    if ok:
+        return True, f"Historique mis à jour: {os.path.basename(path)}", path
+    return False, str(err), path
+
         s = str(x)
         return s.strip()
     except Exception:
@@ -1930,6 +1990,34 @@ st.info("➡️ Quand tu veux, va à l’onglet **4️⃣ Master + Audit**.")
                                 ok, err = _atomic_write_df(tdf, team_path)
                                 if ok:
                                     st.success(f"✅ Ajouté dans {team_path} (backup: {os.path.basename(bkp)})")
+                                    # Historique (idiot-proof)
+                                    try:
+                                        nm = _to_str(row.get(name_col, ""))
+                                        nid = _to_str(row.get("NHL_ID", ""))
+                                        okh, msgh, hpath = _append_history_event(
+                                            DATA_DIR,
+                                            action="ADD_PLAYER",
+                                            team=team,
+                                            player=nm,
+                                            nhl_id=nid,
+                                            note=f"Ajout via Admin → {os.path.basename(team_path)}",
+                                            extra={"file": os.path.basename(team_path)},
+                                        )
+                                        if okh:
+                                            st.success("🧾 " + msgh)
+                                            hb = _read_file_bytes(hpath)
+                                            if hb:
+                                                st.download_button(
+                                                    "📥 Télécharger historique (CSV)",
+                                                    data=hb,
+                                                    file_name=os.path.basename(hpath),
+                                                    mime="text/csv",
+                                                    use_container_width=True,
+                                                    key="dl_hist_after_add",
+                                                )
+                                    except Exception as e:
+                                        st.warning("Historique: impossible d'ajouter l'entrée (" + str(e) + ")")
+
                                 else:
                                     st.error("❌ Écriture échouée: " + str(err))
 
@@ -1938,6 +2026,7 @@ st.info("➡️ Quand tu veux, va à l’onglet **4️⃣ Master + Audit**.")
             # -------------------------------------------------
             with st.expander("🧾 Historique — supprimer une ou des lignes", expanded=False):
                 st.caption("Choisis un fichier d’historique et supprime des lignes (avec backup automatique).")
+                st.caption("Astuce: si aucun historique n’existe, l’app crée `data/historique_admin.csv`.")
 
                 csvs = list_data_csvs(DATA_DIR)
                 # Candidate history files
