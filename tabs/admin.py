@@ -1529,6 +1529,18 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 except Exception:
                     sz = 0
                 st.success(f"✅ Source présente: `{nhl_src_path}` ({sz} bytes)")
+            # 📥 Option A (recommandée): télécharger et mettre dans le repo (data/), sinon ça peut disparaître après redémarrage
+            b = _read_file_bytes(nhl_src_path)
+            if b:
+                st.download_button(
+                    "📥 Télécharger nhl_search_players.csv (à mettre dans ton repo /data/)",
+                    data=b,
+                    file_name="nhl_search_players.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="steps_dl_nhl_search",
+                )
+                st.caption("✅ Après download: mets le fichier dans ton repo **data/nhl_search_players.csv** puis commit/push (Option A).")
             else:
                 st.warning(f"⚠️ Source absente: `{nhl_src_path}`")
 
@@ -1614,7 +1626,28 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             st.markdown("### ✅ But")
             st.markdown("Écrire les NHL_ID dans **`data/hockey.players.csv`**.")
             if not os.path.exists(nhl_src_path):
-                st.error("🛑 Il manque `data/nhl_search_players.csv` → retourne à l’onglet 1️⃣.")
+                st.error("🛑 Il manque `data/nhl_search_players.csv`.")
+                st.info("👉 Clique sur **🌐 Générer la source maintenant**. Après ça, tu restes ici et tu cliques **ASSOCIER NHL_ID**.")
+                c1, c2 = st.columns([1, 1], gap="large")
+                with c1:
+                    if st.button("🌐 Générer la source maintenant", type="primary", use_container_width=True, key="step2_make_source_now"):
+                        with st.spinner("Génération de la source (NHL Search API)…"):
+                            df_src, meta, err = generate_nhl_search_source(
+                                nhl_src_path,
+                                active_only=True,
+                                limit=1000,
+                                timeout_s=20,
+                                max_pages=20,
+                                culture="en-us",
+                                q="*",
+                            )
+                        if err:
+                            st.error(f"❌ Erreur génération source: {err}")
+                        else:
+                            st.success(f"✅ Source créée: {nhl_src_path} ({len(df_src)} lignes).")
+                            st.rerun()
+                with c2:
+                    st.caption("☁️ Option Drive: va à l’onglet **1 Source NHL_ID** puis clique **Drive AUTO → nhl_search_players.csv** (si OAuth Drive est OK).")
             else:
                 st.success("✅ Source trouvée. Tu peux associer.")
 
