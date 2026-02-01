@@ -1617,16 +1617,37 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 st.error("🛑 Il manque `data/nhl_search_players.csv` → retourne à l’onglet 1️⃣.")
             else:
                 st.success("✅ Source trouvée. Tu peux associer.")
+
+                # Résultat persistant (idiot-proof): affiche le dernier résultat même après rerun
+                last = st.session_state.get("steps_assoc_status", None)
+                if last:
+                    if last.get("ok"):
+                        st.success("✅ " + str(last.get("msg", "")))
+                    else:
+                        st.error("❌ " + str(last.get("msg", "")))
+                    if last.get("stats"):
+                        s = last["stats"]
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("NHL_ID remplis (ce run)", int(s.get("filled", 0)))
+                        c2.metric("Ambigus ignorés", int(s.get("ambiguous_skipped", 0)))
+                        c3.metric("Encore manquants", int(s.get("still_missing", 0)))
+                    if st.button("🧽 Effacer le message", use_container_width=True, key="steps_assoc_clear"):
+                        st.session_state.pop("steps_assoc_status", None)
+                        st.rerun()
+
                 st.markdown("### 🧸 Quoi cliquer")
                 st.markdown("1) Clique le **bouton rouge**.\n2) Attends le message ✅.\n")
                 if st.button("🟥 ASSOCIER NHL_ID (écrit dans hockey.players.csv)", type="primary", use_container_width=True, key="steps_assoc"):
                     with st.spinner("Association NHL_ID …"):
                         okf, msgf, stats = _fill_missing_nhl_ids_from_source(players_path, nhl_src_path)
-                    if okf:
-                        st.success(msgf)
-                        st.rerun()
-                    else:
-                        st.error("❌ " + msgf)
+
+                    # Sauve le résultat pour l'afficher après rerun (sinon tu peux le manquer)
+                    st.session_state["steps_assoc_status"] = {
+                        "ok": bool(okf),
+                        "msg": str(msgf or ""),
+                        "stats": stats if isinstance(stats, dict) else {},
+                    }
+                    st.rerun()
 
             st.info("➡️ Quand c’est fait, va à l’onglet **3️⃣ Enrichir NHL** (optionnel) ou **4️⃣ Master + Audit**.")
 
