@@ -1572,15 +1572,25 @@ def generate_nhl_search_source(
 # UI (render)
 # =========================
 def render(*args, **kwargs):
-
     # ----------------------------
     # 🔒 Gate Admin (Whalers only) + optional password
     # ----------------------------
+    # L'app appelle render(ctx_as_dict). Ici on récupère ctx de façon robuste.
+    _ctx = {}
+    try:
+        if args and isinstance(args[0], dict):
+            _ctx = args[0]
+        elif isinstance(kwargs.get("ctx"), dict):
+            _ctx = kwargs.get("ctx") or {}
+    except Exception:
+        _ctx = {}
+
     owner = (
-        str(ctx.get("owner") or ctx.get("selected_owner") or st.session_state.get("owner") or st.session_state.get("selected_owner") or "").strip()
+        str(_ctx.get("owner") or _ctx.get("selected_owner") or st.session_state.get("owner") or st.session_state.get("selected_owner") or "").strip()
         or "Whalers"
     )
     _require_admin_password(owner)
+
 
     try:
         return _render_impl(*args, **kwargs)
