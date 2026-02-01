@@ -202,7 +202,7 @@ def _save_nhl_cache(cache_path: str, cache: dict) -> None:
     except Exception:
         pass
 
-def enrich_nhl_cache(cfg: MasterBuildConfig, nhl_ids: list[str] | None = None, max_calls: int | None = None) -> dict:
+def enrich_nhl_cache(cfg: MasterBuildConfig, nhl_ids: list[str] | None = None, max_calls: int | None = None, progress_cb=None) -> dict:
     """
     Progressive enrichment (idiot-proof):
     - Met à jour le cache NHL (cfg.nhl_cache_file) en appelant l'API uniquement pour les NHL_ID manquants.
@@ -223,19 +223,45 @@ def enrich_nhl_cache(cfg: MasterBuildConfig, nhl_ids: list[str] | None = None, m
     hits = 0
     fetched = 0
 
+    total_ids = len(ids)
+    scanned = 0
     for pid in ids:
+        scanned += 1
+
+        # Progress callback (lightweight)
+        if progress_cb and (scanned == 1 or scanned % 25 == 0):
+            try:
+                progress_cb(scanned, total_ids, calls, fetched, hits, pid)
+            except Exception:
+                pass
+
         if calls >= calls_limit:
             break
+
         payload = cache.get(pid)
         if isinstance(payload, dict) and len(payload) > 0:
             hits += 1
+            if progress_cb and (scanned % 100 == 0):
+                try:
+                    progress_cb(scanned, total_ids, calls, fetched, hits, pid)
+                except Exception:
+                    pass
             continue
+
         # fetch
         payload = nhl_player_by_id(pid)
         if isinstance(payload, dict) and len(payload) > 0:
             cache[pid] = payload
             fetched += 1
+
         calls += 1
+
+        if progress_cb:
+            try:
+                progress_cb(scanned, total_ids, calls, fetched, hits, pid)
+            except Exception:
+                pass
+
         time.sleep(cfg.sleep_s)
 
     # Estimate remaining (ids missing usable cache)
