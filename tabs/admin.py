@@ -2224,3 +2224,4 @@ def _write_pending_and_gate(after_df: pd.DataFrame, suspects_df: pd.DataFrame, m
         return True, f"Impossible d'écrire le master pending: {err1}", "", ""
 
     return True, "blocked_for_review", pending_master, pending_report
+
