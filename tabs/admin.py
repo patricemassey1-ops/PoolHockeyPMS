@@ -96,12 +96,13 @@ def _pick_history_path(data_dir: str) -> str:
     return candidates[0]  # default create
 
 
-def _append_history_event(data_dir: str, action: str, team: str, player: str, nhl_id: str = "", note: str = "", extra: dict | None = None) -> tuple[bool, str, str]:
+def _append_history_event(data_dir: str, action: str, team: str, player: str, nhl_id: str = "", reason: str = "", note: str = "", extra: dict | None = None) -> tuple[bool, str, str]:
     path = _pick_history_path(data_dir)
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     row = {
         "ts_utc": ts,
         "action": _to_str(action),
+        "reason": _to_str(reason),
         "team": _to_str(team),
         "player": _to_str(player),
         "nhl_id": _to_str(nhl_id),
@@ -2289,22 +2290,60 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                             st.warning("Aucun résultat.")
                         else:
                             def fmt_idx(i):
-                                nm = _to_str(view.at[i, src_name])
-                                nid = _to_str(view.at[i, "NHL_ID"])
+                                # Format fonction robuste (ne dépend pas uniquement du filtre)
+                                nm = _to_str(src_df.at[i, src_name]) if i in src_df.index else ""
+                                nid = _to_str(src_df.at[i, "NHL_ID"]) if ("NHL_ID" in src_df.columns and i in src_df.index) else ""
                                 return f"{nm}  |  NHL_ID={nid}" if nid else nm
 
-                            picks = st.multiselect("Choisir jusqu'à 5 joueurs (top 50)", options=view.index.tolist(), format_func=fmt_idx, default=[], key="ar_add_picks")
+                            # ✅ Sélection persistante (les choix ne disparaissent pas)
+                            selected = st.session_state.get("ar_add_selected", [])
+                            opt_ids = []
+                            for _i in list(selected) + view.index.tolist():
+                                if _i not in opt_ids:
+                                    opt_ids.append(_i)
+
+                            picks = st.multiselect(
+                                "Choisir jusqu'à 5 joueurs (top 50)",
+                                options=opt_ids,
+                                format_func=fmt_idx,
+                                default=list(selected),
+                                key="ar_add_picks",
+                            )
+
                             if len(picks) > 5:
                                 st.warning("⚠️ Max 5 joueurs.")
                                 picks = picks[:5]
 
+                            st.session_state["ar_add_selected"] = list(picks)
+
+                            # ❌ Retirer une sélection par erreur (table avec X)
+                            if picks:
+                                sel_df = src_df.loc[picks, [src_name, "NHL_ID"]].copy()
+                                sel_df = sel_df.rename(columns={src_name: "Player"})
+                                sel_df.insert(0, "❌", False)
+                                st.markdown("**Aperçu (à ajouter) — coche ❌ pour retirer de la liste**")
+                                edited_sel = st.data_editor(sel_df, use_container_width=True, height=240, key="ar_add_preview_editor")
+                                c_rm1, c_rm2 = st.columns([1, 1])
+                                with c_rm1:
+                                    if st.button("❌ Retirer les lignes cochées", use_container_width=True, key="ar_add_remove_checked"):
+                                        try:
+                                            mask = edited_sel["❌"].astype(bool)
+                                            remove_idx = [p for p, flag in zip(picks, mask.tolist()) if flag]
+                                            new_sel = [p for p in picks if p not in set(remove_idx)]
+                                            st.session_state["ar_add_selected"] = new_sel
+                                            st.rerun()
+                                        except Exception:
+                                            pass
+                                with c_rm2:
+                                    if st.button("🧹 Vider la sélection", use_container_width=True, key="ar_add_clear"):
+                                        st.session_state["ar_add_selected"] = []
+                                        st.rerun()
+
+                            reason = st.selectbox("Raison", options=["échanges","alignements","ajouts_joueurs","rachats","classement_total","autre"], index=2, key="ar_add_reason")
+
                             comment = st.text_area("Commentaire (OBLIGATOIRE)", value="", key="ar_add_comment", placeholder="Ex: Ajout draft / trade / correction…")
                             confirm = st.checkbox("✅ Je confirme l'ajout", value=False, key="ar_add_confirm")
 
-                            if picks:
-                                prev = view.loc[picks, [src_name, "NHL_ID"]].copy().rename(columns={src_name: "Player"})
-                                st.markdown("**Aperçu (à ajouter)**")
-                                st.dataframe(prev, use_container_width=True, height=220)
 
                             if st.button("🚨 CONFIRMER AJOUT (écrit dans roster)", type="primary", use_container_width=True, key="ar_add_go"):
                                 if not picks:
@@ -2375,7 +2414,7 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 
                                     # Historique: 1 ligne / joueur
                                     try:
-                                        _append_history_event(DATA_DIR, action="ADD_PLAYER", team=team, player=nm, nhl_id=nid, note=comment.strip(), extra={"file": os.path.basename(roster_path)})
+                                        _append_history_event(DATA_DIR, action="ADD_PLAYER", reason=str(reason), team=team, player=nm, nhl_id=nid, note=comment.strip(), extra={"file": os.path.basename(roster_path)})
                                     except Exception:
                                         pass
 
@@ -2418,18 +2457,90 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                             nid = _to_str(show.at[i, "NHL_ID"])
                             return f"{nm}  |  NHL_ID={nid}" if nid else nm
 
-                        picks = st.multiselect("Choisir jusqu'à 5 joueurs (top 200)", options=show.index.tolist(), format_func=fmt_row, default=[], key="ar_rm_picks")
+                        # ✅ Sélection persistante (les choix ne disparaissent pas)
+
+                        selected_rm = st.session_state.get("ar_rm_selected", [])
+
+                        opt_ids_rm = []
+
+                        for _i in list(selected_rm) + show.index.tolist():
+
+                            if _i not in opt_ids_rm:
+
+                                opt_ids_rm.append(_i)
+
+
+                        picks = st.multiselect(
+
+                            "Choisir jusqu'à 5 joueurs (top 200)",
+
+                            options=opt_ids_rm,
+
+                            format_func=fmt_row,
+
+                            default=list(selected_rm),
+
+                            key="ar_rm_picks",
+
+                        )
+
                         if len(picks) > 5:
+
                             st.warning("⚠️ Max 5 joueurs.")
+
                             picks = picks[:5]
+
+                        st.session_state["ar_rm_selected"] = list(picks)
+
+
+                        if picks:
+
+                            sel_df = show.loc[picks, [player_col, "NHL_ID"]].copy().rename(columns={player_col: "Player"})
+
+                            sel_df.insert(0, "❌", False)
+
+                            st.markdown("**Aperçu (à retirer) — coche ❌ pour retirer de la liste**")
+
+                            edited_sel = st.data_editor(sel_df, use_container_width=True, height=240, key="ar_rm_preview_editor")
+
+                            c_rm1, c_rm2 = st.columns([1, 1])
+
+                            with c_rm1:
+
+                                if st.button("❌ Retirer les lignes cochées", use_container_width=True, key="ar_rm_remove_checked"):
+
+                                    try:
+
+                                        mask = edited_sel["❌"].astype(bool)
+
+                                        remove_idx = [p for p, flag in zip(picks, mask.tolist()) if flag]
+
+                                        new_sel = [p for p in picks if p not in set(remove_idx)]
+
+                                        st.session_state["ar_rm_selected"] = new_sel
+
+                                        st.rerun()
+
+                                    except Exception:
+
+                                        pass
+
+                            with c_rm2:
+
+                                if st.button("🧹 Vider la sélection", use_container_width=True, key="ar_rm_clear"):
+
+                                    st.session_state["ar_rm_selected"] = []
+
+                                    st.rerun()
+
+
+                        reason = st.selectbox("Raison", options=["échanges","alignements","ajouts_joueurs","rachats","classement_total","autre"], index=2, key="ar_rm_reason")
+
 
                         comment = st.text_area("Commentaire (OBLIGATOIRE)", value="", key="ar_rm_comment", placeholder="Ex: Retrait blessure / trade / correction…")
                         confirm = st.checkbox("✅ Je confirme le retrait", value=False, key="ar_rm_confirm")
 
-                        if picks:
-                            prev = show.loc[picks, [player_col, "NHL_ID"]].copy().rename(columns={player_col: "Player"})
-                            st.markdown("**Aperçu (à retirer)**")
-                            st.dataframe(prev, use_container_width=True, height=220)
+
 
                         if st.button("🚨 CONFIRMER RETRAIT (écrit dans roster)", type="primary", use_container_width=True, key="ar_rm_go"):
                             if not picks:
@@ -2455,7 +2566,7 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                                 for _, r in removed.iterrows():
                                     nm = _to_str(r.get(player_col, ""))
                                     nid = _to_str(r.get("NHL_ID", ""))
-                                    _append_history_event(DATA_DIR, action="REMOVE_PLAYER", team=team, player=nm, nhl_id=nid, note=comment.strip(), extra={"file": os.path.basename(roster_path)})
+                                    _append_history_event(DATA_DIR, action="REMOVE_PLAYER", reason=str(reason), team=team, player=nm, nhl_id=nid, note=comment.strip(), extra={"file": os.path.basename(roster_path)})
                             except Exception:
                                 pass
 
@@ -2476,64 +2587,187 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                                 st.rerun()
                             else:
                                 st.error("❌ Écriture échouée: " + str(err))
-            with st.expander("🧾 Historique — supprimer des lignes", expanded=False):
-                st.caption("Supprimer des lignes d'historique = COMMENTAIRE obligatoire + confirmation (idiot-proof).")
+            with st.expander("🧾 Historique — gérer / filtrer / supprimer en lot", expanded=False):
+                st.caption("Historique = journal des actions. Filtre par **raison**, stats (jour / semaine / mois), suppression en lot (commentaire obligatoire) + bouton **Tout sélectionner**.")
 
-                csvs = list_data_csvs(DATA_DIR)
-                candidates = [p for p in csvs if any(k in os.path.basename(p).lower() for k in ["histor", "history", "trans", "log", "backup_history"])]
-                if not candidates:
-                    st.warning("Je ne vois aucun fichier qui ressemble à un historique. (On utilisera historique_admin.csv si besoin.)")
-                    candidates = csvs[:]
+                hist_path = _pick_history_path(DATA_DIR)
+                st.info(f"Fichier historique (auto): `{hist_path}`")
 
-                hist_path = st.selectbox("Fichier historique", options=candidates, key="hist_path")
-                hdf, _ = load_csv(hist_path)
-                if hdf is None or hdf.empty:
-                    st.warning("Historique vide/illisible.")
-                else:
-                    view = hdf.copy()
-                    view.insert(0, "__delete__", False)
-                    edited = st.data_editor(view, use_container_width=True, height=360, key="hist_editor")
+                hdf, _ = load_csv(hist_path) if os.path.exists(hist_path) else (pd.DataFrame(), None)
+                if hdf is None:
+                    hdf = pd.DataFrame()
 
-                    comment = st.text_area("Commentaire (OBLIGATOIRE)", value="", key="hist_delete_comment", placeholder="Ex: suppression lignes erronées…")
-                    confirm = st.checkbox("✅ Je confirme supprimer les lignes cochées", value=False, key="hist_delete_confirm")
+                for c in ["ts_utc","action","reason","team","player","nhl_id","note"]:
+                    if c not in hdf.columns:
+                        hdf[c] = ""
 
-                    if st.button("🗑️ Supprimer les lignes cochées", type="primary", use_container_width=True, key="hist_delete"):
-                        try:
-                            del_mask = edited["__delete__"].astype(bool)
-                            to_del = int(del_mask.sum())
-                        except Exception:
-                            to_del = 0
-                            del_mask = None
+                t_stats, t_clean, t_add = st.tabs(["📊 Stats", "🗑️ Suppression", "➕ Ajouter entrée"])
 
-                        if to_del <= 0:
-                            st.warning("Aucune ligne cochée.")
-                            st.stop()
-                        if not comment.strip():
+                with t_stats:
+                    if hdf.empty:
+                        st.info("Aucune donnée.")
+                    else:
+                        df = hdf.copy()
+                        df["_ts"] = pd.to_datetime(df["ts_utc"], errors="coerce")
+
+                        preset = st.selectbox("Période", ["Aujourd'hui", "7 jours", "30 jours", "Tout"], index=1, key="hist_preset")
+                        now = pd.Timestamp.utcnow()
+                        if preset == "Aujourd'hui":
+                            start = now.normalize()
+                        elif preset == "7 jours":
+                            start = now - pd.Timedelta(days=7)
+                        elif preset == "30 jours":
+                            start = now - pd.Timedelta(days=30)
+                        else:
+                            start = None
+                        if start is not None:
+                            df = df[df["_ts"].notna() & (df["_ts"] >= start)]
+
+                        reasons = sorted([r for r in df["reason"].astype(str).str.strip().unique().tolist() if r])
+                        sel_reasons = st.multiselect("Raisons", options=reasons, default=reasons, key="hist_reasons_filter")
+                        if sel_reasons:
+                            df = df[df["reason"].astype(str).str.strip().isin(sel_reasons)]
+
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Entrées", int(len(df)))
+                        c2.metric("Équipes touchées", int(df["team"].astype(str).nunique()))
+                        c3.metric("Raisons", int(df["reason"].astype(str).str.strip().replace("", pd.NA).dropna().nunique()))
+
+                        by_reason = (
+                            df.assign(reason=df["reason"].astype(str).str.strip())
+                              .groupby("reason", as_index=False)
+                              .size()
+                              .rename(columns={"size":"count"})
+                              .sort_values("count", ascending=False)
+                        )
+                        st.subheader("Par raison")
+                        st.dataframe(by_reason, use_container_width=True, hide_index=True)
+
+                        st.subheader("Dernières entrées (50)")
+                        show = df.sort_values("_ts", ascending=False).head(50)
+                        st.dataframe(show[["ts_utc","reason","action","team","player","nhl_id","note"]], use_container_width=True, hide_index=True)
+
+                with t_clean:
+                    if hdf.empty:
+                        st.info("Aucune ligne à supprimer.")
+                    else:
+                        df = hdf.copy()
+                        df["_ts"] = pd.to_datetime(df["ts_utc"], errors="coerce")
+
+                        reasons = sorted([r for r in df["reason"].astype(str).str.strip().unique().tolist() if r])
+                        sel_reasons = st.multiselect("Filtre raison (optionnel)", options=reasons, default=[], key="hist_clean_reasons")
+                        if sel_reasons:
+                            df = df[df["reason"].astype(str).str.strip().isin(sel_reasons)]
+
+                        teams = sorted([t for t in df["team"].astype(str).str.strip().unique().tolist() if t])
+                        sel_teams = st.multiselect("Filtre équipe (optionnel)", options=teams, default=[], key="hist_clean_teams")
+                        if sel_teams:
+                            df = df[df["team"].astype(str).str.strip().isin(sel_teams)]
+
+                        preset = st.selectbox("Filtre période (optionnel)", ["(Aucun)", "Aujourd'hui", "7 jours", "30 jours"], index=0, key="hist_clean_preset")
+                        now = pd.Timestamp.utcnow()
+                        if preset != "(Aucun)":
+                            if preset == "Aujourd'hui":
+                                start = now.normalize()
+                            elif preset == "7 jours":
+                                start = now - pd.Timedelta(days=7)
+                            else:
+                                start = now - pd.Timedelta(days=30)
+                            df = df[df["_ts"].notna() & (df["_ts"] >= start)]
+
+                        view = df.copy()
+                        view.insert(0, "__delete__", False)
+
+                        csa, csb = st.columns([1, 1])
+                        with csa:
+                            if st.button("✅ Tout sélectionner", use_container_width=True, key="hist_select_all"):
+                                st.session_state["hist_select_all_flag"] = True
+                                st.session_state["hist_select_none_flag"] = False
+                                st.rerun()
+                        with csb:
+                            if st.button("🚫 Tout désélectionner", use_container_width=True, key="hist_select_none"):
+                                st.session_state["hist_select_none_flag"] = True
+                                st.session_state["hist_select_all_flag"] = False
+                                st.rerun()
+
+                        if st.session_state.get("hist_select_all_flag"):
+                            view["__delete__"] = True
+                            st.session_state["hist_select_all_flag"] = False
+                        if st.session_state.get("hist_select_none_flag"):
+                            view["__delete__"] = False
+                            st.session_state["hist_select_none_flag"] = False
+
+                        edited = st.data_editor(view, use_container_width=True, height=420, key="hist_clean_editor")
+
+                        reason = st.selectbox("Raison de suppression (OBLIGATOIRE)", ["nettoyage","correction","doublons","erreur","autre"], index=0, key="hist_delete_reason")
+                        comment = st.text_area("Commentaire (OBLIGATOIRE)", value="", key="hist_delete_comment", placeholder="Ex: suppression lignes erronées…")
+                        confirm = st.checkbox("✅ Je confirme supprimer les lignes cochées", value=False, key="hist_delete_confirm")
+
+                        if st.button("🗑️ Supprimer les lignes cochées", type="primary", use_container_width=True, key="hist_delete_go"):
+                            mask = edited["__delete__"].astype(bool)
+                            to_del = int(mask.sum())
+
+                            if to_del <= 0:
+                                st.warning("Aucune ligne cochée.")
+                                st.stop()
+                            if not comment.strip():
+                                st.error("🛑 Commentaire obligatoire.")
+                                st.stop()
+                            if not confirm:
+                                st.error("🛑 Coche la confirmation.")
+                                st.stop()
+
+                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            bkp = os.path.join(DATA_DIR, f"_backup_{os.path.basename(hist_path)}_{ts}.csv")
+                            try:
+                                _atomic_write_df(hdf, bkp)
+                            except Exception:
+                                pass
+
+                            cleaned = hdf.drop(index=edited.index[mask.values], errors="ignore").copy()
+                            ok, err = _atomic_write_df(cleaned, hist_path)
+                            if ok:
+                                st.success(f"✅ {to_del} lignes supprimées. Backup: {os.path.basename(bkp)}")
+                                try:
+                                    _append_history_event(DATA_DIR, action="DELETE_HISTORY_ROWS", reason=str(reason), team="ALL", player="", nhl_id="", note=comment.strip(), extra={"file": os.path.basename(hist_path), "deleted_rows": to_del})
+                                except Exception:
+                                    pass
+                                st.rerun()
+                            else:
+                                st.error("❌ " + str(err))
+
+                with t_add:
+                    reason = st.selectbox("Raison", ["échanges","alignements","ajouts_joueurs","rachats","classement_total","autre"], index=0, key="hist_add_reason")
+                    action = st.text_input("Action", value="", key="hist_add_action", placeholder="Ex: TRADE, ALIGNEMENT, BUYOUT, CLASSEMENT…")
+                    team = st.selectbox("Équipe", ["ALL","Whalers","Canadiens","Cracheurs","Nordiques","Predateurs","Red_Wings"], index=0, key="hist_add_team")
+                    player = st.text_input("Joueur (optionnel)", value="", key="hist_add_player")
+                    nhl_id = st.text_input("NHL_ID (optionnel)", value="", key="hist_add_nhl")
+                    note = st.text_area("Commentaire (OBLIGATOIRE)", value="", key="hist_add_note", placeholder="Explique ce que tu as fait.")
+                    confirm = st.checkbox("✅ Je confirme ajouter cette entrée", value=False, key="hist_add_confirm")
+
+                    if st.button("➕ Ajouter à l'historique", type="primary", use_container_width=True, key="hist_add_go"):
+                        if not note.strip():
                             st.error("🛑 Commentaire obligatoire.")
                             st.stop()
                         if not confirm:
                             st.error("🛑 Coche la confirmation.")
                             st.stop()
 
-                        cleaned = hdf.loc[~del_mask.values].copy()
-
-                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        bkp = os.path.join(DATA_DIR, f"_backup_{os.path.basename(hist_path)}_{ts}.csv")
-                        try:
-                            _atomic_write_df(hdf, bkp)
-                        except Exception:
-                            pass
-
-                        ok, err = _atomic_write_df(cleaned, hist_path)
+                        ok, msg, path = _append_history_event(
+                            DATA_DIR,
+                            action=action.strip() or "MANUAL",
+                            reason=str(reason),
+                            team=str(team),
+                            player=player.strip(),
+                            nhl_id=nhl_id.strip(),
+                            note=note.strip(),
+                            extra={},
+                        )
                         if ok:
-                            st.success(f"✅ {to_del} lignes supprimées. Backup: {os.path.basename(bkp)}")
-                            try:
-                                _append_history_event(DATA_DIR, action="DELETE_HISTORY_ROWS", team="ALL", player="", nhl_id="", note=comment.strip(), extra={"file": os.path.basename(hist_path), "deleted_rows": to_del})
-                            except Exception:
-                                pass
+                            st.success("✅ Entrée ajoutée.")
                             st.rerun()
                         else:
-                            st.error("❌ Écriture échouée: " + str(err))
+                            st.error("❌ " + str(msg))
             with st.expander("🏆 Points GM — modifier", expanded=False):
                 pts_path = os.path.join(DATA_DIR, "gm_points.csv")
                 if os.path.exists(pts_path):
