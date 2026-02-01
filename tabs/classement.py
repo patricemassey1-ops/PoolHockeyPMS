@@ -304,5 +304,3 @@ def render(ctx: dict) -> None:
         st.caption(f"Source GM points: `{gm_path}`")
         st.write("Colonnes points:", list(pts.columns))
         st.write("Périodes détectées:", periods)
-
-
