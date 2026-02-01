@@ -1779,6 +1779,10 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                         # write the real master now
                         okm, erm = _atomic_write_df(after_df, master_path)
                         if okm:
+                            try:
+                                rep["master_written"] = True
+                            except Exception:
+                                pass
                             st.success(f"✅ Master écrit malgré suspects: {master_path}")
                         else:
                             st.error(f"❌ Échec écriture master: {erm}")
