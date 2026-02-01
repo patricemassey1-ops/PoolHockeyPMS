@@ -1550,53 +1550,57 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 
             colA, colB = st.columns([1, 1])
             with colA:
+                if os.path.exists(nhl_src_path):
+                st.info("ℹ️ Source déjà présente (et tu peux la mettre dans ton repo). **Ne clique pas Drive AUTO** — inutile ici.")
+                st.button("⬇️ Drive AUTO → nhl_search_players.csv (inutile — déjà OK)", use_container_width=True, disabled=True, key="steps_drive_auto_disabled")
+            else:
                 if st.button("⬇️ Drive AUTO → nhl_search_players.csv", use_container_width=True, key="steps_drive_auto"):
-                    # Dummy-proof: protections + messages clairs
-                    if not _drive_oauth_available():
-                        st.error("Drive OAuth n'est pas configuré (secrets gdrive_oauth).")
-                        st.stop()
+                        # Dummy-proof: protections + messages clairs
+                        if not _drive_oauth_available():
+                            st.error("Drive OAuth n'est pas configuré (secrets gdrive_oauth).")
+                            st.stop()
 
-                    folder_id = _drive_get_folder_id_default()
-                    if not folder_id:
-                        st.error("Folder ID Drive manquant.")
-                        st.stop()
+                        folder_id = _drive_get_folder_id_default()
+                        if not folder_id:
+                            st.error("Folder ID Drive manquant.")
+                            st.stop()
 
-                    # 1) Liste filtrée (CSV/Sheet)
-                    with st.spinner("Drive: recherche CSV/Sheets…"):
-                        files = _drive_list_csv_files(folder_id)
+                        # 1) Liste filtrée (CSV/Sheet)
+                        with st.spinner("Drive: recherche CSV/Sheets…"):
+                            files = _drive_list_csv_files(folder_id)
 
-                    if not files:
-                        st.error("Aucun fichier CSV/Sheet trouvé dans ce dossier Drive.")
-                        st.caption("➡️ Deux solutions: (1) mets un CSV/Google Sheet dans ce dossier Drive, ou (2) clique le bouton rouge **Générer via NHL Search API** à droite.")
-                        # Diagnostic rapide
-                        try:
-                            dbg = _drive_debug_probe(folder_id) if "_drive_debug_probe" in globals() else {}
-                            if dbg and not dbg.get("error"):
-                                st.caption(f"Enfants du dossier (any): {dbg.get('folder_children_any_count', 0)} • CSV/Sheets détectés: {dbg.get('folder_children_filtered_count', 0)}")
-                                if dbg.get("samples_folder"):
-                                    st.markdown("**Aperçu (10) fichiers trouvés dans le dossier (peu importe le type)**")
-                                    st.dataframe(pd.DataFrame(dbg.get("samples_folder")), use_container_width=True, height=240)
-                        except Exception:
-                            pass
-                        st.stop()
+                        if not files:
+                            st.error("Aucun fichier CSV/Sheet trouvé dans ce dossier Drive.")
+                            st.caption("➡️ Deux solutions: (1) mets un CSV/Google Sheet dans ce dossier Drive, ou (2) clique le bouton rouge **Générer via NHL Search API** à droite.")
+                            # Diagnostic rapide
+                            try:
+                                dbg = _drive_debug_probe(folder_id) if "_drive_debug_probe" in globals() else {}
+                                if dbg and not dbg.get("error"):
+                                    st.caption(f"Enfants du dossier (any): {dbg.get('folder_children_any_count', 0)} • CSV/Sheets détectés: {dbg.get('folder_children_filtered_count', 0)}")
+                                    if dbg.get("samples_folder"):
+                                        st.markdown("**Aperçu (10) fichiers trouvés dans le dossier (peu importe le type)**")
+                                        st.dataframe(pd.DataFrame(dbg.get("samples_folder")), use_container_width=True, height=240)
+                            except Exception:
+                                pass
+                            st.stop()
 
-                    auto_pick = _drive_pick_auto(files)
+                        auto_pick = _drive_pick_auto(files)
 
-                    # Guard: id must exist
-                    if (not auto_pick) or (not str(auto_pick.get("id") or "").strip()):
-                        st.error("Drive AUTO: impossible de choisir un fichier (file_id manquant).")
-                        st.caption("➡️ Clique le bouton rouge **Générer via NHL Search API** à droite, ou sélectionne manuellement un fichier dans le bloc Drive complet.")
-                        st.stop()
+                        # Guard: id must exist
+                        if (not auto_pick) or (not str(auto_pick.get("id") or "").strip()):
+                            st.error("Drive AUTO: impossible de choisir un fichier (file_id manquant).")
+                            st.caption("➡️ Clique le bouton rouge **Générer via NHL Search API** à droite, ou sélectionne manuellement un fichier dans le bloc Drive complet.")
+                            st.stop()
 
-                    # Download (handles Google Sheets export)
-                    with st.spinner("Téléchargement Drive → data/nhl_search_players.csv …"):
-                        ok, err = _drive_download_any(auto_pick, nhl_src_path)
+                        # Download (handles Google Sheets export)
+                        with st.spinner("Téléchargement Drive → data/nhl_search_players.csv …"):
+                            ok, err = _drive_download_any(auto_pick, nhl_src_path)
 
-                    if ok:
-                        st.success(f"✅ Téléchargé: {nhl_src_path} (AUTO={auto_pick.get('name','')})")
-                        st.rerun()
-                    else:
-                        st.error("❌ " + err)
+                        if ok:
+                            st.success(f"✅ Téléchargé: {nhl_src_path} (AUTO={auto_pick.get('name','')})")
+                            st.rerun()
+                        else:
+                            st.error("❌ " + err)
 
             with colB:
                 if st.button("🌐 Générer via NHL Search API", type="primary", use_container_width=True, key="steps_gen_api"):
@@ -1713,13 +1717,38 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 cfg = MasterBuildConfig(data_dir=data_dir, enrich_from_nhl=True, max_nhl_calls=250)
                 max_calls = st.number_input("Max appels NHL (par run)", min_value=0, max_value=5000, value=250, step=50, key="steps_enrich_calls")
                 if st.button("🔁 Continuer enrichissement NHL (cache)", type="primary", use_container_width=True, key="steps_enrich_go"):
-                    with st.spinner("Enrichissement progressif du cache NHL …"):
-                        stats = enrich_nhl_cache(cfg, nhl_ids=ids, max_calls=int(max_calls))
-                    st.success(f"✅ Cache mis à jour: fetched={stats.get('fetched')} calls={stats.get('calls')} hits={stats.get('hits')}")
-                    st.caption(f"Restants estimés: {stats.get('missing_remaining_estimate')} / {stats.get('ids_total')}")
-                    st.rerun()
+                # Progress UI (barre + chiffres)
+                prog = st.progress(0)
+                stats_box = st.empty()
+                detail_box = st.empty()
 
-            st.info("➡️ Quand tu veux, va à l’onglet **4️⃣ Master + Audit**.")
+                def _cb(scanned, total, calls, fetched, hits, pid):
+                    try:
+                        pct = 0.0
+                        if total and total > 0:
+                            pct = min(1.0, float(scanned) / float(total))
+                        prog.progress(pct)
+                        stats_box.markdown(
+                            f"**Progression:** {int(scanned)}/{int(total)} IDs scannés  •  "
+                            f"**Appels API:** {int(calls)}  •  **Nouveaux cache:** {int(fetched)}  •  **Cache hits:** {int(hits)}"
+                        )
+                        if pid:
+                            detail_box.caption(f"ID en cours: {pid}")
+                    except Exception:
+                        pass
+
+                with st.spinner("Enrichissement progressif du cache NHL …"):
+                    stats = enrich_nhl_cache(cfg, nhl_ids=ids, max_calls=int(max_calls), progress_cb=_cb)
+
+                try:
+                    prog.progress(1.0)
+                except Exception:
+                    pass
+                st.success(f"✅ Cache mis à jour: fetched={stats.get('fetched')} calls={stats.get('calls')} hits={stats.get('hits')}")
+                st.caption(f"Restants estimés: {stats.get('missing_remaining_estimate')} / {stats.get('ids_total')}")
+                st.rerun()
+
+st.info("➡️ Quand tu veux, va à l’onglet **4️⃣ Master + Audit**.")
 
         # -------------------------
         # 4️⃣ Master + Audit (avec blocage suspects)
