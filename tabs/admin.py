@@ -1593,6 +1593,22 @@ def render(*args, **kwargs):
     )
     _require_admin_password(owner)
 
+    # -------------------------------------------------
+    # 🎨 Layout: descendre les titres (Admin uniquement)
+    # -------------------------------------------------
+    st.markdown(
+        """
+        <style>
+          /* Plus d’espace en haut pour que les titres ne collent pas */
+          .block-container { padding-top: 2.6rem !important; }
+          /* Un peu d’air au-dessus des titres */
+          h1, h2, h3 { margin-top: 1.1rem !important; }
+        </style>
+        """
+        , unsafe_allow_html=True,
+    )
+
+
 
     try:
         return _render_impl(*args, **kwargs)
@@ -1613,6 +1629,7 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
     # 🧭 Mode Étapes (1 → 4) — ordre garanti, zéro scroll
     # =====================================================
     steps_mode = st.toggle("🧭 Mode Étapes 1→4 (recommandé — zéro scroll)", value=True, key="steps_mode")
+    st.caption("✅ Lisibilité: les titres sont volontairement un peu plus bas (évite d’être collé en haut).")
     if steps_mode:
         st.caption("Tu suis les onglets 1️⃣ → 4️⃣ dans l’ordre. Si tu veux voir tout l’Admin complet, désactive ce mode.")
 
@@ -1889,8 +1906,6 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 if st.button("🧽 Effacer le message", use_container_width=True, key="steps_build_clear"):
                     st.session_state.pop("steps_build_status", None)
                     st.rerun()
-
-            st.success("👉 TU ES ICI : ÉTAPE 4/4")
 
             st.markdown("### ✅ But")
             st.markdown("Construire **`data/hockey.players_master.csv`** + écrire les audits.")
