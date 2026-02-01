@@ -15,6 +15,16 @@ import os
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
 
+def _to_str(x):
+    try:
+        if x is None:
+            return ""
+        s = str(x)
+        return s.strip()
+    except Exception:
+        return ""
+
+
 # Google Drive (optional)
 try:
     from google.oauth2.credentials import Credentials  # type: ignore
