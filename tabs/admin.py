@@ -1938,6 +1938,21 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                                     )
                                     if okh:
                                         st.success("🧾 " + msgh)
+                                        # 📥 Option A: télécharger l'historique et le mettre dans /data/ (repo)
+                                        try:
+                                            hb = _read_file_bytes(hpath)
+                                            if hb:
+                                                st.download_button(
+                                                    "📥 Télécharger historique (CSV) (Option A: mets-le dans ton repo /data/)",
+                                                    data=hb,
+                                                    file_name=os.path.basename(hpath),
+                                                    mime="text/csv",
+                                                    use_container_width=True,
+                                                    key="dl_hist_after_gm_points",
+                                                )
+                                                st.caption("✅ Historique mis à jour. Option A: commit/push pour ne pas le perdre après redémarrage.")
+                                        except Exception:
+                                            pass
                                         hb = _read_file_bytes(hpath)
                                         if hb:
                                             st.download_button("📥 Télécharger historique (CSV)", data=hb, file_name=os.path.basename(hpath), mime="text/csv", use_container_width=True, key="dl_hist_after_add")
