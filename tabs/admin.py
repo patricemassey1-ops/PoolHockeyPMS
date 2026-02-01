@@ -1801,6 +1801,27 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                         st.download_button("📥 Télécharger nhl_id_suspects.csv (Option A)", data=b, file_name=os.path.basename(sp), mime="text/csv", use_container_width=True, key="dl_suspects_step4")
 
                 st.info("✅ Prochaine étape: **tu as fini**. Optionnel: commit/push ces fichiers dans ton repo `/data/` (Option A).")
+                # ✅ Vérification Option A (idiot-proof)
+                st.markdown("### ✅ Vérification Option A")
+                st.caption("But: confirmer que les fichiers existent bien dans `data/` (local). Ensuite tu les commits dans ton repo.")
+                need = [
+                    ("Master", mp),
+                    ("Audit", rp),
+                    ("Suspects", sp),
+                ]
+                ok_all = True
+                for label, path in need:
+                    if not path:
+                        continue
+                    exists = os.path.exists(path)
+                    ok_all = ok_all and exists
+                    if exists:
+                        st.success(f"✅ {label}: `{os.path.basename(path)}` présent dans data/")
+                    else:
+                        st.error(f"❌ {label}: `{os.path.basename(path)}` MANQUANT dans data/")
+
+                st.caption("📌 Prochaine action: **Télécharge** (boutons ci-dessus) → copie dans ton repo `data/` → commit/push.")
+
                 if st.button("🧽 Effacer le message", use_container_width=True, key="steps_build_clear"):
                     st.session_state.pop("steps_build_status", None)
                     st.rerun()
@@ -1894,9 +1915,26 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                     "audit_rows": int(len(audit_df)) if isinstance(audit_df, pd.DataFrame) else 0,
                     "suspects_rows": int(len(suspects_df)) if isinstance(suspects_df, pd.DataFrame) else 0,
                 }
+                # Marque la saison comme "master à jour" (pour enlever l'alerte Home)
+                try:
+                    season_state_path = os.path.join(DATA_DIR, "season_state.json")
+                    if os.path.exists(season_state_path):
+                        import json
+                        with open(season_state_path, "r", encoding="utf-8") as f:
+                            st_state = json.load(f) or {}
+                    else:
+                        st_state = {}
+                    st_state["current_season"] = str(st.session_state.get("season") or st_state.get("current_season") or "").strip()
+                    st_state["needs_master_rebuild"] = False
+                    st_state["last_master_built_at_utc"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    with open(season_state_path, "w", encoding="utf-8") as f:
+                        json.dump(st_state, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+
                 st.rerun()
 
-            st.info("✅ Quand l’étape 4 est verte, tu as fini.")
+            st.info("✅ Quand l’étape 4 est verte, tu as fini. Option A: télécharge les CSV et commit/push dans `/data/` (à refaire à chaque nouvelle saison ou si tu régénères le master).")
 
 
         # -------------------------
@@ -1908,116 +1946,415 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             st.caption("Outils avancés (ajout joueur, édition historique, points GM).")
 
             GM_TEAMS = ["Whalers", "Canadiens", "Cracheurs", "Nordiques", "Predateurs", "Red_Wings"]
+
+            # -------------------------------------------------
+            # 📅 Nouvelle saison (idiot-proof)
+            # -------------------------------------------------
+            with st.expander("📅 Nouvelle saison — démarrer / archiver", expanded=False):
+                st.caption("But: préparer une nouvelle saison (ex: 2026-2027) et te rappeler de reconstruire le Master.")
+                season_state_path = os.path.join(DATA_DIR, "season_state.json")
+
+                def _load_season_state():
+                    try:
+                        if os.path.exists(season_state_path):
+                            import json
+                            with open(season_state_path, "r", encoding="utf-8") as f:
+                                return json.load(f)
+                    except Exception:
+                        pass
+                    return {"current_season": "", "needs_master_rebuild": False, "updated_at_utc": ""}
+
+                def _save_season_state(state: dict):
+                    try:
+                        import json
+                        os.makedirs(os.path.dirname(season_state_path) or ".", exist_ok=True)
+                        with open(season_state_path, "w", encoding="utf-8") as f:
+                            json.dump(state, f, ensure_ascii=False, indent=2)
+                        return True, ""
+                    except Exception as e:
+                        return False, str(e)
+
+                st_state = _load_season_state()
+                cur = _to_str(st_state.get("current_season", "")) or _to_str(st.session_state.get("season", ""))
+                st.info(f"Saison actuelle détectée: **{cur or 'inconnue'}**")
+
+                new_season = st.text_input("Nouvelle saison (ex: 2026-2027)", value="", key="new_season_lbl", placeholder="2026-2027")
+                comment = st.text_area("Commentaire (obligatoire)", value="", key="new_season_comment", placeholder="Ex: Début saison 2026-2027, nouveau PuckPedia…")
+                confirm = st.checkbox("✅ Je confirme démarrer une nouvelle saison", value=False, key="new_season_confirm")
+
+                if st.button("🚀 Démarrer nouvelle saison (archive + alerte Home)", type="primary", use_container_width=True, key="new_season_go"):
+                    if not new_season.strip():
+                        st.error("🛑 Entre une saison (ex: 2026-2027).")
+                        st.stop()
+                    if not comment.strip():
+                        st.error("🛑 Commentaire obligatoire.")
+                        st.stop()
+                    if not confirm:
+                        st.error("🛑 Coche la confirmation.")
+                        st.stop()
+
+                    # Archive current key files (if exist)
+                    old_season = cur or "unknown"
+                    arch_dir = os.path.join(DATA_DIR, "archive", old_season)
+                    os.makedirs(arch_dir, exist_ok=True)
+
+                    to_archive = [
+                        os.path.join(DATA_DIR, "hockey.players_master.csv"),
+                        os.path.join(DATA_DIR, "master_build_report.csv"),
+                        os.path.join(DATA_DIR, "nhl_id_suspects.csv"),
+                        os.path.join(DATA_DIR, "nhl_search_players.csv"),
+                        os.path.join(DATA_DIR, "gm_points.csv"),
+                        os.path.join(DATA_DIR, "historique_admin.csv"),
+                    ]
+                    moved = 0
+                    for p in to_archive:
+                        try:
+                            if os.path.exists(p):
+                                dst = os.path.join(arch_dir, os.path.basename(p))
+                                # overwrite if exists
+                                try:
+                                    if os.path.exists(dst):
+                                        os.remove(dst)
+                                except Exception:
+                                    pass
+                                os.replace(p, dst)
+                                moved += 1
+                        except Exception:
+                            pass
+
+                    # Update season state + Streamlit session season
+                    st.session_state["season"] = new_season.strip()
+                    ok, err = _save_season_state({
+                        "current_season": new_season.strip(),
+                        "needs_master_rebuild": True,
+                        "updated_at_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                        "comment": comment.strip(),
+                        "archived_from": old_season,
+                        "archived_files_count": moved,
+                    })
+                    # Log history
+                    try:
+                        _append_history_event(DATA_DIR, action="NEW_SEASON", team="ALL", player="", nhl_id="", note=comment.strip(), extra={"new_season": new_season.strip(), "archived_from": old_season, "archived_files_count": moved})
+                    except Exception:
+                        pass
+
+                    if ok:
+                        st.success(f"✅ Nouvelle saison démarrée: {new_season.strip()} (fichiers archivés: {moved}).")
+                        st.info("➡️ Prochaine action: va à **Étape 4/4 Master + Audit** et reconstruis le master pour la nouvelle saison.")
+                        st.rerun()
+                    else:
+                        st.error("❌ Erreur season_state.json: " + str(err))
+
+            # -------------------------------------------------
+            # 🏒 Points des joueurs (par équipe) — overrides
+            # -------------------------------------------------
+            with st.expander("🏒 Points joueurs — modifier par équipe (bonus/malus)", expanded=False):
+                st.caption("Crée/édite `data/player_points_overrides.csv` (bonus/malus par joueur). Commentaire obligatoire.")
+                ov_path = os.path.join(DATA_DIR, "player_points_overrides.csv")
+
+                # Load existing overrides
+                ov = pd.DataFrame()
+                if os.path.exists(ov_path):
+                    ov, _ = load_csv(ov_path)
+                    if ov is None:
+                        ov = pd.DataFrame()
+
+                if ov.empty:
+                    ov = pd.DataFrame(columns=["team","player","nhl_id","points_delta","comment","ts_utc"])
+
+                team = st.selectbox("Équipe (pour bonus/malus joueurs)", options=GM_TEAMS, key="pp_team")
+                team_path = os.path.join(DATA_DIR, f"{team}.csv")
+                tdf, _ = load_csv(team_path) if os.path.exists(team_path) else (pd.DataFrame(), None)
+                if tdf is None or tdf.empty:
+                    st.warning("Fichier équipe vide/inexistant. Ajoute des joueurs d'abord.")
+                    st.stop()
+
+                t_name = _detect_col(tdf, ["Player","Skaters","Name","Full Name","Joueur"]) or "Player"
+                if t_name not in tdf.columns:
+                    tdf[t_name] = ""
+                if "NHL_ID" not in tdf.columns:
+                    tdf["NHL_ID"] = ""
+
+                # Build base table for this team
+                base = tdf[[t_name, "NHL_ID"]].copy().rename(columns={t_name:"player", "NHL_ID":"nhl_id"})
+                base["team"] = team
+                base["points_delta"] = 0
+                base["comment"] = ""
+
+                # Merge existing overrides (latest per team+nhl_id)
+                ov2 = ov.copy()
+                if "team" in ov2.columns and "nhl_id" in ov2.columns:
+                    ov2["team"] = ov2["team"].astype(str)
+                    ov2["nhl_id"] = ov2["nhl_id"].astype(str)
+                    ov2["points_delta"] = pd.to_numeric(ov2.get("points_delta", 0), errors="coerce").fillna(0).astype(int)
+                    # pick last by ts_utc
+                    if "ts_utc" in ov2.columns:
+                        ov2["_ts"] = pd.to_datetime(ov2["ts_utc"], errors="coerce")
+                        ov2 = ov2.sort_values("_ts", ascending=True)
+                    ov_latest = ov2.drop_duplicates(subset=["team","nhl_id"], keep="last")
+                    base = base.merge(ov_latest[["team","nhl_id","points_delta","comment"]], on=["team","nhl_id"], how="left", suffixes=("","_old"))
+                    base["points_delta"] = base["points_delta_old"].fillna(base["points_delta"]).astype(int)
+                    base["comment"] = base["comment_old"].fillna("").astype(str)
+                    base = base.drop(columns=[c for c in base.columns if c.endswith("_old")], errors="ignore")
+
+                st.markdown("### Édite les bonus/malus (points_delta)")
+                edited = st.data_editor(base[["player","nhl_id","points_delta","comment"]], use_container_width=True, height=360, key="pp_editor")
+
+                global_comment = st.text_area("Commentaire global (obligatoire pour sauvegarder)", value="", key="pp_global_comment", placeholder="Ex: Correction points manuels…")
+                confirm = st.checkbox("✅ Je confirme sauvegarder les points joueurs", value=False, key="pp_confirm")
+
+                if st.button("💾 Sauvegarder points joueurs (écrit overrides)", type="primary", use_container_width=True, key="pp_save"):
+                    if not global_comment.strip():
+                        st.error("🛑 Commentaire global obligatoire.")
+                        st.stop()
+                    if not confirm:
+                        st.error("🛑 Coche la confirmation.")
+                        st.stop()
+
+                    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                    out_rows = []
+                    for _, r in edited.iterrows():
+                        delta = int(pd.to_numeric(r.get("points_delta", 0), errors="coerce") or 0)
+                        # only store non-zero deltas
+                        if delta != 0:
+                            out_rows.append({
+                                "team": team,
+                                "player": _to_str(r.get("player","")),
+                                "nhl_id": _to_str(r.get("nhl_id","")),
+                                "points_delta": delta,
+                                "comment": _to_str(r.get("comment","")),
+                                "ts_utc": now,
+                                "global_comment": global_comment.strip(),
+                            })
+
+                    out_df = pd.DataFrame(out_rows)
+
+                    # Conserver les autres équipes (ne pas écraser tout le fichier)
+                    keep = ov.copy() if isinstance(ov, pd.DataFrame) else pd.DataFrame()
+                    if not keep.empty and "team" in keep.columns:
+                        keep["team"] = keep["team"].astype(str)
+                        keep_other = keep[keep["team"].astype(str) != str(team)].copy()
+                    else:
+                        keep_other = pd.DataFrame()
+
+                    final_df = pd.concat([keep_other, out_df], ignore_index=True)
+                    ok, err = _atomic_write_df(final_df, ov_path)
+                    if ok:
+                        st.success(f"✅ Sauvegardé: {ov_path} (rows={len(out_df)})")
+                        try:
+                            _append_history_event(DATA_DIR, action="UPDATE_PLAYER_POINTS", team=team, player="", nhl_id="", note=global_comment.strip(), extra={"file": os.path.basename(ov_path), "rows": len(out_df)})
+                        except Exception:
+                            pass
+                        b = _read_file_bytes(ov_path)
+                        if b:
+                            st.download_button("📥 Télécharger player_points_overrides.csv (Option A: repo /data/)", data=b, file_name=os.path.basename(ov_path), mime="text/csv", use_container_width=True, key="dl_pp")
+                        st.rerun()
+                    else:
+                        st.error("❌ Écriture échouée: " + str(err))
             master_path = os.path.join(DATA_DIR, "hockey.players_master.csv")
             players_path = os.path.join(DATA_DIR, "hockey.players.csv")
 
             # ➕ Ajouter joueur
-            with st.expander("➕ Ajouter un joueur à une équipe", expanded=False):
+            with st.expander("➕ Ajouter / ➖ Retirer des joueurs (max 5)", expanded=False):
+                st.caption("Ajout/Retrait avec confirmation + commentaire obligatoire (idiot-proof).")
+
+                GM_TEAMS = ["Whalers", "Canadiens", "Cracheurs", "Nordiques", "Predateurs", "Red_Wings"]
+                master_path = os.path.join(DATA_DIR, "hockey.players_master.csv")
+                players_path = os.path.join(DATA_DIR, "hockey.players.csv")
                 src_path = master_path if os.path.exists(master_path) else players_path
+
                 st.info(f"Source joueurs: `{src_path}`")
                 src_df, _ = load_csv(src_path)
                 if src_df is None or src_df.empty:
                     st.error("Source joueurs vide/illisible.")
-                else:
-                    name_col = _detect_col(src_df, ["Player", "Skaters", "Name", "Full Name", "Joueur"]) or "Player"
-                    if name_col not in src_df.columns:
-                        src_df[name_col] = ""
-                    if "NHL_ID" not in src_df.columns:
-                        src_df["NHL_ID"] = ""
+                    st.stop()
 
-                    q = st.text_input("Recherche joueur (nom)", value="", key="add_player_query")
-                    df_view = src_df.copy()
-                    if q.strip():
-                        df_view = df_view[df_view[name_col].astype(str).str.lower().str.contains(q.strip().lower(), na=False)]
-                    df_view = df_view.head(50).copy()
+                name_col = _detect_col(src_df, ["Player", "Skaters", "Name", "Full Name", "Joueur"]) or "Player"
+                if name_col not in src_df.columns:
+                    src_df[name_col] = ""
+                if "NHL_ID" not in src_df.columns:
+                    src_df["NHL_ID"] = ""
 
-                    if df_view.empty:
+                team = st.selectbox("Équipe", options=GM_TEAMS, key="team_pick")
+                team_path = os.path.join(DATA_DIR, f"{team}.csv")
+
+                team_df, _ = load_csv(team_path) if os.path.exists(team_path) else (pd.DataFrame(), None)
+                if team_df is None:
+                    team_df = pd.DataFrame()
+
+                t_add, t_remove = st.tabs(["➕ Ajouter", "➖ Retirer"])
+
+                with t_add:
+                    st.markdown("### ➕ Ajouter des joueurs")
+                    st.caption("Tape un nom/prénom. Aucun joueur n'apparaît tant que tu ne tapes rien.")
+                    query = st.text_input("Recherche (nom ou prénom)", value="", key="add_query")
+                    if len(query.strip()) < 2:
+                        st.info("📝 Tape au moins 2 lettres pour voir des joueurs.")
+                        st.stop()
+
+                    q = query.strip().lower()
+                    view = src_df[src_df[name_col].astype(str).str.lower().str.contains(q, na=False)].copy().head(50)
+
+                    if view.empty:
                         st.warning("Aucun résultat.")
-                    else:
-                        opts = df_view.index.tolist()
-                        def fmt(i):
-                            nm = _to_str(df_view.at[i, name_col])
-                            nid = _to_str(df_view.at[i, "NHL_ID"])
-                            return f"{nm} | NHL_ID={nid}" if nid else nm
+                        st.stop()
 
-                        pick = st.selectbox("Choisir le joueur (top 50)", options=opts, format_func=fmt, key="add_player_pick")
-                        team = st.selectbox("Équipe cible", options=GM_TEAMS, key="add_player_team")
-                        team_path = os.path.join(DATA_DIR, f"{team}.csv")
+                    def fmt_idx(i):
+                        nm = _to_str(view.at[i, name_col])
+                        nid = _to_str(view.at[i, "NHL_ID"])
+                        return f"{nm}  |  NHL_ID={nid}" if nid else nm
 
-                        if st.button("➕ Ajouter ce joueur à l’équipe", type="primary", use_container_width=True, key="add_player_go"):
-                            if os.path.exists(team_path):
-                                tdf, _ = load_csv(team_path)
-                                if tdf is None:
-                                    tdf = pd.DataFrame()
-                            else:
-                                tdf = pd.DataFrame()
+                    picks = st.multiselect("Choisir jusqu'à 5 joueurs (top 50)", options=view.index.tolist(), format_func=fmt_idx, default=[], key="add_picks")
+                    if len(picks) > 5:
+                        st.warning("⚠️ Max 5 joueurs. Garde seulement 5.")
+                        picks = picks[:5]
 
-                            row = src_df.loc[pick].to_dict()
+                    comment = st.text_area("Commentaire (obligatoire)", value="", key="add_comment", placeholder="Ex: Ajout draft / transaction / correction…")
+                    confirm = st.checkbox("✅ Je confirme l'ajout (après commentaire)", value=False, key="add_confirm")
 
-                            # Anti-duplication
-                            already = False
+                    if picks:
+                        prev = view.loc[picks, [name_col, "NHL_ID"]].copy().rename(columns={name_col: "Player"})
+                        st.markdown("**Aperçu (à ajouter)**")
+                        st.dataframe(prev, use_container_width=True, height=220)
+
+                    if st.button("🚨 CONFIRMER AJOUT (écrit dans l'équipe)", type="primary", use_container_width=True, key="add_go"):
+                        if not picks:
+                            st.warning("Choisis au moins 1 joueur.")
+                            st.stop()
+                        if not comment.strip():
+                            st.error("🛑 Commentaire obligatoire. Écris un commentaire avant de confirmer.")
+                            st.stop()
+                        if not confirm:
+                            st.error("🛑 Coche la confirmation avant d'écrire.")
+                            st.stop()
+
+                        tdf, _ = load_csv(team_path) if os.path.exists(team_path) else (pd.DataFrame(), None)
+                        if tdf is None:
+                            tdf = pd.DataFrame()
+
+                        added = 0
+                        skipped = 0
+                        for idx in picks:
+                            row = src_df.loc[idx].to_dict()
                             nid = _to_str(row.get("NHL_ID", ""))
                             nm = _to_str(row.get(name_col, ""))
-                            if not tdf.empty:
-                                if "NHL_ID" in tdf.columns and nid:
-                                    already = nid in tdf["NHL_ID"].astype(str).tolist()
-                                if (not already) and (name_col in tdf.columns) and nm:
-                                    already = nm.lower() in tdf[name_col].astype(str).str.lower().tolist()
+
+                            already = False
+                            if (not tdf.empty) and ("NHL_ID" in tdf.columns) and nid:
+                                already = nid in tdf["NHL_ID"].astype(str).tolist()
+                            if (not already) and (not tdf.empty) and (name_col in tdf.columns) and nm:
+                                already = nm.lower() in tdf[name_col].astype(str).str.lower().tolist()
 
                             if already:
-                                st.warning("⚠️ Joueur déjà présent dans cette équipe.")
-                            else:
-                                if tdf.empty:
-                                    tdf = pd.DataFrame(columns=list(row.keys()))
-                                for c in row.keys():
-                                    if c not in tdf.columns:
-                                        tdf[c] = ""
-                                tdf = pd.concat([tdf, pd.DataFrame([row])], ignore_index=True)
+                                skipped += 1
+                                continue
 
-                                # Backup
-                                ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                                if os.path.exists(team_path):
-                                    old, _ = load_csv(team_path)
-                                    if old is not None:
-                                        _atomic_write_df(old, os.path.join(DATA_DIR, f"_backup_{os.path.basename(team_path)}_{ts}.csv"))
+                            if tdf.empty:
+                                tdf = pd.DataFrame(columns=list(row.keys()))
+                            for c in row.keys():
+                                if c not in tdf.columns:
+                                    tdf[c] = ""
+                            tdf = pd.concat([tdf, pd.DataFrame([row])], ignore_index=True)
+                            added += 1
 
-                                ok, err = _atomic_write_df(tdf, team_path)
-                                if ok:
-                                    st.success(f"✅ Ajouté dans {team_path}")
-                                    # Historique
-                                    okh, msgh, hpath = _append_history_event(
-                                        DATA_DIR,
-                                        action="ADD_PLAYER",
-                                        team=team,
-                                        player=nm,
-                                        nhl_id=nid,
-                                        note=f"Ajout via Admin → {os.path.basename(team_path)}",
-                                        extra={"file": os.path.basename(team_path)},
-                                    )
-                                    if okh:
-                                        st.success("🧾 " + msgh)
-                                        # 📥 Option A: télécharger l'historique et le mettre dans /data/ (repo)
-                                        try:
-                                            hb = _read_file_bytes(hpath)
-                                            if hb:
-                                                st.download_button(
-                                                    "📥 Télécharger historique (CSV) (Option A: mets-le dans ton repo /data/)",
-                                                    data=hb,
-                                                    file_name=os.path.basename(hpath),
-                                                    mime="text/csv",
-                                                    use_container_width=True,
-                                                    key="dl_hist_after_gm_points",
-                                                )
-                                                st.caption("✅ Historique mis à jour. Option A: commit/push pour ne pas le perdre après redémarrage.")
-                                        except Exception:
-                                            pass
-                                        hb = _read_file_bytes(hpath)
-                                        if hb:
-                                            st.download_button("📥 Télécharger historique (CSV)", data=hb, file_name=os.path.basename(hpath), mime="text/csv", use_container_width=True, key="dl_hist_after_add")
-                                else:
-                                    st.error("❌ Écriture échouée: " + str(err))
+                            try:
+                                _append_history_event(DATA_DIR, action="ADD_PLAYER", team=team, player=nm, nhl_id=nid, note=comment.strip(), extra={"file": os.path.basename(team_path)})
+                            except Exception:
+                                pass
 
-            # 🧾 Historique — supprimer lignes
+                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        if os.path.exists(team_path):
+                            old, _ = load_csv(team_path)
+                            if old is not None:
+                                _atomic_write_df(old, os.path.join(DATA_DIR, f"_backup_{os.path.basename(team_path)}_{ts}.csv"))
+
+                        ok, err = _atomic_write_df(tdf, team_path)
+                        if ok:
+                            st.success(f"✅ Ajout terminé: {added} ajouté(s), {skipped} ignoré(s) (doublons).")
+                            hpath = _pick_history_path(DATA_DIR)
+                            hb = _read_file_bytes(hpath)
+                            if hb:
+                                st.download_button("📥 Télécharger historique (CSV)", data=hb, file_name=os.path.basename(hpath), mime="text/csv", use_container_width=True, key="dl_hist_after_add_multi")
+                            st.rerun()
+                        else:
+                            st.error("❌ Écriture échouée: " + str(err))
+
+                with t_remove:
+                    st.markdown("### ➖ Retirer des joueurs")
+                    st.caption("Sélectionne jusqu'à 5 joueurs déjà dans l'équipe.")
+                    if team_df.empty:
+                        st.info("Équipe vide ou fichier manquant. Rien à retirer.")
+                        st.stop()
+
+                    t_name_col = _detect_col(team_df, ["Player", "Skaters", "Name", "Full Name", "Joueur"]) or "Player"
+                    if t_name_col not in team_df.columns:
+                        team_df[t_name_col] = ""
+                    if "NHL_ID" not in team_df.columns:
+                        team_df["NHL_ID"] = ""
+
+                    show = team_df.head(200).copy()
+
+                    def fmt_row(i):
+                        nm = _to_str(show.at[i, t_name_col])
+                        nid = _to_str(show.at[i, "NHL_ID"])
+                        return f"{nm}  |  NHL_ID={nid}" if nid else nm
+
+                    picks = st.multiselect("Choisir jusqu'à 5 joueurs (top 200)", options=show.index.tolist(), format_func=fmt_row, default=[], key="rm_picks")
+                    if len(picks) > 5:
+                        st.warning("⚠️ Max 5 joueurs. Garde seulement 5.")
+                        picks = picks[:5]
+
+                    comment = st.text_area("Commentaire (obligatoire)", value="", key="rm_comment", placeholder="Ex: Retrait blessure / trade / correction…")
+                    confirm = st.checkbox("✅ Je confirme le retrait (après commentaire)", value=False, key="rm_confirm")
+
+                    if picks:
+                        prev = show.loc[picks, [t_name_col, "NHL_ID"]].copy().rename(columns={t_name_col: "Player"})
+                        st.markdown("**Aperçu (à retirer)**")
+                        st.dataframe(prev, use_container_width=True, height=220)
+
+                    if st.button("🚨 CONFIRMER RETRAIT (écrit dans l'équipe)", type="primary", use_container_width=True, key="rm_go"):
+                        if not picks:
+                            st.warning("Choisis au moins 1 joueur.")
+                            st.stop()
+                        if not comment.strip():
+                            st.error("🛑 Commentaire obligatoire. Écris un commentaire avant de confirmer.")
+                            st.stop()
+                        if not confirm:
+                            st.error("🛑 Coche la confirmation avant d'écrire.")
+                            st.stop()
+
+                        tdf, _ = load_csv(team_path)
+                        if tdf is None or tdf.empty:
+                            st.error("Fichier équipe illisible/vide.")
+                            st.stop()
+
+                        removed_rows = tdf.loc[picks].copy() if set(tdf.index).issuperset(set(picks)) else pd.DataFrame()
+                        tdf2 = tdf.drop(index=picks, errors="ignore").copy()
+
+                        try:
+                            for _, r in removed_rows.iterrows():
+                                nm = _to_str(r.get(t_name_col, ""))
+                                nid = _to_str(r.get("NHL_ID", ""))
+                                _append_history_event(DATA_DIR, action="REMOVE_PLAYER", team=team, player=nm, nhl_id=nid, note=comment.strip(), extra={"file": os.path.basename(team_path)})
+                        except Exception:
+                            pass
+
+                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        if os.path.exists(team_path):
+                            old, _ = load_csv(team_path)
+                            if old is not None:
+                                _atomic_write_df(old, os.path.join(DATA_DIR, f"_backup_{os.path.basename(team_path)}_{ts}.csv"))
+
+                        ok, err = _atomic_write_df(tdf2, team_path)
+                        if ok:
+                            st.success(f"✅ Retrait terminé: {len(picks)} retiré(s).")
+                            hpath = _pick_history_path(DATA_DIR)
+                            hb = _read_file_bytes(hpath)
+                            if hb:
+                                st.download_button("📥 Télécharger historique (CSV)", data=hb, file_name=os.path.basename(hpath), mime="text/csv", use_container_width=True, key="dl_hist_after_rm_multi")
+                            st.rerun()
+                        else:
+                            st.error("❌ Écriture échouée: " + str(err))
             with st.expander("🧾 Historique — supprimer des lignes", expanded=False):
                 st.caption("Astuce: si aucun historique n’existe, l’app crée `data/historique_admin.csv`.")
                 csvs = list_data_csvs(DATA_DIR)
