@@ -1766,7 +1766,18 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 
     # --- Generator (optional)
     st.markdown("### 🌐 Générer source NHL_ID (NHL Search API)")
-    out_src = os.path.join(data_dir, "nhl_search_players.csv")
+    out_src = os.path.join(DATA_DIR, "nhl_search_players.csv")
+
+    # Statut fichier source (idiot-proof)
+    if os.path.exists(out_src):
+        try:
+            sz = os.path.getsize(out_src)
+        except Exception:
+            sz = 0
+        st.success(f"✅ Source présente: `{out_src}` ({sz} bytes)")
+    else:
+        st.warning(f"⚠️ Source absente: `{out_src}` — clique le bouton ci-dessous pour la créer.")
+
     c1, c2, c3, c4 = st.columns([1.1, 1, 1, 1])
     with c2:
         active_only = st.checkbox("Actifs seulement", value=True, key=WKEY + "gen_active")
@@ -1786,6 +1797,9 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 st.caption(f"URL: {dbg.get('url')}")
         else:
             st.success(f"✅ Généré: {dbg.get('rows_saved', 0)} joueurs (pages={dbg.get('pages', 0)}).")
+            st.caption(f"Sortie: {out_src}")
+            if st.button("🔄 Rafraîchir (voir le fichier)", key=WKEY + "refresh_after_gen"):
+                st.rerun()
 
             # -------------------------------------------------
             # ✅ Vérification couverture NHL_ID (simple)
