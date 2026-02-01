@@ -192,6 +192,7 @@ def _drive_download_file(file_id: str, out_path: str) -> tuple[bool, str]:
         return False, str(e)
 
 import glob
+import difflib
 import re
 import io
 import json
@@ -811,6 +812,124 @@ def _audit_nhl_id_suspects(players_path: str, master_path: str, nhl_search_path:
 
     out = pd.DataFrame(out_rows) if out_rows else pd.DataFrame(columns=["issue","NHL_ID","Player","detail"])
     return out
+
+
+def _norm_person_name(s: str) -> str:
+    s = _to_str(s).lower()
+    s = s.replace(",", " ")
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"[^a-z0-9 \-'.]", "", s)
+    return s.strip()
+
+def _name_variants(s: str) -> list[str]:
+    raw = _to_str(s)
+    n = _norm_person_name(raw)
+    out = {n}
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        if len(parts) >= 2:
+            last = _norm_person_name(parts[0])
+            first = _norm_person_name(parts[1])
+            if first and last:
+                out.add(f"{first} {last}".strip())
+                out.add(f"{last} {first}".strip())
+    return [x for x in out if x]
+
+def _similarity(a: str, b: str) -> float:
+    a = _norm_person_name(a)
+    b = _norm_person_name(b)
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+def _autofix_duplicate_nhl_ids(players_path: str, nhl_search_path: str) -> tuple[bool, str, pd.DataFrame, pd.DataFrame]:
+    """
+    Auto-fix duplicate NHL_ID in hockey.players.csv:
+      - For each NHL_ID assigned to multiple different player names,
+        keep the row whose name best matches the official name from nhl_search_players.csv (by NHL_ID),
+        and CLEAR NHL_ID for the others.
+    Returns: (ok, message, fixed_players_df, fix_report_df)
+    """
+    if not os.path.exists(players_path):
+        return False, f"players introuvable: {players_path}", pd.DataFrame(), pd.DataFrame()
+    if not os.path.exists(nhl_search_path):
+        return False, f"source introuvable: {nhl_search_path}", pd.DataFrame(), pd.DataFrame()
+
+    try:
+        players = pd.read_csv(players_path, low_memory=False)
+        src = pd.read_csv(nhl_search_path, low_memory=False)
+    except Exception as e:
+        return False, f"lecture CSV impossible: {e}", pd.DataFrame(), pd.DataFrame()
+
+    p_name = _detect_col(players, ["Player", "Skaters", "Name", "Full Name"]) or "Player"
+    if p_name not in players.columns:
+        players[p_name] = ""
+    if "NHL_ID" not in players.columns:
+        return False, "players n'a pas de colonne NHL_ID", pd.DataFrame(), pd.DataFrame()
+
+    s_name = _detect_col(src, ["Player", "Skaters", "Name", "Full Name"]) or "Player"
+    s_id = _detect_col(src, ["NHL_ID", "nhl_id", "NHL ID", "playerId", "player_id", "nhlPlayerId", "id"])
+    if s_id is None:
+        return False, "source n'a pas de colonne NHL_ID", pd.DataFrame(), pd.DataFrame()
+    if s_name not in src.columns:
+        src[s_name] = ""
+
+    src_map = src[[s_id, s_name]].copy()
+    src_map[s_id] = src_map[s_id].astype(str).str.strip()
+    src_map[s_name] = src_map[s_name].astype(str).str.strip()
+    src_map = src_map[src_map[s_id].ne("") & src_map[s_id].str.lower().ne("nan")]
+    id2name = dict(zip(src_map[s_id].tolist(), src_map[s_name].tolist()))
+
+    df = players.copy()
+    df["NHL_ID"] = df["NHL_ID"].astype(str).str.strip()
+    df[p_name] = df[p_name].astype(str).str.strip()
+
+    g = df[df["NHL_ID"].ne("") & df["NHL_ID"].str.lower().ne("nan")].groupby("NHL_ID")[p_name].nunique()
+    dup_ids = g[g > 1].index.tolist()
+
+    if not dup_ids:
+        return True, "Aucun NHL_ID dupliqué détecté.", df, pd.DataFrame(columns=["NHL_ID","official_name","kept_player","kept_score","cleared_players","cleared_count"])
+
+    report_rows = []
+    cleared_total = 0
+
+    for nhl_id in dup_ids:
+        rows = df.index[df["NHL_ID"] == nhl_id].tolist()
+        names = [df.at[i, p_name] for i in rows]
+        official = id2name.get(str(nhl_id), "")
+
+        best_i = rows[0] if rows else None
+        best_score = -1.0
+        for i, nm in zip(rows, names):
+            if official:
+                score = max([_similarity(official, v) for v in _name_variants(nm)] + [0.0])
+            else:
+                score = 0.0
+            if score > best_score:
+                best_score = score
+                best_i = i
+
+        kept_player = df.at[best_i, p_name] if best_i is not None else (names[0] if names else "")
+        cleared = []
+        for i, nm in zip(rows, names):
+            if best_i is not None and i == best_i:
+                continue
+            df.at[i, "NHL_ID"] = ""
+            cleared.append(nm)
+
+        cleared_total += len(cleared)
+        report_rows.append({
+            "NHL_ID": nhl_id,
+            "official_name": official,
+            "kept_player": kept_player,
+            "kept_score": round(float(best_score), 4) if best_score >= 0 else 0.0,
+            "cleared_players": " | ".join([c for c in cleared if _to_str(c)])[:5000],
+            "cleared_count": int(len(cleared)),
+        })
+
+    rep = pd.DataFrame(report_rows).sort_values(by=["cleared_count","kept_score"], ascending=[False, True])
+    msg = f"Auto-fix terminé: {len(dup_ids)} NHL_ID dupliqués traités, {cleared_total} NHL_ID retirés."
+    return True, msg, df, rep
 
 def _pick_name_col(df: pd.DataFrame) -> str | None:
     if df is None or df.empty:
@@ -1613,6 +1732,30 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                     # Preview duplicates
                     st.markdown("**Aperçu (top 200) — NHL_ID suspects**")
                     st.dataframe(suspects_df.head(200), use_container_width=True, height=320)
+                    # 🧹 Auto-fix (idiot-proof)
+                    st.markdown("### 🧹 Réparer automatiquement (recommandé)")
+                    st.caption("But: enlever le NHL_ID pour les mauvais joueurs (doublons). Ensuite tu relances le pipeline.")
+                    if st.button("🧹 Auto-corriger les doublons NHL_ID (retire les mauvais IDs)", type="primary", use_container_width=True, key=WKEY + "autofix_dups"):
+                        okx, msgx, fixed_players, fix_report = _autofix_duplicate_nhl_ids(players_path_dbg, nhl_search_path)
+                        if not okx:
+                            st.error("❌ " + msgx)
+                        else:
+                            st.success("✅ " + msgx)
+                            if isinstance(fix_report, pd.DataFrame) and (not fix_report.empty):
+                                st.markdown("**Aperçu (top 50) — corrections**")
+                                st.dataframe(fix_report.head(50), use_container_width=True, height=280)
+                                fix_path = os.path.join(DATA_DIR, "nhl_id_autofix_report.csv")
+                                _atomic_write_df(fix_report, fix_path)
+                                b = _read_file_bytes(fix_path)
+                                if b:
+                                    st.download_button("📥 Télécharger rapport auto-fix (CSV)", data=b, file_name=os.path.basename(fix_path), mime="text/csv", use_container_width=True, key=WKEY + "dl_autofix")
+                            okp, errp = _atomic_write_df(fixed_players, players_path_dbg)
+                            if okp:
+                                st.success("✅ hockey.players.csv mis à jour. Relance le pipeline.")
+                                st.rerun()
+                            else:
+                                st.error("❌ Écriture hockey.players.csv échouée: " + str(errp))
+
 
                     sus_bytes = _read_file_bytes(suspects_path)
                     if sus_bytes:
