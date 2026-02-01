@@ -25,6 +25,10 @@ def _gm_points_path(data_dir: str) -> str:
     return os.path.join(data_dir, "gm_points.csv")
 
 
+
+def _player_points_overrides_path(data_dir: str) -> str:
+    return os.path.join(data_dir, "player_points_overrides.csv")
+
 def _pick_history_path(data_dir: str) -> str:
     candidates = [
         os.path.join(data_dir, "historique_admin.csv"),
@@ -221,6 +225,25 @@ def render(ctx: dict) -> None:
     pivot["GM_Points"] = [int(gm_map.get(str(o), 0)) for o in pivot.index.tolist()]
     pivot["Total_Final"] = pivot["Total"] + pivot["GM_Points"]
 
+    # -----------------------------
+    # 2b) Points joueurs (bonus/malus) depuis data/player_points_overrides.csv
+    #     Format: team, points_delta (int)
+    # -----------------------------
+    ov_path = _player_points_overrides_path(data_dir)
+    ov = _load_csv_safe(ov_path)
+    if not ov.empty and ("team" in ov.columns) and ("points_delta" in ov.columns):
+        ov["team"] = ov["team"].astype(str).str.strip()
+        ov["points_delta"] = pd.to_numeric(ov["points_delta"], errors="coerce").fillna(0).astype(int)
+        bonus_team = ov.groupby("team", as_index=False)["points_delta"].sum().rename(columns={"team":"owner","points_delta":"Player_Bonus"})
+        pivot = pivot.reset_index().rename(columns={"owner":"owner"})
+        pivot = pivot.merge(bonus_team, on="owner", how="left")
+        pivot["Player_Bonus"] = pivot["Player_Bonus"].fillna(0).astype(int)
+        pivot = pivot.set_index("owner")
+    else:
+        pivot["Player_Bonus"] = 0
+
+    pivot["Total_Final"] = pivot["Total"] + pivot["GM_Points"] + pivot["Player_Bonus"]
+
     # Sort by Total_Final
     pivot_sorted = pivot.sort_values("Total_Final", ascending=False)
 
@@ -246,11 +269,12 @@ def render(ctx: dict) -> None:
     # 3) Affichages
     # -----------------------------
     st.subheader("🏅 Classement (Total + Bonus GM)")
-    rank_df = pivot_sorted[["Total", "GM_Points", "Total_Final"]].reset_index().rename(columns={"owner": "Équipe"})
+    rank_df = pivot_sorted[["Total", "GM_Points", "Player_Bonus", "Total_Final"]].reset_index().rename(columns={"owner": "Équipe"})
     rank_df["Total"] = rank_df["Total"].apply(_fmt_pts)
     rank_df["GM_Points"] = rank_df["GM_Points"].apply(_fmt_pts)
+    rank_df["Player_Bonus"] = rank_df["Player_Bonus"].apply(_fmt_pts)
     rank_df["Total_Final"] = rank_df["Total_Final"].apply(_fmt_pts)
-    rank_df = rank_df.rename(columns={"GM_Points": "Bonus GM", "Total_Final": "Total (final)"})
+    rank_df = rank_df.rename(columns={"GM_Points": "Bonus GM", "Player_Bonus": "Bonus joueurs", "Total_Final": "Total (final)"})
     st.dataframe(rank_df, use_container_width=True, hide_index=True)
 
     # Movers (si on a au moins 2 périodes) — variation sans bonus GM (plus logique)
@@ -269,10 +293,10 @@ def render(ctx: dict) -> None:
     view = pivot_sorted.reset_index().rename(columns={"owner": "Équipe"}).copy()
 
     # Reorder columns: periods, Total, Bonus, Total_Final
-    cols = ["Équipe"] + periods + ["Total", "GM_Points", "Total_Final"]
+    cols = ["Équipe"] + periods + ["Total", "GM_Points", "Player_Bonus", "Total_Final"]
     cols = [c for c in cols if c in view.columns]
     view = view[cols].copy()
-    view = view.rename(columns={"GM_Points": "Bonus GM", "Total_Final": "Total (final)"})
+    view = view.rename(columns={"GM_Points": "Bonus GM", "Player_Bonus": "Bonus joueurs", "Total_Final": "Total (final)"})
 
     # Format
     for c in view.columns:
@@ -302,5 +326,11 @@ def render(ctx: dict) -> None:
 
         st.caption(f"Source points: `{p_path}`")
         st.caption(f"Source GM points: `{gm_path}`")
+        ovp = _player_points_overrides_path(data_dir)
+        st.caption(f"Source bonus joueurs: `{ovp}`")
+        ob = _read_file_bytes(ovp)
+        if ob:
+            st.download_button("📥 Télécharger player_points_overrides.csv (Option A)", data=ob, file_name=os.path.basename(ovp), mime="text/csv", use_container_width=True, key="dl_pp_rank")
+
         st.write("Colonnes points:", list(pts.columns))
         st.write("Périodes détectées:", periods)
