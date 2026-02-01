@@ -150,6 +150,54 @@ def _drive_list_csv_files(folder_id: str, page_size: int = 200) -> list[dict]:
     return res
 
 
+
+
+def _drive_debug_probe(folder_id: str) -> dict:
+    """
+    Quick diagnostics to explain why folder listing is empty.
+    Returns counts for:
+      - any_files: list(trashed=false) sample
+      - folder_children_any: children of folder (any mimeType)
+      - folder_children_filtered: csv/sheet filtered list
+    """
+    out = {"any_files_count": 0, "folder_children_any_count": 0, "folder_children_filtered_count": 0, "samples_any": [], "samples_folder": [], "error": ""}
+    try:
+        svc = _drive_service()
+
+        # 1) any visible files in drive?
+        resp_any = svc.files().list(
+            q="trashed=false",
+            fields="files(id,name,mimeType,modifiedTime)",
+            pageSize=10,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        files_any = resp_any.get("files", []) or []
+        out["any_files_count"] = len(files_any)
+        out["samples_any"] = files_any[:5]
+
+        # 2) any children in folder (no mime filter)
+        q_folder = f"'{folder_id}' in parents and trashed=false"
+        resp_fold = svc.files().list(
+            q=q_folder,
+            fields="files(id,name,mimeType,modifiedTime)",
+            pageSize=50,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        files_fold = resp_fold.get("files", []) or []
+        out["folder_children_any_count"] = len(files_fold)
+        out["samples_folder"] = files_fold[:10]
+
+        # 3) filtered list (reuse our function)
+        files_filt = _drive_list_csv_files(folder_id)
+        out["folder_children_filtered_count"] = len(files_filt)
+
+        return out
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+
 def _score_drive_file(name: str) -> int:
     n = (name or "").lower()
     score = 0
@@ -1503,6 +1551,23 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                         auto_pick = _drive_pick_auto(files)
                     if not auto_pick:
                         st.error("Aucun fichier CSV/Sheet trouvé dans ce dossier Drive. Vérifie le Folder ID + permissions (le compte OAuth doit avoir accès).")
+                    st.info("🔎 Diagnostic rapide (pour comprendre):")
+                    dbg = _drive_debug_probe(folder_id)
+                    if dbg.get("error"):
+                        st.warning("Diagnostic error: " + str(dbg.get("error")))
+                    else:
+                        st.caption(f"Drive visible (any files): {dbg.get('any_files_count')}  •  Enfants du dossier (any): {dbg.get('folder_children_any_count')}  •  CSV/Sheets détectés: {dbg.get('folder_children_filtered_count')}")
+                        if dbg.get("samples_folder"):
+                            st.markdown("**Aperçu (10) fichiers trouvés dans le dossier (peu importe le type)**")
+                            st.dataframe(pd.DataFrame(dbg.get("samples_folder")), use_container_width=True, height=240)
+                        elif dbg.get("any_files_count", 0) > 0:
+                            st.warning("Le Drive est accessible, mais ce Folder ID semble vide/inaccessible (ou tes fichiers sont dans un sous-dossier).")
+                        else:
+                            st.warning("Ton token OAuth ne voit aucun fichier Drive. Souvent ça veut dire scope trop restrictif (ex: drive.file). Il faut régénérer le refresh_token avec scope drive.readonly (ou drive).")
+
+                    st.divider()
+                    st.markdown("✅ Solution simple: utilise l’option **API** à droite (🌐 Générer via NHL Search API).")
+
                         st.stop()
                     with st.spinner("Téléchargement Drive → data/nhl_search_players.csv …"):
                         ok, err = _drive_download_any(auto_pick, nhl_src_path)
