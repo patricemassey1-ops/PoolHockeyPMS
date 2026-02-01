@@ -1539,35 +1539,47 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             colA, colB = st.columns([1, 1])
             with colA:
                 if st.button("⬇️ Drive AUTO → nhl_search_players.csv", use_container_width=True, key="steps_drive_auto"):
+                    # Dummy-proof: protections + messages clairs
                     if not _drive_oauth_available():
                         st.error("Drive OAuth n'est pas configuré (secrets gdrive_oauth).")
+                        st.stop()
+
                     folder_id = _drive_get_folder_id_default()
                     if not folder_id:
                         st.error("Folder ID Drive manquant.")
-                    with st.spinner("Drive: liste et auto-sélection…"):
+                        st.stop()
+
+                    # 1) Liste filtrée (CSV/Sheet)
+                    with st.spinner("Drive: recherche CSV/Sheets…"):
                         files = _drive_list_csv_files(folder_id)
-                        auto_pick = _drive_pick_auto(files)
-                    if not auto_pick:
-                        st.error("Aucun fichier CSV/Sheet trouvé dans ce dossier Drive. Vérifie le Folder ID + permissions (le compte OAuth doit avoir accès).")
-                    st.info("🔎 Diagnostic rapide (pour comprendre):")
-                    dbg = _drive_debug_probe(folder_id)
-                    if dbg.get("error"):
-                        st.warning("Diagnostic error: " + str(dbg.get("error")))
-                    else:
-                        st.caption(f"Drive visible (any files): {dbg.get('any_files_count')}  •  Enfants du dossier (any): {dbg.get('folder_children_any_count')}  •  CSV/Sheets détectés: {dbg.get('folder_children_filtered_count')}")
-                        if dbg.get("samples_folder"):
-                            st.markdown("**Aperçu (10) fichiers trouvés dans le dossier (peu importe le type)**")
-                            st.dataframe(pd.DataFrame(dbg.get("samples_folder")), use_container_width=True, height=240)
-                        elif dbg.get("any_files_count", 0) > 0:
-                            st.warning("Le Drive est accessible, mais ce Folder ID semble vide/inaccessible (ou tes fichiers sont dans un sous-dossier).")
-                        else:
-                            st.warning("Ton token OAuth ne voit aucun fichier Drive. Souvent ça veut dire scope trop restrictif (ex: drive.file). Il faut régénérer le refresh_token avec scope drive.readonly (ou drive).")
 
-                    st.divider()
-                    st.markdown("✅ Solution simple: utilise l’option **API** à droite (🌐 Générer via NHL Search API).")
+                    if not files:
+                        st.error("Aucun fichier CSV/Sheet trouvé dans ce dossier Drive.")
+                        st.caption("➡️ Deux solutions: (1) mets un CSV/Google Sheet dans ce dossier Drive, ou (2) clique le bouton rouge **Générer via NHL Search API** à droite.")
+                        # Diagnostic rapide
+                        try:
+                            dbg = _drive_debug_probe(folder_id) if "_drive_debug_probe" in globals() else {}
+                            if dbg and not dbg.get("error"):
+                                st.caption(f"Enfants du dossier (any): {dbg.get('folder_children_any_count', 0)} • CSV/Sheets détectés: {dbg.get('folder_children_filtered_count', 0)}")
+                                if dbg.get("samples_folder"):
+                                    st.markdown("**Aperçu (10) fichiers trouvés dans le dossier (peu importe le type)**")
+                                    st.dataframe(pd.DataFrame(dbg.get("samples_folder")), use_container_width=True, height=240)
+                        except Exception:
+                            pass
+                        st.stop()
 
+                    auto_pick = _drive_pick_auto(files)
+
+                    # Guard: id must exist
+                    if (not auto_pick) or (not str(auto_pick.get("id") or "").strip()):
+                        st.error("Drive AUTO: impossible de choisir un fichier (file_id manquant).")
+                        st.caption("➡️ Clique le bouton rouge **Générer via NHL Search API** à droite, ou sélectionne manuellement un fichier dans le bloc Drive complet.")
+                        st.stop()
+
+                    # Download (handles Google Sheets export)
                     with st.spinner("Téléchargement Drive → data/nhl_search_players.csv …"):
                         ok, err = _drive_download_any(auto_pick, nhl_src_path)
+
                     if ok:
                         st.success(f"✅ Téléchargé: {nhl_src_path} (AUTO={auto_pick.get('name','')})")
                         st.rerun()
