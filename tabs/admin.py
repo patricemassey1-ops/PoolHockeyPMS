@@ -19,14 +19,26 @@ def _to_str(x):
     try:
         if x is None:
             return ""
+        s = str(x)
+        return s.strip()
+    except Exception:
+        return ""
+
+
+# Google Drive (optional)
+try:
+    from google.oauth2.credentials import Credentials  # type: ignore
+    from googleapiclient.discovery import build  # type: ignore
+    from googleapiclient.http import MediaIoBaseDownload  # type: ignore
+except Exception:
+    Credentials = None  # type: ignore
+    build = None  # type: ignore
+    MediaIoBaseDownload = None  # type: ignore
+
+
 
 
 def _pick_history_path(data_dir: str) -> str:
-    """
-    Choose an existing history-like CSV if present, else create a dedicated one.
-    Priority (existing):
-      historique_admin.csv, historique.csv, history.csv, transactions.csv, backup_history.csv, historique_transactions.csv
-    """
     candidates = [
         os.path.join(data_dir, "historique_admin.csv"),
         os.path.join(data_dir, "historique.csv"),
@@ -40,11 +52,8 @@ def _pick_history_path(data_dir: str) -> str:
             return p
     return candidates[0]  # default create
 
+
 def _append_history_event(data_dir: str, action: str, team: str, player: str, nhl_id: str = "", note: str = "", extra: dict | None = None) -> tuple[bool, str, str]:
-    """
-    Append one row to the history CSV (idiot-proof).
-    Returns (ok, message, path)
-    """
     path = _pick_history_path(data_dir)
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     row = {
@@ -78,23 +87,6 @@ def _append_history_event(data_dir: str, action: str, team: str, player: str, nh
     if ok:
         return True, f"Historique mis à jour: {os.path.basename(path)}", path
     return False, str(err), path
-
-        s = str(x)
-        return s.strip()
-    except Exception:
-        return ""
-
-
-# Google Drive (optional)
-try:
-    from google.oauth2.credentials import Credentials  # type: ignore
-    from googleapiclient.discovery import build  # type: ignore
-    from googleapiclient.http import MediaIoBaseDownload  # type: ignore
-except Exception:
-    Credentials = None  # type: ignore
-    build = None  # type: ignore
-    MediaIoBaseDownload = None  # type: ignore
-
 
 def _drive_oauth_available() -> bool:
     try:
@@ -1590,18 +1582,17 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 except Exception:
                     sz = 0
                 st.success(f"✅ Source présente: `{nhl_src_path}` ({sz} bytes)")
-            # 📥 Option A (recommandée): télécharger et mettre dans le repo (data/), sinon ça peut disparaître après redémarrage
-            b = _read_file_bytes(nhl_src_path)
-            if b:
+            bsrc = _read_file_bytes(nhl_src_path)
+            if bsrc:
                 st.download_button(
                     "📥 Télécharger nhl_search_players.csv (à mettre dans ton repo /data/)",
-                    data=b,
+                    data=bsrc,
                     file_name="nhl_search_players.csv",
                     mime="text/csv",
                     use_container_width=True,
                     key="steps_dl_nhl_search",
                 )
-                st.caption("✅ Après download: mets le fichier dans ton repo **data/nhl_search_players.csv** puis commit/push (Option A).")
+                st.caption("Option A: mets `data/nhl_search_players.csv` dans ton repo (commit/push).")
             else:
                 st.warning(f"⚠️ Source absente: `{nhl_src_path}`")
 
@@ -1612,56 +1603,57 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             colA, colB = st.columns([1, 1])
             with colA:
                 if os.path.exists(nhl_src_path):
-                    st.info("ℹ️ Source déjà présente (et tu peux la mettre dans ton repo). **Ne clique pas Drive AUTO** — inutile ici.")
+                    st.info("ℹ️ Source déjà présente. **Ne clique pas Drive AUTO** — inutile ici.")
                     st.button("⬇️ Drive AUTO → nhl_search_players.csv (inutile — déjà OK)", use_container_width=True, disabled=True, key="steps_drive_auto_disabled")
                 else:
                     if st.button("⬇️ Drive AUTO → nhl_search_players.csv", use_container_width=True, key="steps_drive_auto"):
-                            # Dummy-proof: protections + messages clairs
-                            if not _drive_oauth_available():
-                                st.error("Drive OAuth n'est pas configuré (secrets gdrive_oauth).")
-                                st.stop()
 
-                            folder_id = _drive_get_folder_id_default()
-                            if not folder_id:
-                                st.error("Folder ID Drive manquant.")
-                                st.stop()
+                        # Dummy-proof: protections + messages clairs
+                        if not _drive_oauth_available():
+                            st.error("Drive OAuth n'est pas configuré (secrets gdrive_oauth).")
+                            st.stop()
 
-                            # 1) Liste filtrée (CSV/Sheet)
-                            with st.spinner("Drive: recherche CSV/Sheets…"):
-                                files = _drive_list_csv_files(folder_id)
+                        folder_id = _drive_get_folder_id_default()
+                        if not folder_id:
+                            st.error("Folder ID Drive manquant.")
+                            st.stop()
 
-                            if not files:
-                                st.error("Aucun fichier CSV/Sheet trouvé dans ce dossier Drive.")
-                                st.caption("➡️ Deux solutions: (1) mets un CSV/Google Sheet dans ce dossier Drive, ou (2) clique le bouton rouge **Générer via NHL Search API** à droite.")
-                                # Diagnostic rapide
-                                try:
-                                    dbg = _drive_debug_probe(folder_id) if "_drive_debug_probe" in globals() else {}
-                                    if dbg and not dbg.get("error"):
-                                        st.caption(f"Enfants du dossier (any): {dbg.get('folder_children_any_count', 0)} • CSV/Sheets détectés: {dbg.get('folder_children_filtered_count', 0)}")
-                                        if dbg.get("samples_folder"):
-                                            st.markdown("**Aperçu (10) fichiers trouvés dans le dossier (peu importe le type)**")
-                                            st.dataframe(pd.DataFrame(dbg.get("samples_folder")), use_container_width=True, height=240)
-                                except Exception:
-                                    pass
-                                st.stop()
+                        # 1) Liste filtrée (CSV/Sheet)
+                        with st.spinner("Drive: recherche CSV/Sheets…"):
+                            files = _drive_list_csv_files(folder_id)
 
-                            auto_pick = _drive_pick_auto(files)
+                        if not files:
+                            st.error("Aucun fichier CSV/Sheet trouvé dans ce dossier Drive.")
+                            st.caption("➡️ Deux solutions: (1) mets un CSV/Google Sheet dans ce dossier Drive, ou (2) clique le bouton rouge **Générer via NHL Search API** à droite.")
+                            # Diagnostic rapide
+                            try:
+                                dbg = _drive_debug_probe(folder_id) if "_drive_debug_probe" in globals() else {}
+                                if dbg and not dbg.get("error"):
+                                    st.caption(f"Enfants du dossier (any): {dbg.get('folder_children_any_count', 0)} • CSV/Sheets détectés: {dbg.get('folder_children_filtered_count', 0)}")
+                                    if dbg.get("samples_folder"):
+                                        st.markdown("**Aperçu (10) fichiers trouvés dans le dossier (peu importe le type)**")
+                                        st.dataframe(pd.DataFrame(dbg.get("samples_folder")), use_container_width=True, height=240)
+                            except Exception:
+                                pass
+                            st.stop()
 
-                            # Guard: id must exist
-                            if (not auto_pick) or (not str(auto_pick.get("id") or "").strip()):
-                                st.error("Drive AUTO: impossible de choisir un fichier (file_id manquant).")
-                                st.caption("➡️ Clique le bouton rouge **Générer via NHL Search API** à droite, ou sélectionne manuellement un fichier dans le bloc Drive complet.")
-                                st.stop()
+                        auto_pick = _drive_pick_auto(files)
 
-                            # Download (handles Google Sheets export)
-                            with st.spinner("Téléchargement Drive → data/nhl_search_players.csv …"):
-                                ok, err = _drive_download_any(auto_pick, nhl_src_path)
+                        # Guard: id must exist
+                        if (not auto_pick) or (not str(auto_pick.get("id") or "").strip()):
+                            st.error("Drive AUTO: impossible de choisir un fichier (file_id manquant).")
+                            st.caption("➡️ Clique le bouton rouge **Générer via NHL Search API** à droite, ou sélectionne manuellement un fichier dans le bloc Drive complet.")
+                            st.stop()
 
-                            if ok:
-                                st.success(f"✅ Téléchargé: {nhl_src_path} (AUTO={auto_pick.get('name','')})")
-                                st.rerun()
-                            else:
-                                st.error("❌ " + err)
+                        # Download (handles Google Sheets export)
+                        with st.spinner("Téléchargement Drive → data/nhl_search_players.csv …"):
+                            ok, err = _drive_download_any(auto_pick, nhl_src_path)
+
+                        if ok:
+                            st.success(f"✅ Téléchargé: {nhl_src_path} (AUTO={auto_pick.get('name','')})")
+                            st.rerun()
+                        else:
+                            st.error("❌ " + err)
 
             with colB:
                 if st.button("🌐 Générer via NHL Search API", type="primary", use_container_width=True, key="steps_gen_api"):
@@ -1691,61 +1683,19 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             st.markdown("### ✅ But")
             st.markdown("Écrire les NHL_ID dans **`data/hockey.players.csv`**.")
             if not os.path.exists(nhl_src_path):
-                st.error("🛑 Il manque `data/nhl_search_players.csv`.")
-                st.info("👉 Clique sur **🌐 Générer la source maintenant**. Après ça, tu restes ici et tu cliques **ASSOCIER NHL_ID**.")
-                c1, c2 = st.columns([1, 1], gap="large")
-                with c1:
-                    if st.button("🌐 Générer la source maintenant", type="primary", use_container_width=True, key="step2_make_source_now"):
-                        with st.spinner("Génération de la source (NHL Search API)…"):
-                            df_src, meta, err = generate_nhl_search_source(
-                                nhl_src_path,
-                                active_only=True,
-                                limit=1000,
-                                timeout_s=20,
-                                max_pages=20,
-                                culture="en-us",
-                                q="*",
-                            )
-                        if err:
-                            st.error(f"❌ Erreur génération source: {err}")
-                        else:
-                            st.success(f"✅ Source créée: {nhl_src_path} ({len(df_src)} lignes).")
-                            st.rerun()
-                with c2:
-                    st.caption("☁️ Option Drive: va à l’onglet **1 Source NHL_ID** puis clique **Drive AUTO → nhl_search_players.csv** (si OAuth Drive est OK).")
+                st.error("🛑 Il manque `data/nhl_search_players.csv` → retourne à l’onglet 1️⃣.")
             else:
                 st.success("✅ Source trouvée. Tu peux associer.")
-
-                # Résultat persistant (idiot-proof): affiche le dernier résultat même après rerun
-                last = st.session_state.get("steps_assoc_status", None)
-                if last:
-                    if last.get("ok"):
-                        st.success("✅ " + str(last.get("msg", "")))
-                    else:
-                        st.error("❌ " + str(last.get("msg", "")))
-                    if last.get("stats"):
-                        s = last["stats"]
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("NHL_ID remplis (ce run)", int(s.get("filled", 0)))
-                        c2.metric("Ambigus ignorés", int(s.get("ambiguous_skipped", 0)))
-                        c3.metric("Encore manquants", int(s.get("still_missing", 0)))
-                    if st.button("🧽 Effacer le message", use_container_width=True, key="steps_assoc_clear"):
-                        st.session_state.pop("steps_assoc_status", None)
-                        st.rerun()
-
                 st.markdown("### 🧸 Quoi cliquer")
                 st.markdown("1) Clique le **bouton rouge**.\n2) Attends le message ✅.\n")
                 if st.button("🟥 ASSOCIER NHL_ID (écrit dans hockey.players.csv)", type="primary", use_container_width=True, key="steps_assoc"):
                     with st.spinner("Association NHL_ID …"):
                         okf, msgf, stats = _fill_missing_nhl_ids_from_source(players_path, nhl_src_path)
-
-                    # Sauve le résultat pour l'afficher après rerun (sinon tu peux le manquer)
-                    st.session_state["steps_assoc_status"] = {
-                        "ok": bool(okf),
-                        "msg": str(msgf or ""),
-                        "stats": stats if isinstance(stats, dict) else {},
-                    }
-                    st.rerun()
+                    if okf:
+                        st.success(msgf)
+                        st.rerun()
+                    else:
+                        st.error("❌ " + msgf)
 
             st.info("➡️ Quand c’est fait, va à l’onglet **3️⃣ Enrichir NHL** (optionnel) ou **4️⃣ Master + Audit**.")
 
@@ -1778,38 +1728,41 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 cfg = MasterBuildConfig(data_dir=data_dir, enrich_from_nhl=True, max_nhl_calls=250)
                 max_calls = st.number_input("Max appels NHL (par run)", min_value=0, max_value=5000, value=250, step=50, key="steps_enrich_calls")
                 if st.button("🔁 Continuer enrichissement NHL (cache)", type="primary", use_container_width=True, key="steps_enrich_go"):
-                # Progress UI (barre + chiffres)
-                prog = st.progress(0)
-                stats_box = st.empty()
-                detail_box = st.empty()
+                    # Progress UI (barre + chiffres)
+                    prog = st.progress(0)
+                    stats_box = st.empty()
+                    detail_box = st.empty()
 
-                def _cb(scanned, total, calls, fetched, hits, pid):
+                    def _cb(scanned, total, calls, fetched, hits, pid):
+                        try:
+                            pct = 0.0
+                            if total and total > 0:
+                                pct = min(1.0, float(scanned) / float(total))
+                            prog.progress(pct)
+                            stats_box.markdown(
+                                f"**Progression:** {int(scanned)}/{int(total)} IDs  •  "
+                                f"**Appels API:** {int(calls)}  •  **Nouveaux cache:** {int(fetched)}  •  **Cache hits:** {int(hits)}"
+                            )
+                            if pid:
+                                detail_box.caption(f"ID en cours: {pid}")
+                        except Exception:
+                            pass
+
+                    with st.spinner("Enrichissement progressif du cache NHL …"):
+                        try:
+                            stats = enrich_nhl_cache(cfg, nhl_ids=ids, max_calls=int(max_calls), progress_cb=_cb)
+                        except TypeError:
+                            stats = enrich_nhl_cache(cfg, nhl_ids=ids, max_calls=int(max_calls))
+
                     try:
-                        pct = 0.0
-                        if total and total > 0:
-                            pct = min(1.0, float(scanned) / float(total))
-                        prog.progress(pct)
-                        stats_box.markdown(
-                            f"**Progression:** {int(scanned)}/{int(total)} IDs scannés  •  "
-                            f"**Appels API:** {int(calls)}  •  **Nouveaux cache:** {int(fetched)}  •  **Cache hits:** {int(hits)}"
-                        )
-                        if pid:
-                            detail_box.caption(f"ID en cours: {pid}")
+                        prog.progress(1.0)
                     except Exception:
                         pass
+                    st.success(f"✅ Cache mis à jour: fetched={stats.get('fetched')} calls={stats.get('calls')} hits={stats.get('hits')}")
+                    st.caption(f"Restants estimés: {stats.get('missing_remaining_estimate')} / {stats.get('ids_total')}")
+                    st.rerun()
 
-                with st.spinner("Enrichissement progressif du cache NHL …"):
-                    stats = enrich_nhl_cache(cfg, nhl_ids=ids, max_calls=int(max_calls), progress_cb=_cb)
-
-                try:
-                    prog.progress(1.0)
-                except Exception:
-                    pass
-                st.success(f"✅ Cache mis à jour: fetched={stats.get('fetched')} calls={stats.get('calls')} hits={stats.get('hits')}")
-                st.caption(f"Restants estimés: {stats.get('missing_remaining_estimate')} / {stats.get('ids_total')}")
-                st.rerun()
-
-st.info("➡️ Quand tu veux, va à l’onglet **4️⃣ Master + Audit**.")
+            st.info("➡️ Quand tu veux, va à l’onglet **4️⃣ Master + Audit**.")
 
         # -------------------------
         # 4️⃣ Master + Audit (avec blocage suspects)
@@ -1894,55 +1847,46 @@ st.info("➡️ Quand tu veux, va à l’onglet **4️⃣ Master + Audit**.")
         with tab5:
             st.markdown("## 5️⃣ Outils Admin")
             st.success("👉 TU ES ICI : ÉTAPE 5/5 (OPTIONNEL)")
-            st.caption("Ici tu peux faire des actions Admin avancées. C’est séparé du workflow 1→4.")
+            st.caption("Outils avancés (ajout joueur, édition historique, points GM).")
 
             GM_TEAMS = ["Whalers", "Canadiens", "Cracheurs", "Nordiques", "Predateurs", "Red_Wings"]
-            team_files = [os.path.join(DATA_DIR, f"{t}.csv") for t in GM_TEAMS]
             master_path = os.path.join(DATA_DIR, "hockey.players_master.csv")
             players_path = os.path.join(DATA_DIR, "hockey.players.csv")
 
-            # -------------------------------------------------
             # ➕ Ajouter joueur
-            # -------------------------------------------------
             with st.expander("➕ Ajouter un joueur à une équipe", expanded=False):
-                st.caption("Ajoute un joueur dans le CSV d’une équipe (ex: data/Whalers.csv).")
-
-                # Source joueurs: master si existe, sinon players
                 src_path = master_path if os.path.exists(master_path) else players_path
-                st.info(f"Source joueurs utilisée: `{src_path}`")
+                st.info(f"Source joueurs: `{src_path}`")
                 src_df, _ = load_csv(src_path)
                 if src_df is None or src_df.empty:
-                    st.error("Source joueurs vide ou illisible.")
+                    st.error("Source joueurs vide/illisible.")
                 else:
-                    name_col = _detect_col(src_df, ["Player", "Skaters", "Name", "Full Name"]) or "Player"
+                    name_col = _detect_col(src_df, ["Player", "Skaters", "Name", "Full Name", "Joueur"]) or "Player"
                     if name_col not in src_df.columns:
                         src_df[name_col] = ""
                     if "NHL_ID" not in src_df.columns:
                         src_df["NHL_ID"] = ""
 
-                    query = st.text_input("Recherche joueur (nom)", value="", key="add_player_query")
+                    q = st.text_input("Recherche joueur (nom)", value="", key="add_player_query")
                     df_view = src_df.copy()
-                    if query.strip():
-                        q = query.strip().lower()
-                        df_view = df_view[df_view[name_col].astype(str).str.lower().str.contains(q, na=False)]
-
+                    if q.strip():
+                        df_view = df_view[df_view[name_col].astype(str).str.lower().str.contains(q.strip().lower(), na=False)]
                     df_view = df_view.head(50).copy()
+
                     if df_view.empty:
-                        st.warning("Aucun résultat (essaie un autre nom).")
+                        st.warning("Aucun résultat.")
                     else:
                         opts = df_view.index.tolist()
                         def fmt(i):
                             nm = _to_str(df_view.at[i, name_col])
                             nid = _to_str(df_view.at[i, "NHL_ID"])
-                            return f"{nm}  |  NHL_ID={nid}" if nid else nm
+                            return f"{nm} | NHL_ID={nid}" if nid else nm
 
                         pick = st.selectbox("Choisir le joueur (top 50)", options=opts, format_func=fmt, key="add_player_pick")
-
                         team = st.selectbox("Équipe cible", options=GM_TEAMS, key="add_player_team")
                         team_path = os.path.join(DATA_DIR, f"{team}.csv")
 
                         if st.button("➕ Ajouter ce joueur à l’équipe", type="primary", use_container_width=True, key="add_player_go"):
-                            # Load team file (create if missing)
                             if os.path.exists(team_path):
                                 tdf, _ = load_csv(team_path)
                                 if tdf is None:
@@ -1950,157 +1894,112 @@ st.info("➡️ Quand tu veux, va à l’onglet **4️⃣ Master + Audit**.")
                             else:
                                 tdf = pd.DataFrame()
 
-                            # Determine player row to append
                             row = src_df.loc[pick].to_dict()
 
-                            # Duplicate guard
+                            # Anti-duplication
                             already = False
-                            if (not tdf.empty) and ("NHL_ID" in tdf.columns):
-                                nid = _to_str(row.get("NHL_ID", ""))
-                                if nid:
+                            nid = _to_str(row.get("NHL_ID", ""))
+                            nm = _to_str(row.get(name_col, ""))
+                            if not tdf.empty:
+                                if "NHL_ID" in tdf.columns and nid:
                                     already = nid in tdf["NHL_ID"].astype(str).tolist()
-                            if not already and (not tdf.empty) and (name_col in tdf.columns):
-                                nm = _to_str(row.get(name_col, ""))
-                                if nm:
+                                if (not already) and (name_col in tdf.columns) and nm:
                                     already = nm.lower() in tdf[name_col].astype(str).str.lower().tolist()
 
                             if already:
-                                st.warning("⚠️ Joueur déjà présent dans ce fichier d’équipe (anti-dup).")
+                                st.warning("⚠️ Joueur déjà présent dans cette équipe.")
                             else:
-                                # Ensure columns
                                 if tdf.empty:
                                     tdf = pd.DataFrame(columns=list(row.keys()))
                                 for c in row.keys():
                                     if c not in tdf.columns:
                                         tdf[c] = ""
-                                # Append
                                 tdf = pd.concat([tdf, pd.DataFrame([row])], ignore_index=True)
 
-                                # Backup then write
-                                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                bkp = os.path.join(DATA_DIR, f"_backup_{os.path.basename(team_path)}_{ts}.csv")
-                                try:
-                                    if os.path.exists(team_path):
-                                        old, _ = load_csv(team_path)
-                                        if old is not None:
-                                            _atomic_write_df(old, bkp)
-                                except Exception:
-                                    pass
+                                # Backup
+                                ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                                if os.path.exists(team_path):
+                                    old, _ = load_csv(team_path)
+                                    if old is not None:
+                                        _atomic_write_df(old, os.path.join(DATA_DIR, f"_backup_{os.path.basename(team_path)}_{ts}.csv"))
 
                                 ok, err = _atomic_write_df(tdf, team_path)
                                 if ok:
-                                    st.success(f"✅ Ajouté dans {team_path} (backup: {os.path.basename(bkp)})")
-                                    # Historique (idiot-proof)
-                                    try:
-                                        nm = _to_str(row.get(name_col, ""))
-                                        nid = _to_str(row.get("NHL_ID", ""))
-                                        okh, msgh, hpath = _append_history_event(
-                                            DATA_DIR,
-                                            action="ADD_PLAYER",
-                                            team=team,
-                                            player=nm,
-                                            nhl_id=nid,
-                                            note=f"Ajout via Admin → {os.path.basename(team_path)}",
-                                            extra={"file": os.path.basename(team_path)},
-                                        )
-                                        if okh:
-                                            st.success("🧾 " + msgh)
-                                            hb = _read_file_bytes(hpath)
-                                            if hb:
-                                                st.download_button(
-                                                    "📥 Télécharger historique (CSV)",
-                                                    data=hb,
-                                                    file_name=os.path.basename(hpath),
-                                                    mime="text/csv",
-                                                    use_container_width=True,
-                                                    key="dl_hist_after_add",
-                                                )
-                                    except Exception as e:
-                                        st.warning("Historique: impossible d'ajouter l'entrée (" + str(e) + ")")
-
+                                    st.success(f"✅ Ajouté dans {team_path}")
+                                    # Historique
+                                    okh, msgh, hpath = _append_history_event(
+                                        DATA_DIR,
+                                        action="ADD_PLAYER",
+                                        team=team,
+                                        player=nm,
+                                        nhl_id=nid,
+                                        note=f"Ajout via Admin → {os.path.basename(team_path)}",
+                                        extra={"file": os.path.basename(team_path)},
+                                    )
+                                    if okh:
+                                        st.success("🧾 " + msgh)
+                                        hb = _read_file_bytes(hpath)
+                                        if hb:
+                                            st.download_button("📥 Télécharger historique (CSV)", data=hb, file_name=os.path.basename(hpath), mime="text/csv", use_container_width=True, key="dl_hist_after_add")
                                 else:
                                     st.error("❌ Écriture échouée: " + str(err))
 
-            # -------------------------------------------------
-            # 🧾 Historique: supprimer lignes
-            # -------------------------------------------------
-            with st.expander("🧾 Historique — supprimer une ou des lignes", expanded=False):
-                st.caption("Choisis un fichier d’historique et supprime des lignes (avec backup automatique).")
+            # 🧾 Historique — supprimer lignes
+            with st.expander("🧾 Historique — supprimer des lignes", expanded=False):
                 st.caption("Astuce: si aucun historique n’existe, l’app crée `data/historique_admin.csv`.")
-
                 csvs = list_data_csvs(DATA_DIR)
-                # Candidate history files
                 candidates = [p for p in csvs if any(k in os.path.basename(p).lower() for k in ["histor", "history", "trans", "log", "backup_history"])]
                 if not candidates:
-                    st.warning("Je ne vois aucun fichier qui ressemble à un historique (historique/history/transaction/log).")
-                    candidates = csvs[:]
-
+                    candidates = csvs
                 hist_path = st.selectbox("Fichier historique", options=candidates, key="hist_path")
                 hdf, _ = load_csv(hist_path)
                 if hdf is None or hdf.empty:
                     st.warning("Historique vide/illisible.")
                 else:
-                    # Add delete checkbox column
                     view = hdf.copy()
                     view.insert(0, "__delete__", False)
                     edited = st.data_editor(view, use_container_width=True, height=360, key="hist_editor")
-                    if st.button("🗑️ Supprimer les lignes cochées", type="primary", use_container_width=True, key="hist_delete"):
-                        try:
-                            del_mask = edited["__delete__"].astype(bool)
-                            to_del = int(del_mask.sum())
-                        except Exception:
-                            to_del = 0
-                            del_mask = None
-
-                        if not del_mask is None and to_del > 0:
+                    if st.button("🗑️ Supprimer lignes cochées", type="primary", use_container_width=True, key="hist_delete"):
+                        del_mask = edited["__delete__"].astype(bool)
+                        to_del = int(del_mask.sum())
+                        if to_del <= 0:
+                            st.warning("Aucune ligne cochée.")
+                        else:
                             cleaned = hdf.loc[~del_mask.values].copy()
-
-                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            bkp = os.path.join(DATA_DIR, f"_backup_{os.path.basename(hist_path)}_{ts}.csv")
-                            try:
-                                _atomic_write_df(hdf, bkp)
-                            except Exception:
-                                pass
-
+                            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                            _atomic_write_df(hdf, os.path.join(DATA_DIR, f"_backup_{os.path.basename(hist_path)}_{ts}.csv"))
                             ok, err = _atomic_write_df(cleaned, hist_path)
                             if ok:
-                                st.success(f"✅ {to_del} lignes supprimées. Backup: {os.path.basename(bkp)}")
+                                st.success(f"✅ {to_del} lignes supprimées.")
                                 st.rerun()
                             else:
-                                st.error("❌ Écriture échouée: " + str(err))
-                        else:
-                            st.warning("Aucune ligne cochée.")
+                                st.error("❌ " + str(err))
 
-            # -------------------------------------------------
             # 🏆 Points GM
-            # -------------------------------------------------
             with st.expander("🏆 Points GM — modifier", expanded=False):
-                st.caption("Modifie les points des GM (stocké dans data/gm_points.csv).")
                 pts_path = os.path.join(DATA_DIR, "gm_points.csv")
-
                 if os.path.exists(pts_path):
                     pdf, _ = load_csv(pts_path)
                     if pdf is None:
                         pdf = pd.DataFrame()
                 else:
-                    pdf = pd.DataFrame({"GM": GM_TEAMS, "Points": [0]*len(GM_TEAMS)})
+                    pdf = pd.DataFrame({"GM": GM_TEAMS, "Points": [0] * len(GM_TEAMS)})
 
                 if pdf.empty:
-                    pdf = pd.DataFrame({"GM": GM_TEAMS, "Points": [0]*len(GM_TEAMS)})
+                    pdf = pd.DataFrame({"GM": GM_TEAMS, "Points": [0] * len(GM_TEAMS)})
 
                 if "GM" not in pdf.columns:
                     pdf["GM"] = GM_TEAMS[:len(pdf)]
                 if "Points" not in pdf.columns:
                     pdf["Points"] = 0
 
-                # normalize
                 pdf["GM"] = pdf["GM"].astype(str)
                 pdf["Points"] = pd.to_numeric(pdf["Points"], errors="coerce").fillna(0).astype(int)
 
-                edited = st.data_editor(pdf[["GM","Points"]], use_container_width=True, height=260, key="gm_points_editor")
+                edited = st.data_editor(pdf[["GM", "Points"]], use_container_width=True, height=260, key="gm_points_editor")
 
                 if st.button("💾 Sauvegarder points GM", type="primary", use_container_width=True, key="gm_points_save"):
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                     if os.path.exists(pts_path):
                         old, _ = load_csv(pts_path)
                         if old is not None:
@@ -2108,10 +2007,58 @@ st.info("➡️ Quand tu veux, va à l’onglet **4️⃣ Master + Audit**.")
                     ok, err = _atomic_write_df(edited, pts_path)
                     if ok:
                         st.success(f"✅ Sauvegardé: {pts_path}")
-                    else:
-                        st.error("❌ Écriture échouée: " + str(err))
 
-            st.info("✅ Outils Admin terminés. Tu peux revenir aux onglets 1→4.")
+                        # Historique (idiot-proof): log update GM points
+                        try:
+                            # Compute changes (old -> new)
+                            old_df = pdf[["GM", "Points"]].copy() if isinstance(pdf, pd.DataFrame) and (not pdf.empty) else pd.DataFrame(columns=["GM","Points"])
+                            new_df = edited[["GM", "Points"]].copy() if isinstance(edited, pd.DataFrame) and (not edited.empty) else pd.DataFrame(columns=["GM","Points"])
+
+                            old_df["GM"] = old_df["GM"].astype(str).str.strip()
+                            new_df["GM"] = new_df["GM"].astype(str).str.strip()
+                            old_df["Points"] = pd.to_numeric(old_df["Points"], errors="coerce").fillna(0).astype(int)
+                            new_df["Points"] = pd.to_numeric(new_df["Points"], errors="coerce").fillna(0).astype(int)
+
+                            merged = new_df.merge(old_df, on="GM", how="left", suffixes=("_new", "_old"))
+                            merged["Points_old"] = pd.to_numeric(merged["Points_old"], errors="coerce").fillna(0).astype(int)
+                            merged["Points_new"] = pd.to_numeric(merged["Points_new"], errors="coerce").fillna(0).astype(int)
+                            changed = merged[merged["Points_new"] != merged["Points_old"]].copy()
+
+                            if not changed.empty:
+                                # Build a short note string
+                                parts = []
+                                for _, r in changed.iterrows():
+                                    gm = _to_str(r.get("GM", ""))
+                                    a = int(r.get("Points_old", 0))
+                                    b = int(r.get("Points_new", 0))
+                                    parts.append(f"{gm}: {a}→{b}")
+                                note = "; ".join(parts)
+                                if len(note) > 400:
+                                    note = note[:400] + "…"
+                                extra = {"file": os.path.basename(pts_path), "changed_count": int(len(changed))}
+                            else:
+                                note = "Aucun changement (mêmes points)."
+                                extra = {"file": os.path.basename(pts_path), "changed_count": 0}
+
+                            okh, msgh, hpath = _append_history_event(
+                                DATA_DIR,
+                                action="UPDATE_GM_POINTS",
+                                team="ALL",
+                                player="",
+                                nhl_id="",
+                                note=note,
+                                extra=extra,
+                            )
+                            if okh:
+                                st.success("🧾 " + msgh)
+                        except Exception as e:
+                            st.warning("Historique: impossible d'ajouter l'entrée (GM points) — " + str(e))
+
+                        b = _read_file_bytes(pts_path)
+                        if b:
+                            st.download_button("📥 Télécharger gm_points.csv", data=b, file_name=os.path.basename(pts_path), mime="text/csv", use_container_width=True, key="dl_gm_points")
+                    else:
+                        st.error("❌ " + str(err))
 
 
         # Stop ici pour éviter de scroller dans tout l'Admin complet
