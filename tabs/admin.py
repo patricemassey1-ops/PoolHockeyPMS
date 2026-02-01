@@ -2289,52 +2289,68 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                         if view.empty:
                             st.warning("Aucun résultat.")
                         else:
-                            def fmt_idx(i):
-                                # Format fonction robuste (ne dépend pas uniquement du filtre)
-                                nm = _to_str(src_df.at[i, src_name]) if i in src_df.index else ""
-                                nid = _to_str(src_df.at[i, "NHL_ID"]) if ("NHL_ID" in src_df.columns and i in src_df.index) else ""
-                                return f"{nm}  |  NHL_ID={nid}" if nid else nm
+                            # ✅ Sélection PRO: pas de chips à cliquer. Tu coches dans la table, puis tu ajoutes.
+                            src_team = _detect_col(src_df, ["Team","Équipe","Equipe","NHL Team","team"]) or "Team"
+                            if src_team not in src_df.columns:
+                                src_df[src_team] = ""
 
-                            # ✅ Sélection persistante (les choix ne disparaissent pas)
                             selected = st.session_state.get("ar_add_selected", [])
-                            opt_ids = []
-                            for _i in list(selected) + view.index.tolist():
-                                if _i not in opt_ids:
-                                    opt_ids.append(_i)
+                            # Retirer du résultat ce qui est déjà sélectionné
+                            view2 = view[~view.index.isin(selected)].copy()
 
-                            picks = st.multiselect(
-                                "Choisir jusqu'à 5 joueurs (top 50)",
-                                options=opt_ids,
-                                format_func=fmt_idx,
-                                default=list(selected),
-                                key="ar_add_picks",
-                            )
+                            if view2.empty:
+                                st.info("✅ Tous les résultats sont déjà dans ta sélection (ou tu as atteint la limite).")
+                            else:
+                                show = view2[[src_name, src_team]].copy()
+                                show = show.rename(columns={src_name: "Player", src_team: "Team"})
+                                show.insert(0, "➕", False)
+                                st.markdown("**Résultats (coche ➕ puis clique Ajouter)**")
+                                edited = st.data_editor(show[["➕","Player","Team"]], use_container_width=True, height=260, key="ar_add_results_editor")
+                            
+                                if st.button("➕ Ajouter les joueurs cochés", use_container_width=True, key="ar_add_from_table"):
+                                    try:
+                                        mask = edited["➕"].astype(bool).tolist()
+                                        idxs = [i for i, flag in zip(show.index.tolist(), mask) if flag]
+                                    except Exception:
+                                        idxs = []
+                            
+                                    if not idxs:
+                                        st.warning("Coche au moins 1 joueur dans la table.")
+                                        st.stop()
+                            
+                                    new_sel = list(selected)
+                                    for i in idxs:
+                                        if i not in new_sel:
+                                            new_sel.append(i)
+                            
+                                    if len(new_sel) > 5:
+                                        st.error("🛑 Max 5 joueurs. Retire-en avant d'en ajouter d'autres.")
+                                        st.stop()
+                            
+                                    st.session_state["ar_add_selected"] = new_sel
+                                    st.success(f"✅ Ajouté à la sélection: {len(idxs)} joueur(s).")
+                                    st.rerun()
 
-                            if len(picks) > 5:
-                                st.warning("⚠️ Max 5 joueurs.")
-                                picks = picks[:5]
-
-                            st.session_state["ar_add_selected"] = list(picks)
-
-                            # ❌ Retirer une sélection par erreur (table avec X)
+                            # Liste sélectionnée (avec ❌ pour retirer)
+                            picks = st.session_state.get("ar_add_selected", [])
+                            st.metric("Sélection (max 5)", f"{len(picks)}/5")
                             if picks:
-                                sel_df = src_df.loc[picks, [src_name, "NHL_ID"]].copy()
-                                sel_df = sel_df.rename(columns={src_name: "Player"})
-                                sel_df.insert(0, "❌", False)
-                                st.markdown("**Aperçu (à ajouter) — coche ❌ pour retirer de la liste**")
-                                edited_sel = st.data_editor(sel_df, use_container_width=True, height=240, key="ar_add_preview_editor")
-                                c_rm1, c_rm2 = st.columns([1, 1])
-                                with c_rm1:
+                                sel = src_df.loc[picks, [src_name, src_team, "NHL_ID"]].copy()
+                                sel = sel.rename(columns={src_name: "Player", src_team: "Team"})
+                                sel.insert(0, "❌", False)
+                                st.markdown("**Ta sélection (max 5) — coche ❌ pour retirer**")
+                                edited_sel = st.data_editor(sel[["❌","Player","Team"]], use_container_width=True, height=220, key="ar_add_preview_editor")
+                                c1, c2 = st.columns([1,1])
+                                with c1:
                                     if st.button("❌ Retirer les lignes cochées", use_container_width=True, key="ar_add_remove_checked"):
                                         try:
-                                            mask = edited_sel["❌"].astype(bool)
-                                            remove_idx = [p for p, flag in zip(picks, mask.tolist()) if flag]
-                                            new_sel = [p for p in picks if p not in set(remove_idx)]
-                                            st.session_state["ar_add_selected"] = new_sel
+                                            mask = edited_sel["❌"].astype(bool).tolist()
+                                            remove_idx = [p for p, flag in zip(picks, mask) if flag]
+                                            st.session_state["ar_add_selected"] = [p for p in picks if p not in set(remove_idx)]
                                             st.rerun()
                                         except Exception:
                                             pass
-                                with c_rm2:
+                                with c2:
                                     if st.button("🧹 Vider la sélection", use_container_width=True, key="ar_add_clear"):
                                         st.session_state["ar_add_selected"] = []
                                         st.rerun()
@@ -2457,67 +2473,105 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                             nid = _to_str(show.at[i, "NHL_ID"])
                             return f"{nm}  |  NHL_ID={nid}" if nid else nm
 
-                        # ✅ Sélection persistante (les choix ne disparaissent pas)
+                        # ✅ Sélection PRO: coche dans la table (pas de chips)
 
                         selected_rm = st.session_state.get("ar_rm_selected", [])
 
-                        opt_ids_rm = []
-
-                        for _i in list(selected_rm) + show.index.tolist():
-
-                            if _i not in opt_ids_rm:
-
-                                opt_ids_rm.append(_i)
+                        show2 = show[~show.index.isin(selected_rm)].copy()
 
 
-                        picks = st.multiselect(
+                        if show2.empty:
 
-                            "Choisir jusqu'à 5 joueurs (top 200)",
+                            st.info("✅ Tous les joueurs visibles sont déjà dans ta sélection.")
 
-                            options=opt_ids_rm,
+                        else:
 
-                            format_func=fmt_row,
+                            tab = show2[[player_col, "NHL_ID"]].copy()
 
-                            default=list(selected_rm),
+                            tab = tab.rename(columns={player_col: "Player"})
 
-                            key="ar_rm_picks",
+                            tab.insert(0, "➖", False)
 
-                        )
+                            st.markdown("**Résultats (coche ➖ puis clique Ajouter à retirer)**")
 
-                        if len(picks) > 5:
+                            edited = st.data_editor(tab[["➖","Player"]], use_container_width=True, height=260, key="ar_rm_results_editor")
 
-                            st.warning("⚠️ Max 5 joueurs.")
+                        
 
-                            picks = picks[:5]
+                            if st.button("➖ Ajouter à la sélection (retirer)", use_container_width=True, key="ar_rm_from_table"):
 
-                        st.session_state["ar_rm_selected"] = list(picks)
+                                try:
+
+                                    mask = edited["➖"].astype(bool).tolist()
+
+                                    idxs = [i for i, flag in zip(tab.index.tolist(), mask) if flag]
+
+                                except Exception:
+
+                                    idxs = []
+
+                        
+
+                                if not idxs:
+
+                                    st.warning("Coche au moins 1 joueur dans la table.")
+
+                                    st.stop()
+
+                        
+
+                                new_sel = list(selected_rm)
+
+                                for i in idxs:
+
+                                    if i not in new_sel:
+
+                                        new_sel.append(i)
+
+                        
+
+                                if len(new_sel) > 5:
+
+                                    st.error("🛑 Max 5 joueurs.")
+
+                                    st.stop()
+
+                        
+
+                                st.session_state["ar_rm_selected"] = new_sel
+
+                                st.success(f"✅ Ajouté à retirer: {len(idxs)} joueur(s).")
+
+                                st.rerun()
 
 
+                        picks = st.session_state.get("ar_rm_selected", [])
+
+
+                        st.metric("Sélection (max 5)", f"{len(picks)}/5")
                         if picks:
 
-                            sel_df = show.loc[picks, [player_col, "NHL_ID"]].copy().rename(columns={player_col: "Player"})
+                            sel = show.loc[picks, [player_col, "NHL_ID"]].copy().rename(columns={player_col: "Player"})
 
-                            sel_df.insert(0, "❌", False)
+                            sel.insert(0, "❌", False)
 
-                            st.markdown("**Aperçu (à retirer) — coche ❌ pour retirer de la liste**")
+                            st.markdown("**Ta sélection (à retirer) — coche ❌ pour retirer de la liste**")
 
-                            edited_sel = st.data_editor(sel_df, use_container_width=True, height=240, key="ar_rm_preview_editor")
+                            edited_sel = st.data_editor(sel[["❌","Player"]], use_container_width=True, height=220, key="ar_rm_preview_editor")
 
-                            c_rm1, c_rm2 = st.columns([1, 1])
+                            c1, c2 = st.columns([1,1])
 
-                            with c_rm1:
+                            with c1:
 
                                 if st.button("❌ Retirer les lignes cochées", use_container_width=True, key="ar_rm_remove_checked"):
 
                                     try:
 
-                                        mask = edited_sel["❌"].astype(bool)
+                                        mask = edited_sel["❌"].astype(bool).tolist()
 
-                                        remove_idx = [p for p, flag in zip(picks, mask.tolist()) if flag]
+                                        remove_idx = [p for p, flag in zip(picks, mask) if flag]
 
-                                        new_sel = [p for p in picks if p not in set(remove_idx)]
-
-                                        st.session_state["ar_rm_selected"] = new_sel
+                                        st.session_state["ar_rm_selected"] = [p for p in picks if p not in set(remove_idx)]
 
                                         st.rerun()
 
@@ -2525,7 +2579,7 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 
                                         pass
 
-                            with c_rm2:
+                            with c2:
 
                                 if st.button("🧹 Vider la sélection", use_container_width=True, key="ar_rm_clear"):
 
