@@ -1771,6 +1771,42 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             st.markdown("## 4️⃣ Master + Audit")
             st.success("👉 TU ES ICI : ÉTAPE 4/4")
 
+            # Résultat persistant (idiot-proof) — pour ne pas perdre le message après rerun
+            last = st.session_state.get("steps_build_status", None)
+            if last:
+                if last.get("ok"):
+                    st.success("✅ " + str(last.get("msg", "Master + audit OK")))
+                else:
+                    st.error("❌ " + str(last.get("msg", "Erreur Master + audit")))
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Lignes master", int(last.get("master_rows", 0)))
+                c2.metric("Audit lignes", int(last.get("audit_rows", 0)))
+                c3.metric("Suspects", int(last.get("suspects_rows", 0)))
+
+                # Downloads (Option A)
+                mp = last.get("master_path", "")
+                rp = last.get("report_path", "")
+                sp = last.get("suspects_path", "")
+                if mp:
+                    b = _read_file_bytes(mp)
+                    if b:
+                        st.download_button("📥 Télécharger hockey.players_master.csv (Option A: repo /data/)", data=b, file_name=os.path.basename(mp), mime="text/csv", use_container_width=True, key="dl_master_step4")
+                if rp:
+                    b = _read_file_bytes(rp)
+                    if b:
+                        st.download_button("📥 Télécharger master_build_report.csv (audit) (Option A)", data=b, file_name=os.path.basename(rp), mime="text/csv", use_container_width=True, key="dl_report_step4")
+                if sp:
+                    b = _read_file_bytes(sp)
+                    if b:
+                        st.download_button("📥 Télécharger nhl_id_suspects.csv (Option A)", data=b, file_name=os.path.basename(sp), mime="text/csv", use_container_width=True, key="dl_suspects_step4")
+
+                st.info("✅ Prochaine étape: **tu as fini**. Optionnel: commit/push ces fichiers dans ton repo `/data/` (Option A).")
+                if st.button("🧽 Effacer le message", use_container_width=True, key="steps_build_clear"):
+                    st.session_state.pop("steps_build_status", None)
+                    st.rerun()
+
+            st.success("👉 TU ES ICI : ÉTAPE 4/4")
+
             st.markdown("### ✅ But")
             st.markdown("Construire **`data/hockey.players_master.csv`** + écrire les audits.")
             enrich = st.checkbox("Enrichir via NHL API", value=True, key="steps_build_enrich")
@@ -1804,6 +1840,17 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 
                 if block_sus and dup_ids > 0:
                     st.error(f"🛑 Écriture bloquée: {dup_ids} NHL_ID dupliqués détectés.")
+                    st.session_state["steps_build_status"] = {
+                        "ok": False,
+                        "msg": f"Écriture bloquée: {dup_ids} NHL_ID suspects (doublons).",
+                        "master_path": master_path,
+                        "report_path": report_path,
+                        "suspects_path": suspects_path,
+                        "master_rows": int(len(after_df)) if isinstance(after_df, pd.DataFrame) else 0,
+                        "audit_rows": 0,
+                        "suspects_rows": int(len(suspects_df)) if isinstance(suspects_df, pd.DataFrame) else 0,
+                    }
+
                     st.dataframe(suspects_df.head(200), use_container_width=True, height=320)
 
                     # auto-fix button
@@ -1836,6 +1883,17 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 _atomic_write_df(audit_df, report_path)
                 st.success(f"🧾 Audit écrit: {report_path} ({len(audit_df)} lignes)")
                 st.caption(f"Suspects: {suspects_path} ({len(suspects_df)} lignes)")
+
+                st.session_state["steps_build_status"] = {
+                    "ok": True,
+                    "msg": "Master + audit terminés ✅",
+                    "master_path": master_path,
+                    "report_path": report_path,
+                    "suspects_path": suspects_path,
+                    "master_rows": int(len(after_df)) if isinstance(after_df, pd.DataFrame) else 0,
+                    "audit_rows": int(len(audit_df)) if isinstance(audit_df, pd.DataFrame) else 0,
+                    "suspects_rows": int(len(suspects_df)) if isinstance(suspects_df, pd.DataFrame) else 0,
+                }
                 st.rerun()
 
             st.info("✅ Quand l’étape 4 est verte, tu as fini.")
