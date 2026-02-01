@@ -25,6 +25,21 @@ def _gm_points_path(data_dir: str) -> str:
     return os.path.join(data_dir, "gm_points.csv")
 
 
+def _pick_history_path(data_dir: str) -> str:
+    candidates = [
+        os.path.join(data_dir, "historique_admin.csv"),
+        os.path.join(data_dir, "historique.csv"),
+        os.path.join(data_dir, "history.csv"),
+        os.path.join(data_dir, "transactions.csv"),
+        os.path.join(data_dir, "backup_history.csv"),
+        os.path.join(data_dir, "historique_transactions.csv"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return candidates[0]
+
+
 def _load_csv_safe(path: str) -> pd.DataFrame:
     try:
         if path and os.path.exists(path):
@@ -267,6 +282,24 @@ def render(ctx: dict) -> None:
     st.dataframe(view, use_container_width=True, hide_index=True)
 
     with st.expander("🔎 Debug fichier", expanded=False):
+
+        # Historique (Option A)
+        hist_path = _pick_history_path(data_dir)
+        st.caption(f"Historique (auto): `{hist_path}`")
+        hb = _read_file_bytes(hist_path)
+        if hb:
+            st.download_button(
+                "📥 Télécharger historique (CSV) (mets-le dans ton repo /data/)",
+                data=hb,
+                file_name=os.path.basename(hist_path),
+                mime="text/csv",
+                use_container_width=True,
+                key="dl_hist_rank",
+            )
+            st.caption("✅ Option A: mets ce fichier d’historique dans ton repo (commit/push) pour ne pas le perdre après redémarrage.")
+        else:
+            st.info("Aucun historique trouvé (il sera créé automatiquement quand tu ajoutes un joueur ou fais une action Admin).")
+
         st.caption(f"Source points: `{p_path}`")
         st.caption(f"Source GM points: `{gm_path}`")
         st.write("Colonnes points:", list(pts.columns))
