@@ -183,6 +183,79 @@ class MasterBuildConfig:
     sleep_s: float = 0.05
 
 
+
+def _load_nhl_cache(cache_path: str) -> dict:
+    try:
+        if os.path.exists(cache_path):
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+def _save_nhl_cache(cache_path: str, cache: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
+
+def enrich_nhl_cache(cfg: MasterBuildConfig, nhl_ids: list[str] | None = None, max_calls: int | None = None) -> dict:
+    """
+    Progressive enrichment (idiot-proof):
+    - Met à jour le cache NHL (cfg.nhl_cache_file) en appelant l'API uniquement pour les NHL_ID manquants.
+    - Ne construit PAS le master, ne modifie PAS les CSV (safe).
+    Retourne des stats: calls, hits, fetched, missing_remaining_estimate.
+    """
+    cache_path = os.path.join(cfg.data_dir, cfg.nhl_cache_file)
+    cache = _load_nhl_cache(cache_path)
+
+    # Determine ids
+    ids = nhl_ids or []
+    # Normalize ids
+    ids = [_norm_nhl_id(x) for x in ids if _norm_nhl_id(x)]
+    ids = list(dict.fromkeys(ids))  # unique, keep order
+
+    calls_limit = int(max_calls if max_calls is not None else cfg.max_nhl_calls)
+    calls = 0
+    hits = 0
+    fetched = 0
+
+    for pid in ids:
+        if calls >= calls_limit:
+            break
+        payload = cache.get(pid)
+        if isinstance(payload, dict) and len(payload) > 0:
+            hits += 1
+            continue
+        # fetch
+        payload = nhl_player_by_id(pid)
+        if isinstance(payload, dict) and len(payload) > 0:
+            cache[pid] = payload
+            fetched += 1
+        calls += 1
+        time.sleep(cfg.sleep_s)
+
+    # Estimate remaining (ids missing usable cache)
+    missing_remaining = 0
+    for pid in ids:
+        payload = cache.get(pid)
+        if not (isinstance(payload, dict) and len(payload) > 0):
+            missing_remaining += 1
+
+    _save_nhl_cache(cache_path, cache)
+    return {
+        "cache_path": cache_path,
+        "calls": calls,
+        "hits": hits,
+        "fetched": fetched,
+        "missing_remaining_estimate": missing_remaining,
+        "ids_total": len(ids),
+    }
+
+
 def build_master(cfg: MasterBuildConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Build data/hockey.players_master.csv by merging:
