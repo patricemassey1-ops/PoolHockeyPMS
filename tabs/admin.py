@@ -1858,7 +1858,16 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 
     # Build source options = all csvs EXCEPT target, plus (None), plus upload option label
     csvs2 = list_data_csvs(data_dir)
-    src_opts = ["(Aucune — API NHL uniquement)"] + [p for p in csvs2 if p != target_path]
+
+    # Dummy-proof: on pousse nhl_search_players.csv en haut s'il existe
+    nhl_search_path = os.path.join(DATA_DIR, "nhl_search_players.csv")
+    preferred = []
+    if os.path.exists(nhl_search_path):
+        preferred.append(nhl_search_path)
+
+    others = [p for p in csvs2 if p != target_path and p not in preferred]
+    src_opts = ["(Aucune — API NHL uniquement)"] + preferred + others
+
 # ensure nhl_search_players is present when exists
     must_src = os.path.join(data_dir, "nhl_search_players.csv")
     if os.path.exists(must_src) and must_src != target_path and must_src not in src_opts:
