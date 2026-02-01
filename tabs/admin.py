@@ -1541,11 +1541,9 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                 if st.button("⬇️ Drive AUTO → nhl_search_players.csv", use_container_width=True, key="steps_drive_auto"):
                     if not _drive_oauth_available():
                         st.error("Drive OAuth n'est pas configuré (secrets gdrive_oauth).")
-                        st.stop()
                     folder_id = _drive_get_folder_id_default()
                     if not folder_id:
                         st.error("Folder ID Drive manquant.")
-                        st.stop()
                     with st.spinner("Drive: liste et auto-sélection…"):
                         files = _drive_list_csv_files(folder_id)
                         auto_pick = _drive_pick_auto(files)
@@ -1568,7 +1566,6 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                     st.divider()
                     st.markdown("✅ Solution simple: utilise l’option **API** à droite (🌐 Générer via NHL Search API).")
 
-                        st.stop()
                     with st.spinner("Téléchargement Drive → data/nhl_search_players.csv …"):
                         ok, err = _drive_download_any(auto_pick, nhl_src_path)
                     if ok:
