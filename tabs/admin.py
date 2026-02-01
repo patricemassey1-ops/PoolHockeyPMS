@@ -115,16 +115,29 @@ def _drive_service():
 
 def _drive_list_csv_files(folder_id: str, page_size: int = 200) -> list[dict]:
     """
-    List CSV files in a Drive folder. Returns list of dicts: id,name,modifiedTime,size,webViewLink (if available).
+    List CSV-like files in a Drive folder.
+
+    Dummy-proof fix:
+      - Certains "CSV" sont des Google Sheets (mimeType=application/vnd.google-apps.spreadsheet)
+      - Certains fichiers uploadés ont un mimeType différent (ex: application/vnd.ms-excel)
+      - Donc: on liste (CSV + Sheets + name contains '.csv') et on conserve mimeType.
     """
     svc = _drive_service()
-    q = f"'{folder_id}' in parents and trashed=false and mimeType='text/csv'"
+    q = (
+        f"'{folder_id}' in parents and trashed=false and ("
+        "mimeType='text/csv' or "
+        "mimeType='application/vnd.ms-excel' or "
+        "mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or "
+        "mimeType='application/vnd.google-apps.spreadsheet' or "
+        "name contains '.csv'"
+        ")"
+    )
     res = []
     page_token = None
     while True:
         resp = svc.files().list(
             q=q,
-            fields="nextPageToken, files(id,name,modifiedTime,size,webViewLink)",
+            fields="nextPageToken, files(id,name,mimeType,modifiedTime,size,webViewLink)",
             pageSize=page_size,
             pageToken=page_token,
             supportsAllDrives=True,
@@ -135,6 +148,7 @@ def _drive_list_csv_files(folder_id: str, page_size: int = 200) -> list[dict]:
         if not page_token:
             break
     return res
+
 
 def _score_drive_file(name: str) -> int:
     n = (name or "").lower()
@@ -190,6 +204,38 @@ def _drive_download_file(file_id: str, out_path: str) -> tuple[bool, str]:
         return True, ""
     except Exception as e:
         return False, str(e)
+
+
+def _drive_download_any(file_meta: dict, out_path: str) -> tuple[bool, str]:
+    """
+    Download a Drive file to out_path.
+    - If it's a Google Sheet, export as CSV.
+    - Otherwise, download bytes directly.
+    """
+    try:
+        svc = _drive_service()
+        file_id = str((file_meta or {}).get("id") or "").strip()
+        mime = str((file_meta or {}).get("mimeType") or "").strip()
+        if not file_id:
+            return False, "file_id manquant"
+
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+        if mime == "application/vnd.google-apps.spreadsheet":
+            request = svc.files().export_media(fileId=file_id, mimeType="text/csv")
+        else:
+            request = svc.files().get_media(fileId=file_id, supportsAllDrives=True)
+
+        with open(out_path, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
 
 import glob
 import difflib
@@ -1456,10 +1502,10 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
                         files = _drive_list_csv_files(folder_id)
                         auto_pick = _drive_pick_auto(files)
                     if not auto_pick:
-                        st.error("Aucun CSV trouvé dans ce dossier Drive.")
+                        st.error("Aucun fichier CSV/Sheet trouvé dans ce dossier Drive. Vérifie le Folder ID + permissions (le compte OAuth doit avoir accès).")
                         st.stop()
                     with st.spinner("Téléchargement Drive → data/nhl_search_players.csv …"):
-                        ok, err = _drive_download_file(auto_pick.get("id",""), nhl_src_path)
+                        ok, err = _drive_download_any(auto_pick, nhl_src_path)
                     if ok:
                         st.success(f"✅ Téléchargé: {nhl_src_path} (AUTO={auto_pick.get('name','')})")
                         st.rerun()
@@ -1767,7 +1813,7 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
 
                         if st.button("⬇️ Télécharger dans data/", type="primary", use_container_width=True, key="drive_download"):
                             with st.spinner("Téléchargement Drive → data/ …"):
-                                ok, err = _drive_download_file(selected.get("id",""), out_path)
+                                ok, err = _drive_download_any(selected, out_path)
                             if ok:
                                 st.success(f"✅ Téléchargé: {out_path}")
                                 st.info("Prochain step: retourne dans Master Builder — la source `data/nhl_search_players.csv` sera détectée automatiquement.")
