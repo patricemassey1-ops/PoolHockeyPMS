@@ -15,6 +15,48 @@ import os
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
 
+def _require_admin_password(owner: str) -> None:
+    """
+    Admin gate (dummy-proof):
+      - Only Whalers can access Admin
+      - Optional password via st.secrets["admin_password"]
+    """
+    if owner != "Whalers":
+        st.warning("🔒 Accès Admin réservé à **Whalers**.")
+        st.stop()
+
+    pw = ""
+    try:
+        pw = str(st.secrets.get("admin_password", "")).strip()
+    except Exception:
+        pw = ""
+
+    # If no password configured, allow
+    if not pw:
+        return
+
+    if st.session_state.get("admin_ok", False):
+        return
+
+    st.subheader("🔒 Admin — mot de passe")
+    st.caption("Entrez le mot de passe pour accéder aux outils Admin (Whalers seulement).")
+    entered = st.text_input("Mot de passe", type="password", key="admin_pw_input")
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("✅ Déverrouiller", type="primary", use_container_width=True, key="admin_unlock_btn"):
+            if str(entered) == pw:
+                st.session_state["admin_ok"] = True
+                st.success("✅ Admin déverrouillé")
+                st.rerun()
+            else:
+                st.error("❌ Mauvais mot de passe")
+    with col2:
+        if st.button("↩️ Annuler", use_container_width=True, key="admin_cancel_btn"):
+            st.stop()
+
+    st.stop()
+
+
 def _to_str(x):
     try:
         if x is None:
@@ -1530,6 +1572,16 @@ def generate_nhl_search_source(
 # UI (render)
 # =========================
 def render(*args, **kwargs):
+
+    # ----------------------------
+    # 🔒 Gate Admin (Whalers only) + optional password
+    # ----------------------------
+    owner = (
+        str(ctx.get("owner") or ctx.get("selected_owner") or st.session_state.get("owner") or st.session_state.get("selected_owner") or "").strip()
+        or "Whalers"
+    )
+    _require_admin_password(owner)
+
     try:
         return _render_impl(*args, **kwargs)
     except Exception as e:
