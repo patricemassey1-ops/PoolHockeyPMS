@@ -1589,6 +1589,20 @@ def render(*args, **kwargs):
         str(_ctx.get("owner") or _ctx.get("selected_owner") or st.session_state.get("owner") or st.session_state.get("selected_owner") or "").strip()
         or "Whalers"
     )
+    # 🔐 Sécurité Admin (debug)
+    try:
+        pw_cfg = str(st.secrets.get("admin_password", "")).strip()
+    except Exception:
+        pw_cfg = ""
+    with st.expander("🔐 Sécurité Admin (debug)", expanded=False):
+        st.caption(f"Owner détecté: **{owner}**")
+        st.caption("Mot de passe configuré: " + ("✅ oui" if pw_cfg else "❌ non (ajoute `admin_password` dans Secrets)"))
+        st.caption("Admin déjà déverrouillé (session): " + ("✅ oui" if st.session_state.get("admin_ok") else "❌ non"))
+        if st.button("🔒 Re-verrouiller Admin", use_container_width=True, key="admin_relock"):
+            st.session_state.pop("admin_ok", None)
+            st.success("✅ Admin re-verrouillé")
+            st.rerun()
+
     _require_admin_password(owner)
 
 
