@@ -42,6 +42,16 @@ def _to_str(x: Any) -> str:
         return ""
     return s.strip()
 
+def _norm_nhl_id(x: Any) -> str:
+    s = _to_str(x)
+    s = s.replace(',', '').strip()
+    # common case: pandas reads ids as float -> '8475167.0'
+    s = re.sub(r"\.0$", "", s)
+    # keep only digits
+    s = re.sub(r"[^0-9]", "", s)
+    return s
+
+
 def _norm_name(x: Any) -> str:
     s = _to_str(x).lower()
     s = re.sub(r"\s+", " ", s)
@@ -166,9 +176,6 @@ class MasterBuildConfig:
     puckpedia_file: str = "PuckPedia2025_26.csv"
     master_file: str = "hockey.players_master.csv"
 
-    # Write output file (set False for dry-run / gated writes)
-    write_output: bool = True
-
     # NHL enrichment
     enrich_from_nhl: bool = True
     nhl_cache_file: str = "nhl_player_cache.json"
@@ -176,7 +183,7 @@ class MasterBuildConfig:
     sleep_s: float = 0.05
 
 
-def build_master(cfg: MasterBuildConfig, write_output: bool | None = None) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+def build_master(cfg: MasterBuildConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
     Build data/hockey.players_master.csv by merging:
       - hockey.players.csv (base)
@@ -189,9 +196,6 @@ def build_master(cfg: MasterBuildConfig, write_output: bool | None = None) -> Tu
     puck_path = os.path.join(cfg.data_dir, cfg.puckpedia_file)
     out_path = os.path.join(cfg.data_dir, cfg.master_file)
     cache_path = os.path.join(cfg.data_dir, cfg.nhl_cache_file)
-
-    # Effective write flag
-    write_output_eff = cfg.write_output if write_output is None else bool(write_output)
 
     players = _safe_read_csv(players_path)
     puck = _safe_read_csv(puck_path)
@@ -300,7 +304,7 @@ def build_master(cfg: MasterBuildConfig, write_output: bool | None = None) -> Tu
             cache = {}
 
     if cfg.enrich_from_nhl and requests is not None:
-        ids = merged["NHL_ID"].astype(str).str.strip()
+        ids = merged["NHL_ID"].apply(_norm_nhl_id)
         unique_ids = [x for x in ids.unique().tolist() if x]
 
         calls = 0
@@ -311,12 +315,14 @@ def build_master(cfg: MasterBuildConfig, write_output: bool | None = None) -> Tu
             if calls >= cfg.max_nhl_calls:
                 break
 
-            if pid in cache:
+            if pid in cache and isinstance(cache.get(pid), dict) and len(cache.get(pid) or {}) > 0:
                 hits += 1
                 payload = cache.get(pid) or {}
             else:
                 payload = nhl_player_by_id(pid)
-                cache[pid] = payload
+                # ne cache pas une réponse vide (sinon ça bloque l’enrichissement pour toujours)
+                if isinstance(payload, dict) and len(payload) > 0:
+                    cache[pid] = payload
                 calls += 1
                 time.sleep(cfg.sleep_s)
 
@@ -350,13 +356,7 @@ def build_master(cfg: MasterBuildConfig, write_output: bool | None = None) -> Tu
     if "_norm_player" in merged.columns:
         merged = merged.drop(columns=["_norm_player"])
 
-    if write_output_eff:
-        _atomic_write_csv(merged, out_path)
-        report["master_written"] = True
-        report["master_path"] = out_path
-    else:
-        report["master_written"] = False
-        report["master_path"] = out_path
+    _atomic_write_csv(merged, out_path)
 
     return merged, report
 
