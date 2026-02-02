@@ -175,155 +175,70 @@ NAV_ORDER = [
 # CSS (Apple-like)
 # ----------------------------
 def _apply_css():
-    st.markdown(
-        f"""
+    """
+    CSS global (Apple glass + navigation). IMPORTANT:
+    - Tout le CSS est dans des strings (évite NameError / erreurs d'indent).
+    - Pas de f-string (les accolades CSS restent normales).
+    """
+    css = """
 <style>
 /* Layout: custom sidebar widths */
-section[data-testid="stSidebar"] {{
+section[data-testid="stSidebar"] {
   width: var(--pms-sb-w, 320px) !important;
   min-width: var(--pms-sb-w, 320px) !important;
   max-width: var(--pms-sb-w, 320px) !important;
-}}
+}
+
 /* Give content a little breathing room (also pushes titles down so they're not hidden) */
-.block-container {{
+.block-container {
   padding-top: 2.1rem !important;
-}}
+}
 
 /* Hide Streamlit default nav + make our sidebar clean */
-section[data-testid="stSidebar"] [data-testid="stSidebarNav"] {{
-  display:none !important;
-}}
-section[data-testid="stSidebar"] .stRadio, section[data-testid="stSidebar"] .stSelectbox {{
-  margin-top: 0.25rem;
-}}
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] { display: none !important; }
+section[data-testid="stSidebar"] .stRadio { display: none !important; }
 
-/* Brand */
-.pms-brand {{
-  display:flex; align-items:center; gap:10px;
-  padding: 10px 10px 12px 10px;
-}}
-.pms-brand img {{
-  width: 34px; height: 34px; border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(0,0,0,.20);
-}}
-.pms-brand .t {{
-  font-weight: 700; font-size: 1.05rem;
-  letter-spacing: .2px;
-}}
+/* Sidebar base (glass) */
+section[data-testid="stSidebar"] > div {
+  background: rgba(18,24,38,0.88) !important;
+  backdrop-filter: blur(16px) !important;
+  border-right: 1px solid rgba(255,255,255,0.10) !important;
+}
 
-/* Nav container */
-.pms-nav {{
-  display:flex; flex-direction: column; gap: 10px;
-  padding: 6px 10px 8px 10px;
-}}
-.pms-item {{
-  display:flex; align-items:center; gap: 12px;
-  border-radius: 14px;
-  padding: 8px 10px;
-  text-decoration:none !important;
-  color: rgba(255,255,255,.88);
-  background: rgba(255,255,255,.04);
-  border: 1px solid rgba(255,255,255,.05);
-  transition: all .12s ease-in-out;
-}}
-.pms-item:hover {{
-  transform: translateY(-1px);
-  background: rgba(255,255,255,.06);
-  border-color: rgba(255,255,255,.10);
-}}
-.pms-item.active {{
-  background: {RED_ACTIVE};
-  border-color: rgba(0,0,0,.18);
-  box-shadow: 0 18px 36px rgba(239,68,68,.22);
-  color: white;
-}}
-.pms-item img {{
-  width: var(--pms-ico, 54px);
-  height: var(--pms-ico, 54px);
-  border-radius: 12px;
-  object-fit: contain;
-}}
-.pms-item .lbl {{
-  font-weight: 650;
-  font-size: 1.00rem;
-  line-height: 1;
-}}
+/* Light mode sidebar background */
+.pms-light section[data-testid="stSidebar"] > div {
+  background: rgba(248,250,252,0.92) !important;
+  border-right: 1px solid rgba(0,0,0,0.08) !important;
+}
 
-/* Collapsed mode: hide text, center icons, make pills */
-.pms-collapsed .pms-brand .t {{ display:none; }}
-.pms-collapsed .pms-item .lbl {{ display:none; }}
-.pms-collapsed .pms-nav {{
-  padding: 6px 8px;
-}}
-.pms-collapsed .pms-item {{
-  justify-content: center;
-  padding: 10px 0;
-}}
-.pms-collapsed .pms-item img {{
-  width: var(--pms-ico-c, 36px);
-  height: var(--pms-ico-c, 36px);
-  border-radius: 12px;
-}}
-.pms-collapsed .pms-item {{
-  border-radius: 16px;
-}}
+/* NAV container */
+.pms-nav { padding: 10px 10px 6px 10px; }
+.pms-nav a { text-decoration: none !important; }
 
-/* Team logo chip (collapsed + expanded) */
-.pms-team {{
-  display:flex; align-items:center; gap:10px;
-  padding: 10px 10px 0 10px;
-}}
-.pms-team img {{
-  width: 34px; height: 34px; border-radius: 12px;
-  object-fit: contain;
-  background: transparent;
-}}
-.pms-team .tt {{
-  font-size: .92rem;
-  font-weight: 650;
-  opacity: .90;
-}}
-.pms-collapsed .pms-team .tt {{ display:none; }}
-.pms-collapsed .pms-team {{
-  justify-content:center;
-  padding: 8px 8px 0 8px;
-}}
-
-/* Theme toggle bottom */
-.pms-theme {{
-  padding: 10px 10px 6px 10px;
-}}
-.pms-theme .sun {{
-  font-size: 18px;
-  opacity: .9;
-  padding-left: 4px;
-  padding-bottom: 2px;
-}}
-
-/* Active button (primary) uses same red as nav active */
-.stButton > button[kind="primary"] {{
-  background: {RED_ACTIVE} !important;
-  border-color: rgba(0,0,0,.18) !important;
-}}
-
-/* === Apple Glass (sidebar) === */
-section[data-testid="stSidebar"] > div { backdrop-filter: blur(16px) !important; }
+/* NAV item (Apple glass pill) */
 .pms-item {
   position: relative;
-  border: 1px solid rgba(255,255,255,0.10) !important;
-  background: rgba(255,255,255,0.05) !important;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  margin: 10px 0;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.05);
   box-shadow: 0 10px 22px rgba(0,0,0,0.12);
   transition: transform 120ms ease, box-shadow 150ms ease, border-color 150ms ease, background 150ms ease;
 }
 .pms-item:hover {
   transform: translateY(-1px);
-  border-color: rgba(239,68,68,0.55) !important;
-  background: rgba(255,255,255,0.08) !important;
+  border-color: rgba(239,68,68,0.55);
+  background: rgba(255,255,255,0.08);
   box-shadow: 0 14px 28px rgba(0,0,0,0.18);
 }
 .pms-item.active {
-  background: rgba(239,68,68,0.95) !important;
-  border-color: rgba(220,38,38,1) !important;
+  background: __RED_ACTIVE__;
+  border-color: rgba(220,38,38,1);
   box-shadow: 0 16px 34px rgba(239,68,68,0.22);
 }
 .pms-item.active::before {
@@ -338,7 +253,47 @@ section[data-testid="stSidebar"] > div { backdrop-filter: blur(16px) !important;
   box-shadow: 0 10px 24px rgba(239,68,68,0.45);
 }
 
-/* === Custom tooltip for nav items === */
+/* Icon + label */
+.pms-item img {
+  width: var(--pms-ico, 54px);
+  height: var(--pms-ico, 54px);
+  border-radius: 16px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.22);
+}
+.pms-item .txt {
+  font-weight: 700;
+  letter-spacing: .2px;
+}
+
+/* Collapsed mode (icons only) */
+.pms-collapsed section[data-testid="stSidebar"] { width: var(--pms-sb-w, 76px) !important; }
+.pms-collapsed .pms-item { justify-content: center; padding: 8px 0; }
+.pms-collapsed .pms-item .txt { display: none; }
+.pms-collapsed .pms-item img {
+  width: var(--pms-ico-c, 44px);
+  height: var(--pms-ico-c, 44px);
+  border-radius: 14px;
+}
+
+/* Team chip (sidebar) */
+.pms-team {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding: 10px 12px 0 12px;
+}
+.pms-team img {
+  width: var(--pms-ico-c, 44px);
+  height: var(--pms-ico-c, 44px);
+  border-radius: 14px;
+}
+.pms-team .tt { font-weight: 700; opacity: .9; }
+
+/* Theme toggle bottom */
+.pms-theme { padding: 10px 10px 10px 10px; }
+.pms-theme .sun { font-size: 18px; opacity: .9; padding-left: 4px; padding-bottom: 2px; }
+
+/* Custom tooltip for nav items (black bubble) */
 .pms-item[title]:hover::after {
   content: attr(title);
   position: absolute;
@@ -368,81 +323,47 @@ section[data-testid="stSidebar"] > div { backdrop-filter: blur(16px) !important;
   z-index: 9999;
 }
 
-/* Collapsed: bigger icons */
-.pms-collapsed .pms-item img {
-  width: 44px !important;
-  height: 44px !important;
-  border-radius: 14px !important;
+/* Apple Snap transition (page/tab change) */
+@keyframes pmsPageIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0px); }
 }
-.pms-collapsed .pms-item { padding: 8px 0 !important; }
-
-/* === Apple Snap transition (page/tab change) === */
-@keyframes pmsPageIn {{
-  from {{ opacity: 0; transform: translateY(6px); }}
-  to   {{ opacity: 1; transform: translateY(0px); }}
-}}
-section.main .block-container {{
+section.main .block-container {
   animation: pmsPageIn 240ms ease-out;
-}}
+}
+
+/* Apple Micro Press (click) */
+section[data-testid="stSidebar"] .pms-item:active {
+  transform: translateY(0px) scale(0.98);
+}
+
+/* Apple Glass Shimmer */
+@keyframes pmsShimmer {
+  0% { transform: translateX(-120%) rotate(12deg); opacity: 0.0; }
+  35% { opacity: 0.35; }
+  100% { transform: translateX(220%) rotate(12deg); opacity: 0.0; }
+}
+.pms-item { overflow: hidden; }
+.pms-item::after {
+  content: "";
+  position: absolute;
+  inset: -40% -60%;
+  background: linear-gradient(90deg,
+    rgba(255,255,255,0.00) 0%,
+    rgba(255,255,255,0.08) 40%,
+    rgba(255,255,255,0.18) 50%,
+    rgba(255,255,255,0.08) 60%,
+    rgba(255,255,255,0.00) 100%);
+  transform: translateX(-140%) rotate(12deg);
+  opacity: 0;
+  pointer-events: none;
+}
+.pms-item:hover::after { animation: pmsShimmer 650ms ease-out; }
 </style>
-""",
-        unsafe_allow_html=True,
-    )
+"""
+    css = css.replace("__RED_ACTIVE__", RED_ACTIVE)
+    st.markdown(css, unsafe_allow_html=True)
 
-    # pms_shimmer_css: Apple micro-press + glass shimmer
-    st.markdown(
-        """<style>
-        /* === Apple Micro Press (click) === */
-        section[data-testid="stSidebar"] .pms-item:active,
-        section[data-testid="stSidebar"] div.stButton > button:active {
-          transform: translateY(0px) scale(0.98) !important;
-        }
-
-        /* === Apple Glass Shimmer === */
-        @keyframes pmsShimmer {
-          0% { transform: translateX(-120%) rotate(12deg); opacity: 0.0; }
-          35% { opacity: 0.35; }
-          100% { transform: translateX(220%) rotate(12deg); opacity: 0.0; }
-        }
-
-        /* Shimmer overlay on hover for nav items */
-        .pms-item { overflow: hidden; }
-        .pms-item::after {
-          content: "";
-          position: absolute;
-          inset: -40% -60%;
-          background: linear-gradient(90deg,
-            rgba(255,255,255,0.00) 0%,
-            rgba(255,255,255,0.08) 40%,
-            rgba(255,255,255,0.18) 50%,
-            rgba(255,255,255,0.08) 60%,
-            rgba(255,255,255,0.00) 100%);
-          transform: translateX(-140%) rotate(12deg);
-          opacity: 0;
-          pointer-events: none;
-        }
-        .pms-item:hover::after { animation: pmsShimmer 650ms ease-out; }
-
-        /* Apply shimmer to Streamlit buttons in sidebar (expanded mode) */
-        section[data-testid="stSidebar"] div.stButton > button { position: relative !important; overflow: hidden !important; }
-        section[data-testid="stSidebar"] div.stButton > button::after {
-          content: "";
-          position: absolute;
-          inset: -40% -60%;
-          background: linear-gradient(90deg,
-            rgba(255,255,255,0.00) 0%,
-            rgba(255,255,255,0.07) 40%,
-            rgba(255,255,255,0.16) 50%,
-            rgba(255,255,255,0.07) 60%,
-            rgba(255,255,255,0.00) 100%);
-          transform: translateX(-140%) rotate(12deg);
-          opacity: 0;
-          pointer-events: none;
-        }
-        section[data-testid="stSidebar"] div.stButton > button:hover::after { animation: pmsShimmer 650ms ease-out; }
-        </style>""",
-        unsafe_allow_html=True,
-    )
 
 def _set_sidebar_mode(collapsed: bool):
     # In Streamlit, easiest is to set CSS vars on :root
