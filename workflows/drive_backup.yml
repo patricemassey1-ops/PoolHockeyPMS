@@ -1,0 +1,41 @@
+name: Drive Backups (Noon + Midnight)
+
+on:
+  schedule:
+    # ✅ Run hourly (UTC). The script will decide if it's time for NOON or MIDNIGHT in your timezone.
+    - cron: "5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-api-python-client google-auth google-auth-httplib2
+
+      - name: Run Drive backup
+        env:
+          # OAuth Drive (GitHub Secrets)
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+
+          # Optional overrides (Secrets or leave empty)
+          BACKUP_TZ_OFFSET_HOURS: ${{ secrets.BACKUP_TZ_OFFSET_HOURS }}   # ex: -5
+          BACKUP_RETENTION_DAYS: ${{ secrets.BACKUP_RETENTION_DAYS }}     # ex: 30
+          BACKUP_WINDOW_MINUTES: ${{ secrets.BACKUP_WINDOW_MINUTES }}     # ex: 60
+        run: |
+          python scripts/drive_backup.py
