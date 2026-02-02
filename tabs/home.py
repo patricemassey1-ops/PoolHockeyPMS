@@ -23,7 +23,7 @@ def _load_season_state(data_dir: str) -> dict:
 
 def render(ctx: dict) -> None:
     st.header("🏠 Home")
-    st.caption("Home reste clean — aucun bloc Admin ici.")
+    st.caption("Choisis ton équipe ci-dessous (tout le reste suit automatiquement).")
 
     # ----------------------------
     # Pool logo
@@ -51,6 +51,14 @@ def render(ctx: dict) -> None:
         st.session_state["selected_owner"] = owners[0]
 
     st.subheader("🏒 Sélection d'équipe")
+    # 🏟️ logo_pool en haut (main page)
+    try:
+        logo_pool = os.path.join(DATA_DIR, "logo_pool.png")
+        if os.path.exists(logo_pool):
+            st.image(logo_pool, use_container_width=True)
+    except Exception:
+        pass
+
     c1, c2 = st.columns([1.2, 2.2], vertical_alignment="center")
 
     with c1:
