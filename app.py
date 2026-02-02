@@ -350,16 +350,41 @@ def _apply_pending_widget_values_before_widgets() -> None:
 
 def _sidebar_brand() -> None:
     with st.sidebar:
-        # Triangle (collapse) like screenshot 3
         collapsed = bool(st.session_state.get("sidebar_collapsed", False))
+
+        # Triangle toggle (like screenshot 3)
         tri = "▶" if collapsed else "◀"
         if st.button(tri, key="sb_toggle", help="Réduire / agrandir le menu", use_container_width=True):
             st.session_state["sidebar_collapsed"] = not collapsed
             st.rerun()
 
-        # gm_logo bigger (avatar / personnage)
+        # --- Logos (TOP) ---
+        # In collapsed mode: all logos are same size as nav icons (pro)
+        icon_px = 30
+
+        # 1) Pool logo should be TOP (always)
+        if os.path.exists(BANNER):
+            if collapsed:
+                st.image(BANNER, width=icon_px)
+            else:
+                st.image(BANNER, use_container_width=True)
+
+        # 2) GM logo (avatar/personnage) — same height as icons when collapsed
         if os.path.exists(APP_LOGO):
-            st.image(APP_LOGO, width=120 if not collapsed else 46)
+            if collapsed:
+                st.image(APP_LOGO, width=icon_px)
+            else:
+                st.image(APP_LOGO, width=120)
+
+        # 3) Team logo (current selected owner)
+        owner_now = str(st.session_state.get("owner_select") or st.session_state.get("owner") or "Canadiens")
+        tlogo = _team_logo_path(owner_now)
+        if tlogo and os.path.exists(tlogo):
+            if collapsed:
+                st.image(tlogo, width=icon_px)
+            else:
+                # in expanded mode, this is shown next to team selector, so keep it small here
+                pass
 
         if not collapsed:
             st.markdown(
@@ -486,12 +511,13 @@ def sidebar_nav() -> str:
 
         # Theme toggle (only here). Keep even in collapsed.
         is_light = st.toggle(
-            "☀️",
+            "☀️" if collapsed else "☀️ Mode clair",
             value=(st.session_state.get("ui_theme", "dark") == "light"),
             key="ui_theme_toggle_sidebar",
-            help="Mode clair/sombre",
+            help="Mode clair/sombre (☀️/🌙)",
         )
         st.session_state["ui_theme"] = "light" if is_light else "dark"
+
 
     return active
 
