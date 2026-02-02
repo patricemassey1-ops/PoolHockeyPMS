@@ -1,126 +1,84 @@
 # tabs/home.py
+from __future__ import annotations
+
+import os
 import streamlit as st
 from services.storage import path_pool_logo, path_team_logo
-import json
-import os
 
-def _data_dir(ctx: dict) -> str:
-    return str(ctx.get("DATA_DIR") or os.getenv("DATA_DIR") or "data")
+POOL_TEAMS = ["Home", "GM", "Joueurs", "Alignement", "Transactions", "Historique", "Classement"]
 
-def _load_season_state(data_dir: str) -> dict:
-    """Read data/season_state.json if present (dummy-proof)."""
-    p = os.path.join(data_dir, "season_state.json")
-    try:
-        if os.path.exists(p):
-            with open(p, "r", encoding="utf-8") as f:
-                return json.load(f) or {}
-    except Exception:
-        pass
-    return {}
 
 def render(ctx: dict) -> None:
-    # 🏟️ logo_pool — AU-DESSUS du titre Home
-    try:
-        logo_pool = os.path.join("data", "logo_pool.png")
-        if os.path.exists(logo_pool):
-            st.image(logo_pool, use_container_width=True)
-    except Exception:
-        pass
+    # Home should NOT call st.set_page_config (only app.py)
+    data_dir = str(ctx.get("DATA_DIR") or os.getenv("DATA_DIR") or "data")
 
-    # pms_home_logo_fix: small top spacing so logo appears above title
-    st.markdown("<style>.block-container{padding-top:1.6rem !important;}</style>", unsafe_allow_html=True)
+    # Small top spacing so the banner/logo can sit above the title
+    st.markdown("""<style>
+    .block-container{padding-top:1.4rem !important;}
+    .pms-home-logo img{border-radius:18px; box-shadow:0 18px 40px rgba(0,0,0,.28);}
+    </style>""", unsafe_allow_html=True)
+
+    # ✅ Pool logo — centered & bigger (pro)
+    logo = path_pool_logo()
+    if not logo:
+        cand = os.path.join(data_dir, "logo_pool.png")
+        logo = cand if os.path.exists(cand) else None
+
+    if logo:
+        c1, c2, c3 = st.columns([1, 3, 1], gap="small")
+        with c2:
+            st.markdown("<div class='pms-home-logo'>", unsafe_allow_html=True)
+            st.image(str(logo), use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
     st.header("🏠 Home")
-    st.caption("Choisis ton équipe ci-dessous (tout le reste suit automatiquement).")
+    st.caption("Choisis ton équipe — le reste de l'app suit automatiquement.")
 
-    # ----------------------------
-    # Pool logo
-    # ----------------------------
-    pool_logo = path_pool_logo()
-    if pool_logo:
-        try:
-            st.image(pool_logo, width=120)
-        except Exception:
-            pass
-
-    # ----------------------------
-    # Source de vérité: selected_owner
-    # ----------------------------
+    # Teams list comes from ctx if provided
     owners = ctx.get("owners")
     if not isinstance(owners, list) or not owners:
-        # fallback safe
-        owners = ["Canadiens", "Cracheurs", "Nordiques", "Predateurs", "Red Wings", "Whalers"]
+        owners = ["Canadiens", "Whalers", "Nordiques", "Red_Wings", "Predateurs", "Cracheurs"]
 
-    if "selected_owner" not in st.session_state:
-        st.session_state["selected_owner"] = owners[0]
+    # Session state
+    if "owner" not in st.session_state or st.session_state.get("owner") not in owners:
+        st.session_state["owner"] = owners[0]
 
-    # si valeur invalide (ex: liste a changé)
-    if st.session_state["selected_owner"] not in owners:
-        st.session_state["selected_owner"] = owners[0]
+    st.subheader("🪄 Sélection d'équipe")
 
-    st.subheader("🏒 Sélection d'équipe")
-    c1, c2 = st.columns([1.2, 2.2], vertical_alignment="center")
-
-    with c1:
-        owner = st.selectbox(
+    colA, colB = st.columns([4, 1], gap="medium")
+    with colA:
+        selected = st.selectbox(
             "Équipe (propriétaire)",
-            owners,
-            key="selected_owner",
+            options=owners,
+            index=owners.index(st.session_state.get("owner")),
+            key="owner_select_home",
         )
+        st.session_state["owner"] = selected
 
-    with c2:
-        # Team logo (assets/previews puis data)
-        fn_candidates = [
-            f"{owner}_Logo.png",
-            f"{owner}E_Logo.png",
-            f"{owner}_logo.png",
-            f"{owner}.png",
-            f"{owner.replace(' ', '_')}_Logo.png",
-            f"{owner.replace(' ', '_')}E_Logo.png",
+    # Team logo (clean) — same block as selection
+    with colB:
+        # prefer assets/previews; fallback data
+        # file naming: {Team}_Logo.png variants
+        candidates = [
+            f"{selected}_Logo.png",
+            f"{selected}E_Logo.png",
+            f"{selected}e_Logo.png",
+            f"{selected}_Logo-2.png",
         ]
-        shown = False
-        for fn in fn_candidates:
-            p = path_team_logo(fn)
-            if p:
-                try:
-                    st.image(p, width=130)
-                    shown = True
+        p = None
+        for fn in candidates:
+            pp = path_team_logo(fn)
+            if pp:
+                p = pp
+                break
+        if not p:
+            # fallback: try data/{team}.png or assets
+            for fn in candidates:
+                fp = os.path.join(data_dir, fn)
+                if os.path.exists(fp):
+                    p = fp
                     break
-                except Exception:
-                    pass
-        if not shown:
-            st.caption("Logo équipe introuvable (ok).")
+        if p:
+            st.image(str(p), width=64)
 
-    st.success(f"✅ Équipe sélectionnée: **{owner}**")
-    # ----------------------------
-    # 🚨 Alerte saison (Whalers seulement)
-    # ----------------------------
-    data_dir = _data_dir(ctx)
-    ss = _load_season_state(data_dir)
-    needs = bool(ss.get("needs_master_rebuild"))
-    if owner == "Whalers" and needs:
-        cur = str(ss.get("current_season") or st.session_state.get("season") or "").strip() or "nouvelle saison"
-        st.warning(
-            f"⚠️ Nouvelle saison détectée (**{cur}**) — tu dois reconstruire le master.",
-            icon="⚠️",
-        )
-        st.markdown("👉 **Clique ici :** Admin → **4️⃣ Master + Audit** → bouton rouge **Construire Master + Audit**.")
-        if st.button("🛠️ J'ai compris — je vais dans Admin (Étape 4)", use_container_width=True, key="home_go_admin_step4"):
-            # On ne peut pas forcer la sélection d’un onglet Streamlit, mais on garde un flag pour que l'Admin affiche une bannière.
-            st.session_state["admin_hint_step"] = 4
-            st.success("✅ OK. Va maintenant dans l’onglet **Admin** puis clique **4️⃣ Master + Audit**.")
-    st.caption("Cette sélection alimente Alignement / GM / Transactions (même clé session_state).")
-
-    st.divider()
-
-    # ----------------------------
-    # Debug logos (optionnel)
-    # ----------------------------
-    with st.expander("🔎 Debug — chemins de logos (optionnel)", expanded=False):
-        st.caption("Résolution: assets/previews puis data.")
-        for fn in ["Whalers_Logo.png","Nordiques_Logo.png","Predateurs_Logo.png","Cracheurs_Logo.png","Canadiens_Logo.png","Red_Wings_Logo.png"]:
-            p = path_team_logo(fn)
-            if p:
-                st.write(f"- {fn} → {p}")
-            else:
-                st.write(f"- {fn} → (introuvable)")
+    st.success(f"✅ Équipe sélectionnée: {st.session_state.get('owner')}")
