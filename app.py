@@ -259,7 +259,7 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child{
 def apply_theme() -> None:
     mode = st.session_state.get("ui_theme", "dark")
     collapsed = bool(st.session_state.get("sidebar_collapsed", False))
-    sb_w = "72px" if collapsed else "320px"
+    sb_w = "62px" if collapsed else "320px"
 
     base = THEME_CSS_LIGHT if mode == "light" else THEME_CSS_DARK
 
@@ -267,41 +267,43 @@ def apply_theme() -> None:
     dyn = (
         "<style>"
         f"section[data-testid=\"stSidebar\"]{{ width:{sb_w} !important; min-width:{sb_w} !important; max-width:{sb_w} !important; }}"
-        ".block-container{ padding-top:2.4rem !important; }"
-        "h1,h2,h3{ margin-top:1.05rem !important; }"
+        ".block-container{ padding-top:2.2rem !important; }"
+        "h1,h2,h3{ margin-top:1.0rem !important; }"
+        "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]{"
+        "  border-radius:14px !important; border:1px solid rgba(255,255,255,0.10) !important;"
+        "  background: rgba(255,255,255,0.04) !important;"
+        "}"
+        "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]:hover{"
+        "  border-color: rgba(239,68,68,0.55) !important;"
+        "}"
+        "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]:has(input:checked){"
+        "  background: rgba(239,68,68,1) !important;"
+        "  border-color: rgba(239,68,68,1) !important;"
+        "  box-shadow: 0 10px 24px rgba(239,68,68,0.30) !important;"
+        "}"
         ".stButton > button[kind=\"primary\"]{ background: rgba(239,68,68,1) !important; border-color: rgba(220,38,38,1) !important; }"
+        "</style>"
     )
 
     if collapsed:
         dyn += (
-            "section[data-testid=\"stSidebar\"] [data-testid=\"stVerticalBlock\"]{ gap:6px !important; }"
-            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]{ padding:10px 6px !important; }"
-            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label p{ margin:0 !important; text-align:center !important; font-size:18px !important; }"
+            "<style>"
+            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]{"
+            "  width:46px !important; min-width:46px !important; max-width:46px !important;"
+            "  margin:6px auto !important; padding:10px 0 !important;"
+            "}"
+            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"] > div{"
+            "  width:100% !important; display:flex !important; justify-content:center !important; align-items:center !important;"
+            "}"
+            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label p{"
+            "  margin:0 !important; text-align:center !important;"
+            "  font-size:18px !important; line-height:18px !important;"
+            "  width:18px !important; height:18px !important; overflow:hidden !important;"
+            "}"
+            "</style>"
         )
 
-    dyn += "</style>"
     st.markdown(base + dyn, unsafe_allow_html=True)
-
-
-# =========================
-# CONTEXT
-# =========================
-@dataclass
-class AppCtx:
-    data_dir: str
-    season_lbl: str
-    owner: str
-    is_admin: bool
-    theme: str
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {
-            "DATA_DIR": self.data_dir,
-            "season_lbl": self.season_lbl,
-            "owner": self.owner,
-            "is_admin": self.is_admin,
-            "theme": self.theme,
-        }
 
 
 def _safe_image(path: str, width: Optional[int] = None) -> None:
@@ -352,24 +354,20 @@ def _sidebar_brand() -> None:
     with st.sidebar:
         collapsed = bool(st.session_state.get("sidebar_collapsed", False))
 
-        # Triangle toggle
+        # Triangle toggle (mini button)
         tri = "▶" if collapsed else "◀"
         if st.button(tri, key="sb_toggle", help="Réduire / agrandir le menu", use_container_width=True):
             st.session_state["sidebar_collapsed"] = not collapsed
             st.rerun()
 
-        # Icon size reference (for perfect alignment)
+        # Uniform icon size in collapsed mode
         icon_px = 30
 
-        # Pool logo should be TOP (expanded only)
-        if (not collapsed) and os.path.exists(BANNER):
-            st.image(BANNER, use_container_width=True)
-
-        # GM logo (same size as icons when collapsed)
+        # GM logo only (sidebar)
         if os.path.exists(APP_LOGO):
             st.image(APP_LOGO, width=(icon_px if collapsed else 120))
 
-        # Team logo in collapsed only (same size as icons)
+        # Team logo ONLY in collapsed (avoid duplicate)
         owner_now = str(st.session_state.get("owner_select") or st.session_state.get("owner") or "Canadiens")
         tlogo = _team_logo_path(owner_now)
         if collapsed and tlogo and os.path.exists(tlogo):
@@ -395,15 +393,13 @@ def sidebar_nav() -> str:
 
         collapsed = bool(st.session_state.get("sidebar_collapsed", False))
 
-        # Saison (hidden when collapsed)
+        # Saison (hide selector when collapsed)
         if not collapsed:
             st.selectbox(
                 "Saison",
                 options=[DEFAULT_SEASON, "2024-2025", "2023-2024"],
                 key="season_lbl",
             )
-
-        st.markdown("### Navigation" if not collapsed else "")
 
         # Build tabs in requested order + Admin only when Whalers selected
         owner_now = str(st.session_state.get("owner_select") or st.session_state.get("owner") or "Canadiens")
@@ -412,68 +408,28 @@ def sidebar_nav() -> str:
             tabs.append(("⚙️  Admin", "admin"))
 
         labels = [t[0] for t in tabs]
+        cur = str(st.session_state.get("active_tab", labels[0]) or labels[0])
 
-        cur = st.session_state.get("active_tab", labels[0])
-
-
-        # When collapsed: show icon-only (more pro + gives more space, like your screenshot)
-
+        # ICON-ONLY in collapsed mode (uniform size)
         if collapsed:
-
-            icon_map = {lab.split(" ", 1)[0]: lab for lab in labels}  # "🏠" -> "🏠  Home"
-
-            icon_opts = list(icon_map.keys())
-
-            cur_icon = cur.split(" ", 1)[0] if isinstance(cur, str) and " " in cur else (cur if cur in icon_map else icon_opts[0])
-
+            icons = [lab.split(" ", 1)[0] for lab in labels]  # "🏠"
             try:
-
-                default_idx = icon_opts.index(cur_icon)
-
+                cur_icon = cur.split(" ", 1)[0]
+                default_idx = icons.index(cur_icon) if cur_icon in icons else 0
             except Exception:
-
                 default_idx = 0
 
-
-            picked_icon = st.radio(
-
-                "Navigation",
-
-                options=icon_opts,
-
-                index=default_idx,
-
-                key="nav_radio",
-
-                label_visibility="collapsed",
-
-            )
-
-            active = icon_map.get(picked_icon, labels[0])
-
+            pick = st.radio("Navigation", options=icons, index=default_idx, key="nav_radio", label_visibility="collapsed")
+            active = labels[icons.index(pick)]
         else:
-
             default_idx = labels.index(cur) if cur in labels else 0
-
-            active = st.radio(
-
-                "Navigation",
-
-                options=labels,
-
-                index=default_idx,
-
-                key="nav_radio",
-
-                label_visibility="collapsed",
-
-            )
-
+            active = st.radio("Navigation", options=labels, index=default_idx, key="nav_radio", label_visibility="collapsed")
 
         st.session_state["active_tab"] = active
+
         st.markdown("---" if not collapsed else "")
 
-        # Mon équipe (avec logo à droite)
+        # Mon équipe (logo à droite). En mode réduit: pas de doublon (logo déjà en haut).
         if not collapsed:
             st.markdown("### Mon équipe")
             c1, c2 = st.columns([4, 1], gap="small")
@@ -487,18 +443,14 @@ def sidebar_nav() -> str:
                 )
             with c2:
                 _safe_image(_team_logo_path(st.session_state.get("owner_select", "Whalers")), width=34)
-        else:
-            # collapsed: team logo already shown at top
-            pass
 
-        # Canonical owner value (no mutation of owner_select here)
         st.session_state["owner"] = st.session_state.get("owner_select", owner_now)
 
-                # spacer to push theme toggle lower when collapsed
+        # Spacer to push light mode to bottom in collapsed
         if collapsed:
-            st.markdown("<div style='height: 55vh'></div>", unsafe_allow_html=True)
+            st.markdown("<div style='height: 35vh;'></div>", unsafe_allow_html=True)
 
-        # Theme toggle (only here). Keep even in collapsed.
+        # Light mode toggle (bottom)
         is_light = st.toggle(
             "☀️" if collapsed else "☀️ Mode clair",
             value=(st.session_state.get("ui_theme", "dark") == "light"),
@@ -506,7 +458,6 @@ def sidebar_nav() -> str:
             help="Mode clair/sombre (☀️/🌙)",
         )
         st.session_state["ui_theme"] = "light" if is_light else "dark"
-
 
     return active
 
