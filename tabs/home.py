@@ -19,16 +19,16 @@ def _load_season_state(data_dir: str) -> dict:
     return {}
 
 def render(ctx: dict) -> None:
-    # pms_home_logo_fix: small top spacing so logo appears above title
-    st.markdown("<style>.block-container{padding-top:1.6rem !important;}</style>", unsafe_allow_html=True)
-
-    # 🏟️ logo_pool tout en haut de la page (Home)
+    # 🏟️ logo_pool — AU-DESSUS du titre Home
     try:
-        logo_pool = os.path.join(DATA_DIR, "logo_pool.png") if 'DATA_DIR' in globals() else os.path.join("data", "logo_pool.png")
+        logo_pool = os.path.join("data", "logo_pool.png")
         if os.path.exists(logo_pool):
             st.image(logo_pool, use_container_width=True)
     except Exception:
         pass
+
+    # pms_home_logo_fix: small top spacing so logo appears above title
+    st.markdown("<style>.block-container{padding-top:1.6rem !important;}</style>", unsafe_allow_html=True)
 
     st.header("🏠 Home")
     st.caption("Choisis ton équipe ci-dessous (tout le reste suit automatiquement).")
