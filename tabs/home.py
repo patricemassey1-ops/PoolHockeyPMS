@@ -9,6 +9,20 @@ POOL_TEAMS = ["Home", "GM", "Joueurs", "Alignement", "Transactions", "Historique
 
 
 def render(ctx: dict) -> None:
+    # 🍎 Apple glass header + logo_pool (gros, centré)
+    st.markdown("""<style>
+    .pms-home-top{display:flex;justify-content:center;margin: 6px 0 18px 0;}
+    .pms-home-top img{border-radius:18px;box-shadow:0 18px 40px rgba(0,0,0,0.22);}
+    </style>""", unsafe_allow_html=True)
+    try:
+        lp = path_pool_logo('logo_pool.png') or os.path.join(data_dir, 'logo_pool.png')
+        if lp and os.path.exists(lp):
+            st.markdown("<div class='pms-home-top'>", unsafe_allow_html=True)
+            st.image(lp, width=520)
+            st.markdown("</div>", unsafe_allow_html=True)
+    except Exception:
+        pass
+
     # Home should NOT call st.set_page_config (only app.py)
     data_dir = str(ctx.get("DATA_DIR") or os.getenv("DATA_DIR") or "data")
 
