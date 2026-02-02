@@ -66,6 +66,31 @@ TEAM_LABELS = {
 
 ASSETS_PREV = os.path.join("assets", "previews")
 
+# Emoji PNG (assets/previews) — icônes à côté des noms des onglets
+EMOJI_ICON = {
+    "home": os.path.join(ASSETS_PREV, "emoji_home.png"),
+    "gm": os.path.join(ASSETS_PREV, "emoji_gm.png"),
+    "joueurs": os.path.join(ASSETS_PREV, "emoji_joueur.png"),
+    "alignement": os.path.join(ASSETS_PREV, "emoji_alignement.png"),
+    "transactions": os.path.join(ASSETS_PREV, "emoji_transaction.png"),
+    "historique": os.path.join(ASSETS_PREV, "emoji_historique.png"),
+    "classement": os.path.join(ASSETS_PREV, "emoji_coupe.png"),
+}
+
+def _emoji_icon_path(slug: str) -> str:
+    p = EMOJI_ICON.get(str(slug or "").strip(), "")
+    return p if (p and os.path.exists(p)) else ""
+
+def _clean_tab_label(label: str) -> str:
+    # Labels actuels: "🏠  Home" → "Home"
+    s = str(label or "").strip()
+    if "  " in s:
+        return s.split("  ", 1)[1].strip()
+    # fallback: remove first token if it's a single emoji-like char
+    parts = s.split()
+    return (" ".join(parts[1:]) if len(parts) > 1 else s).strip()
+
+
 def _team_logo_path(team: str) -> str:
     """
     Cherche le logo d'équipe dans:
@@ -302,28 +327,6 @@ def apply_theme() -> None:
         "</style>"
     )
 
-    # pms_center_sidebar_images
-    dyn += ("<style>section[data-testid='stSidebar'] img{display:block; margin-left:auto; margin-right:auto;}</style>")
-
-        # pms_expanded_radio_red
-    dyn += (
-        "<style>"
-        "section[data-testid='stSidebar'] div[role='radiogroup'] label[data-baseweb='radio']{"
-        "  border-radius:14px !important; border:1px solid rgba(255,255,255,0.12) !important;"
-        "  background: rgba(255,255,255,0.05) !important;"
-        "  transition: transform 120ms ease, box-shadow 150ms ease, border-color 150ms ease, background 150ms ease !important;"
-        "}"
-        "section[data-testid='stSidebar'] div[role='radiogroup'] label[data-baseweb='radio']:hover{"
-        "  border-color: rgba(239,68,68,0.55) !important; transform: translateY(-1px) !important;"
-        "  box-shadow: 0 10px 22px rgba(0,0,0,0.22) !important;"
-        "}"
-        "section[data-testid='stSidebar'] div[role='radiogroup'] label[data-baseweb='radio']:has(input:checked){"
-        "  background: rgba(239,68,68,1) !important; border-color: rgba(220,38,38,1) !important;"
-        "  box-shadow: 0 14px 28px rgba(239,68,68,0.28) !important;"
-        "}"
-        "</style>"
-    )
-
     if collapsed:
         dyn += (
             "<style>"
@@ -351,18 +354,26 @@ def apply_theme() -> None:
             f"  box-shadow: inset 0 1px 0 rgba(255,255,255,0.25);"
             f"}}"
             "section[data-testid=\"stSidebar\"] div.stButton:first-of-type > button{"
-            "  width:46px !important; height:46px !important;"
+            "  width:42px !important; height:42px !important;"
             "  border-radius: 999px !important;"
             "  background: rgba(255,255,255,0.06) !important;"
             "  border-color: rgba(255,255,255,0.14) !important;"
             "}"
             "section[data-testid=\"stSidebar\"] div.stButton > button > div{"
-            "  font-size: 22px !important;"
-            "  line-height: 22px !important;"
+            "  font-size: 20px !important;"
+            "  line-height: 20px !important;"
             "}"
             "section[data-testid=\"stSidebar\"] [data-testid=\"stToggle\"]{ display:flex !important; justify-content:center !important; }"
             "</style>"
         )
+
+        # pms_expanded_button_nav
+    dyn += (
+        "<style>"
+        "section[data-testid='stSidebar'] div.stButton > button{transition: transform 120ms ease, box-shadow 150ms ease, border-color 150ms ease !important;}"
+        "section[data-testid='stSidebar'] div.stButton > button:hover{transform: translateY(-1px) !important;}"
+        "</style>"
+    )
 
     st.markdown(base + dyn, unsafe_allow_html=True)
 
@@ -420,7 +431,7 @@ def _sidebar_brand() -> None:
             st.session_state["sidebar_collapsed"] = not collapsed
             st.rerun()
 
-        icon_px = 40
+        icon_px = 30
 
         # GM logo only (sidebar)
         if os.path.exists(APP_LOGO):
@@ -485,14 +496,30 @@ def sidebar_nav() -> str:
                     st.session_state["active_tab"] = lab
                     st.rerun()
         else:
-            default_idx = labels.index(cur) if cur in labels else 0
-            active = st.radio(
-                "Navigation",
-                options=labels,
-                index=default_idx,
-                key="nav_radio",
-                label_visibility="collapsed",
-            )
+            # Mode agrandi (WOW): emoji PNG à gauche + bouton texte (même rouge/selection que le mode réduit)
+            active = cur if cur in labels else labels[0]
+            for lab, slug in tabs:
+                txt = _clean_tab_label(lab)
+                icon_path = _emoji_icon_path(slug)
+
+                c1, c2 = st.columns([1, 8], gap="small", vertical_alignment="center")
+                with c1:
+                    if icon_path:
+                        st.image(icon_path, width=22)
+                    else:
+                        # fallback: montre l'emoji unicode du label
+                        st.markdown(f"<div style='text-align:center;font-size:18px;line-height:18px;'>{lab.split(' ',1)[0]}</div>", unsafe_allow_html=True)
+                with c2:
+                    if st.button(
+                        txt,
+                        key=f"nav_big_{slug}",
+                        type=("primary" if lab == active else "secondary"),
+                        use_container_width=True,
+                        help=txt,
+                    ):
+                        st.session_state["active_tab"] = lab
+                        st.rerun()
+
             st.session_state["active_tab"] = active
 
         # Mon équipe (expanded only)
