@@ -306,26 +306,84 @@ section[data-testid="stSidebar"] .stRadio, section[data-testid="stSidebar"] .stS
   border-color: rgba(0,0,0,.18) !important;
 }}
 
-/* ================================
-   PMS Apple-like Sidebar Nav v22
-   ================================ */
-:root { --pms-emo: 60px; --pms-emo-c: 44px; }
+/* === Apple Glass (sidebar) === */
+section[data-testid="stSidebar"] > div { backdrop-filter: blur(16px) !important; }
+.pms-item {
+  position: relative;
+  border: 1px solid rgba(255,255,255,0.10) !important;
+  background: rgba(255,255,255,0.05) !important;
+  box-shadow: 0 10px 22px rgba(0,0,0,0.12);
+  transition: transform 120ms ease, box-shadow 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+.pms-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(239,68,68,0.55) !important;
+  background: rgba(255,255,255,0.08) !important;
+  box-shadow: 0 14px 28px rgba(0,0,0,0.18);
+}
+.pms-item.active {
+  background: rgba(239,68,68,0.95) !important;
+  border-color: rgba(220,38,38,1) !important;
+  box-shadow: 0 16px 34px rgba(239,68,68,0.22);
+}
+.pms-item.active::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 6px;
+  background: rgba(239,68,68,1);
+  box-shadow: 0 10px 24px rgba(239,68,68,0.45);
+}
 
-/* Center all images in sidebar */
-section[data-testid="stSidebar"] img { display:block; margin-left:auto; margin-right:auto; }
+/* === Custom tooltip for nav items === */
+.pms-item[title]:hover::after {
+  content: attr(title);
+  position: absolute;
+  left: 74px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(0,0,0,0.84);
+  color: #fff;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 12px;
+  white-space: nowrap;
+  z-index: 9999;
+  box-shadow: 0 14px 30px rgba(0,0,0,0.35);
+}
+.pms-item[title]:hover::before {
+  content: "";
+  position: absolute;
+  left: 66px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0; height: 0;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-right: 6px solid rgba(0,0,0,0.84);
+  z-index: 9999;
+}
 
-/* Collapsed: icons-only + hide any widgets */
-.pms-collapsed .pms-title, .pms-collapsed .pms-teamname, .pms-collapsed .pms-label { display:none !important; }
-.pms-collapsed .pms-top { flex-direction: column; gap: 8px; padding-top: 8px; }
-.pms-collapsed .pms-nav { padding: 6px 6px; gap: 10px; }
-.pms-collapsed .pms-item { justify-content:center; padding: 10px 6px; border-radius: 16px; }
-.pms-collapsed .pms-emo { width: var(--pms-emo-c) !important; height: var(--pms-emo-c) !important; }
-section[data-testid="stSidebar"] .stSelectbox, section[data-testid="stSidebar"] .stRadio { display:none; }
+/* Collapsed: bigger icons */
+.pms-collapsed .pms-item img {
+  width: 44px !important;
+  height: 44px !important;
+  border-radius: 14px !important;
+}
+.pms-collapsed .pms-item { padding: 8px 0 !important; }
 
-/* Expanded: slightly tighter rows */
-.pms-expanded .pms-item { padding: 10px 12px; border-radius: 18px; }
-.pms-expanded .pms-emo { width: var(--pms-emo) !important; height: var(--pms-emo) !important; }
-
+/* === Apple Snap transition (page/tab change) === */
+@keyframes pmsPageIn {{
+  from {{ opacity: 0; transform: translateY(6px); }}
+  to   {{ opacity: 1; transform: translateY(0px); }}
+}}
+section.main .block-container {{
+  animation: pmsPageIn 240ms ease-out;
+}}
 </style>
 """,
         unsafe_allow_html=True,
@@ -338,130 +396,150 @@ def _set_sidebar_mode(collapsed: bool):
         st.markdown(
             """
 <style>
-:root { --pms-sb-w: 86px; --pms-emo: 60px; --pms-emo-c: 44px; }
+:root { --pms-sb-w: 76px; --pms-ico: 54px; --pms-ico-c: 44px; --pms-gm: 46px; }
 section[data-testid="stSidebar"] { padding-left: 4px !important; padding-right: 4px !important; }
 </style>
 """,
             unsafe_allow_html=True,
         )
+        st.markdown("<style>section[data-testid='stSidebar']{}</style>", unsafe_allow_html=True)
+        # Also add a class hook
+        st.markdown("<style>body{}</style>", unsafe_allow_html=True)
     else:
         st.markdown(
             """
 <style>
-:root { --pms-sb-w: 320px; --pms-emo: 60px; --pms-emo-c: 44px; }
+:root { --pms-sb-w: 320px; --pms-ico: 54px; --pms-ico-c: 44px; --pms-gm: 160px; }
 </style>
 """,
             unsafe_allow_html=True,
         )
 
 
-
 def _sidebar_nav(owner_key: str, active_slug: str):
-    """
-    Sidebar Apple-like:
-    - Mode agrandi: saison + choix d'équipe + nav (emoji PNG + texte)
-    - Mode réduit: emoji PNG only (mêmes icônes), rapide, sans widgets qui "cassent" en narrow
-    """
     collapsed = bool(st.session_state.get("pms_sidebar_collapsed", False))
+
+    # pms_team_select_sidebar
+    if not collapsed:
+        st.sidebar.selectbox(
+            "Saison",
+            options=[st.session_state.get("season", "2025-2026"), "2024-2025", "2023-2024"],
+            key="season",
+        )
+        st.sidebar.selectbox(
+            "Équipe",
+            options=POOL_TEAMS,
+            index=POOL_TEAMS.index(st.session_state.get("owner", owner_key)) if st.session_state.get("owner", owner_key) in POOL_TEAMS else 0,
+            key="owner",
+        )
+        owner_key = str(st.session_state.get("owner", owner_key))
+
     _set_sidebar_mode(collapsed)
 
-    # ----------------------------
-    # Controls (only in expanded)
-    # ----------------------------
-    if not collapsed:
-        st.sidebar.selectbox("Saison", ["2025-2026"], index=0, key="season_select", label_visibility="visible")
-
-        # Team chooser in sidebar
-        cur_owner = str(st.session_state.get("owner") or owner_key or "Canadiens")
-        try:
-            idx = POOL_TEAMS.index(cur_owner)
-        except Exception:
-            idx = 0
-        owner_key = st.sidebar.selectbox(
-            "Équipe",
-            POOL_TEAMS,
-            index=idx,
-            key="owner_select",
-            format_func=lambda x: TEAM_LABEL.get(x, x),
-            label_visibility="visible",
-        )
-        st.session_state["owner"] = owner_key
-    else:
-        owner_key = str(st.session_state.get("owner") or owner_key or "Canadiens")
-
-    # ----------------------------
-    # Brand (GM logo) + Team logo
-    # ----------------------------
+    # Brand: GM logo only (no pool logo in sidebar)
     gm_logo = _gm_logo_path()
     gm_b64 = _b64_png(gm_logo) if gm_logo else ""
+    brand_img = f"<img src='data:image/png;base64,{gm_b64}' />" if gm_b64 else "<div style='width:34px;height:34px'></div>"
+
+    # Team logo chip
     t_logo = _team_logo_path(owner_key)
     t_b64 = _b64_png(t_logo) if t_logo else ""
+    team_img = f"<img src='data:image/png;base64,{t_b64}' />" if t_b64 else "<div style='width:34px;height:34px'></div>"
 
-    # Sizes: GM logo 4x in expanded
-    gm_size = 140 if not collapsed else 42
-    team_size = 44 if not collapsed else 42
-
-    gm_img = f"<img class='pms-gm' style='width:{gm_size}px;height:{gm_size}px' src='data:image/png;base64,{gm_b64}'/>" if gm_b64 else ""
-    team_img = f"<img class='pms-team-ico' style='width:{team_size}px;height:{team_size}px' src='data:image/png;base64,{t_b64}'/>" if t_b64 else ""
-
-    # ----------------------------
     # Items (Admin only when Whalers)
-    # ----------------------------
     items = []
     for it in NAV_ORDER:
         if it.slug == "admin" and owner_key != "Whalers":
             continue
         items.append(it)
 
-    # ----------------------------
-    # HTML nav (same for expanded + collapsed)
-    # ----------------------------
-    sb_class = "pms-collapsed" if collapsed else "pms-expanded"
+    # Build HTML
+    sb_class = "pms-collapsed" if collapsed else ""
+    html = [f"<div class='{sb_class}'>"]
 
-    html = []
-    html.append(f"<div class='pms-shell {sb_class}'>")
-
-    if collapsed:
-        # Only icons + GM and Team logos (same size)
-        html.append(f"<div class='pms-top'>{gm_img}{team_img}</div>")
-    else:
-        html.append(f"<div class='pms-top pms-top-wide'>{gm_img}<div class='pms-title'>{APP_TITLE}</div></div>")
-        html.append(f"<div class='pms-teamrow'>{team_img}<div class='pms-teamname'>{TEAM_LABEL.get(owner_key, owner_key)}</div></div>")
-
+    html.append(f"<div class='pms-brand'>{brand_img}<div class='t'>{APP_TITLE}</div></div>")
+    html.append(f"<div class='pms-team'>{team_img}<div class='tt'>{TEAM_LABEL.get(owner_key, owner_key)}</div></div>")
     html.append("<div class='pms-nav'>")
+
     for it in items:
-        emo = _emoji_path(it.slug)
-        emo_b64 = _b64_png(emo) if emo else ""
-        emo_img = f"<img class='pms-emo' src='data:image/png;base64,{emo_b64}'/>" if emo_b64 else ""
+        ico_path = _emoji_path(it.emoji_slug) or _emoji_path("home")
+        ico_b64 = _b64_png(ico_path) if ico_path else ""
+        ico_html = f"<img src='data:image/png;base64,{ico_b64}' />" if ico_b64 else "<div style='width:34px;height:34px'></div>"
         active_cls = "active" if it.slug == active_slug else ""
-        # Use query param for navigation (stable + works with HTML)
         html.append(
             f"<a class='pms-item {active_cls}' href='?tab={it.slug}' title='{it.label}'>"
-            f"{emo_img}<span class='pms-label'>{it.label}</span></a>"
+            f"{ico_html}<span class='lbl'>{it.label}</span>"
+            f"</a>"
         )
+
     html.append("</div>")  # nav
-    html.append("</div>")  # shell
+    html.append("</div>")  # root
 
     st.sidebar.markdown("\n".join(html), unsafe_allow_html=True)
 
-    # ----------------------------
-    # Footer controls (fast)
-    # ----------------------------
+    # Footer: collapse toggle + theme toggle (below nav)
     col1, col2 = st.sidebar.columns([1, 1])
     with col1:
         if st.button("▶" if collapsed else "◀", key="pms_toggle_sidebar", help="Réduire / agrandir le menu"):
             st.session_state["pms_sidebar_collapsed"] = not collapsed
-            # no st.rerun(): Streamlit already reruns on click
+            # st.rerun()  # Streamlit rerun automatiquement
     with col2:
+        # Spacer in expanded for symmetry
         st.write("")
 
     st.sidebar.markdown("<div class='pms-theme'><div class='sun'>☀️</div></div>", unsafe_allow_html=True)
-    light = bool(st.session_state.get("pms_light_mode", False))
-    new_light = st.sidebar.toggle("Clair", value=light, key="pms_light_toggle", label_visibility="collapsed" if collapsed else "visible")
-    st.session_state["pms_light_mode"] = bool(new_light)
 
-    # small spacer bottom
-    st.sidebar.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    light = bool(st.session_state.get("pms_light_mode", False))
+    new_light = st.sidebar.toggle("Clair", value=light, key="pms_light_mode_toggle", label_visibility="collapsed" if collapsed else "visible")
+    if new_light != light:
+        st.session_state["pms_light_mode"] = new_light
+        # st.rerun()  # Streamlit rerun automatiquement
+
+
+def _apply_theme_mode():
+    # Light mode quick polish without breaking your global theme:
+    # We switch background + default text a bit. Keeps your existing dark theme too.
+    light = bool(st.session_state.get("pms_light_mode", False))
+    if not light:
+        return
+    st.markdown(
+        f"""
+<style>
+/* Light mode look */
+html, body, [data-testid="stAppViewContainer"] {{
+  background: #f6f7fb !important;
+}}
+section[data-testid="stSidebar"] {{
+  background: #ffffff !important;
+  border-right: 1px solid rgba(0,0,0,.06);
+}}
+/* Card backgrounds */
+div[data-testid="stVerticalBlock"] > div {{
+  background: transparent;
+}}
+/* Make our nav readable */
+.pms-item {{
+  background: rgba(0,0,0,.03) !important;
+  border-color: rgba(0,0,0,.06) !important;
+  color: rgba(0,0,0,.78) !important;
+}}
+.pms-item:hover {{
+  background: rgba(0,0,0,.05) !important;
+}}
+.pms-item.active {{
+  color: white !important;
+}}
+.pms-brand .t, .pms-team .tt {{
+  color: rgba(0,0,0,.80) !important;
+}}
+/* Title color */
+h1, h2, h3 {{
+  color: rgba(0,0,0,.86) !important;
+}}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def _get_query_tab() -> Optional[str]:
@@ -590,7 +668,11 @@ def main():
 
     owner = str(st.session_state.get("owner") or "Canadiens")
     active = str(st.session_state.get("active_tab") or "home")
-    # Sidebar: nav
+
+    # Sidebar: season + nav
+    with st.sidebar:
+        st.selectbox("Saison", ["2025-2026"], index=0, key="season_select", label_visibility="visible")
+
     _sidebar_nav(owner, active)
 
     # Prevent non-whalers from accessing Admin
