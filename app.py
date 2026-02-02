@@ -352,20 +352,24 @@ def _sidebar_brand() -> None:
     with st.sidebar:
         collapsed = bool(st.session_state.get("sidebar_collapsed", False))
 
-        # Triangle toggle (like screenshot 3)
+        # Triangle toggle
         tri = "▶" if collapsed else "◀"
         if st.button(tri, key="sb_toggle", help="Réduire / agrandir le menu", use_container_width=True):
             st.session_state["sidebar_collapsed"] = not collapsed
             st.rerun()
 
-        # In collapsed mode: logos should be same size as nav icons
+        # Icon size reference (for perfect alignment)
         icon_px = 30
 
-        # GM logo only (sidebar)
+        # Pool logo should be TOP (expanded only)
+        if (not collapsed) and os.path.exists(BANNER):
+            st.image(BANNER, use_container_width=True)
+
+        # GM logo (same size as icons when collapsed)
         if os.path.exists(APP_LOGO):
             st.image(APP_LOGO, width=(icon_px if collapsed else 120))
 
-        # Team logo only once in collapsed (avoid duplicates)
+        # Team logo in collapsed only (same size as icons)
         owner_now = str(st.session_state.get("owner_select") or st.session_state.get("owner") or "Canadiens")
         tlogo = _team_logo_path(owner_now)
         if collapsed and tlogo and os.path.exists(tlogo):
