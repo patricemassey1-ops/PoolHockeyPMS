@@ -358,33 +358,18 @@ def _sidebar_brand() -> None:
             st.session_state["sidebar_collapsed"] = not collapsed
             st.rerun()
 
-        # --- Logos (TOP) ---
-        # In collapsed mode: all logos are same size as nav icons (pro)
+        # In collapsed mode: logos should be same size as nav icons
         icon_px = 30
 
-        # 1) Pool logo should be TOP (always)
-        if os.path.exists(BANNER):
-            if collapsed:
-                st.image(BANNER, width=icon_px)
-            else:
-                st.image(BANNER, use_container_width=True)
-
-        # 2) GM logo (avatar/personnage) — same height as icons when collapsed
+        # GM logo only (sidebar)
         if os.path.exists(APP_LOGO):
-            if collapsed:
-                st.image(APP_LOGO, width=icon_px)
-            else:
-                st.image(APP_LOGO, width=120)
+            st.image(APP_LOGO, width=(icon_px if collapsed else 120))
 
-        # 3) Team logo (current selected owner)
+        # Team logo only once in collapsed (avoid duplicates)
         owner_now = str(st.session_state.get("owner_select") or st.session_state.get("owner") or "Canadiens")
         tlogo = _team_logo_path(owner_now)
-        if tlogo and os.path.exists(tlogo):
-            if collapsed:
-                st.image(tlogo, width=icon_px)
-            else:
-                # in expanded mode, this is shown next to team selector, so keep it small here
-                pass
+        if collapsed and tlogo and os.path.exists(tlogo):
+            st.image(tlogo, width=icon_px)
 
         if not collapsed:
             st.markdown(
@@ -499,8 +484,8 @@ def sidebar_nav() -> str:
             with c2:
                 _safe_image(_team_logo_path(st.session_state.get("owner_select", "Whalers")), width=34)
         else:
-            # collapsed: show only team logo
-            _safe_image(_team_logo_path(owner_now), width=34)
+            # collapsed: team logo already shown at top
+            pass
 
         # Canonical owner value (no mutation of owner_select here)
         st.session_state["owner"] = st.session_state.get("owner_select", owner_now)
