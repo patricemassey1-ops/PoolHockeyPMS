@@ -19,6 +19,9 @@ def _load_season_state(data_dir: str) -> dict:
     return {}
 
 def render(ctx: dict) -> None:
+    # pms_home_logo_fix: small top spacing so logo appears above title
+    st.markdown("<style>.block-container{padding-top:1.6rem !important;}</style>", unsafe_allow_html=True)
+
     # 🏟️ logo_pool tout en haut de la page (Home)
     try:
         logo_pool = os.path.join(DATA_DIR, "logo_pool.png") if 'DATA_DIR' in globals() else os.path.join("data", "logo_pool.png")
