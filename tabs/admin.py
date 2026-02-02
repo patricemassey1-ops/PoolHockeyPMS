@@ -2132,6 +2132,19 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             with st.expander("🕛 Backups AUTO — Drive (midi & minuit)", expanded=False):
                 st.caption("Auto = quand l’app est ouverte (Streamlit ne tourne pas en cron). Whalers only.")
                 pol = load_policy(DATA_DIR)
+                policy_path = os.path.join(DATA_DIR, "backup_policy.json")
+                if not os.path.exists(policy_path):
+                    st.warning("⚠️ Aucun fichier `data/backup_policy.json` pour l’instant. Normal: il sera créé quand tu cliques **Sauver paramètres**.")
+                    if st.button("🧱 Créer policy par défaut maintenant", use_container_width=True, key="bk_create_policy"):
+                        pol0 = BackupPolicy(enabled=True, retention_days=int(pol.retention_days), tz_offset_hours=int(pol.tz_offset_hours), folder_id=str(pol.folder_id or "").strip(), window_minutes=int(pol.window_minutes), include_patterns=pol.include_patterns)
+                        ok0, err0 = save_policy(DATA_DIR, pol0)
+                        if ok0:
+                            st.success("✅ `data/backup_policy.json` créé.")
+                            st.rerun()
+                        else:
+                            st.error("❌ " + str(err0))
+                else:
+                    st.info("✅ Policy trouvée: `data/backup_policy.json` (tu peux modifier les jours de rétention ici).")
                 c1, c2, c3 = st.columns([1,1,1])
                 with c1:
                     enabled = st.toggle("Activer", value=pol.enabled, key="bk_enabled")
