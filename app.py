@@ -259,23 +259,27 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child{
 def apply_theme() -> None:
     mode = st.session_state.get("ui_theme", "dark")
     collapsed = bool(st.session_state.get("sidebar_collapsed", False))
-    sb_w = "78px" if collapsed else "320px"
+    sb_w = "72px" if collapsed else "320px"
 
     base = THEME_CSS_LIGHT if mode == "light" else THEME_CSS_DARK
 
-    # Dynamic (collapse + pro spacing)
-    dyn = f"""
-    <style>
-      section[data-testid="stSidebar"]{{ width: {sb_w} !important; min-width:{sb_w} !important; max-width:{sb_w} !important; }}
-      /* when collapsed: hide label text, keep icons */
-      {'section[data-testid="stSidebar"] div[role="radiogroup"] label p { display:none !important; }' if collapsed else ''}
-      /* push titles a bit down globally (pro) */
-      .block-container {{ padding-top: 2.4rem !important; }}
-      h1, h2, h3 {{ margin-top: 1.05rem !important; }}
-      /* pro red primary buttons */
-      .stButton > button[kind="primary"] {{ background: rgba(239,68,68,1) !important; border-color: rgba(220,38,38,1) !important; }}
-    </style>
-    """
+    # Dynamic (collapse + pro spacing) — IMPORTANT: no indentation (otherwise Streamlit shows it as code)
+    dyn = (
+        "<style>"
+        f"section[data-testid=\"stSidebar\"]{{ width:{sb_w} !important; min-width:{sb_w} !important; max-width:{sb_w} !important; }}"
+        ".block-container{ padding-top:2.4rem !important; }"
+        "h1,h2,h3{ margin-top:1.05rem !important; }"
+        ".stButton > button[kind=\"primary\"]{ background: rgba(239,68,68,1) !important; border-color: rgba(220,38,38,1) !important; }"
+    )
+
+    if collapsed:
+        dyn += (
+            "section[data-testid=\"stSidebar\"] [data-testid=\"stVerticalBlock\"]{ gap:6px !important; }"
+            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]{ padding:10px 6px !important; }"
+            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label p{ margin:0 !important; text-align:center !important; font-size:18px !important; }"
+        )
+
+    dyn += "</style>"
     st.markdown(base + dyn, unsafe_allow_html=True)
 
 
@@ -394,18 +398,65 @@ def sidebar_nav() -> str:
             tabs.append(("⚙️  Admin", "admin"))
 
         labels = [t[0] for t in tabs]
+
         cur = st.session_state.get("active_tab", labels[0])
-        default_idx = labels.index(cur) if cur in labels else 0
 
-        active = st.radio(
-            "Navigation",
-            options=labels,
-            index=default_idx,
-            key="nav_radio",
-            label_visibility="collapsed",
-        )
+
+        # When collapsed: show icon-only (more pro + gives more space, like your screenshot)
+
+        if collapsed:
+
+            icon_map = {lab.split(" ", 1)[0]: lab for lab in labels}  # "🏠" -> "🏠  Home"
+
+            icon_opts = list(icon_map.keys())
+
+            cur_icon = cur.split(" ", 1)[0] if isinstance(cur, str) and " " in cur else (cur if cur in icon_map else icon_opts[0])
+
+            try:
+
+                default_idx = icon_opts.index(cur_icon)
+
+            except Exception:
+
+                default_idx = 0
+
+
+            picked_icon = st.radio(
+
+                "Navigation",
+
+                options=icon_opts,
+
+                index=default_idx,
+
+                key="nav_radio",
+
+                label_visibility="collapsed",
+
+            )
+
+            active = icon_map.get(picked_icon, labels[0])
+
+        else:
+
+            default_idx = labels.index(cur) if cur in labels else 0
+
+            active = st.radio(
+
+                "Navigation",
+
+                options=labels,
+
+                index=default_idx,
+
+                key="nav_radio",
+
+                label_visibility="collapsed",
+
+            )
+
+
         st.session_state["active_tab"] = active
-
         st.markdown("---" if not collapsed else "")
 
         # Mon équipe (avec logo à droite)
@@ -428,6 +479,10 @@ def sidebar_nav() -> str:
 
         # Canonical owner value (no mutation of owner_select here)
         st.session_state["owner"] = st.session_state.get("owner_select", owner_now)
+
+                # spacer to push theme toggle lower when collapsed
+        if collapsed:
+            st.markdown("<div style='height: 55vh'></div>", unsafe_allow_html=True)
 
         # Theme toggle (only here). Keep even in collapsed.
         is_light = st.toggle(
