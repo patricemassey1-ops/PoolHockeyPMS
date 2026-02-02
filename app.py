@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import os
 import traceback
-from services.backup_drive import scheduled_backup_tick
+try:
+    from services.backup_drive import scheduled_backup_tick
+except Exception:
+    scheduled_backup_tick = None  # type: ignore
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 
@@ -543,7 +546,10 @@ def main() -> None:
     # 🔁 Backups AUTO (Drive) — midi & minuit (Whalers)
     # -------------------------------------------------
     try:
-        did, msg = scheduled_backup_tick(DATA_DIR, str(season), str(owner), show_debug=False)
+        if scheduled_backup_tick:
+            did, msg = scheduled_backup_tick(DATA_DIR, str(season), str(owner), show_debug=False)
+        else:
+            did, msg = (False, "backup_drive module missing")
         if did:
             st.toast("✅ Backup Drive auto fait (midi/minuit).", icon="✅")
     except Exception:
