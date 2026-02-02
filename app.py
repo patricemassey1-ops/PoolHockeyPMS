@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import traceback
+from services.backup_drive import scheduled_backup_tick
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 
@@ -41,10 +42,6 @@ TEAM_LABELS = {
     "Cracheurs": "Cracheurs",
     "Canadiens": "Canadiens",
 }
-
-TEAM_LOGO = {k: _team_logo_path(k) for k in POOL_TEAMS}
-APP_LOGO = os.path.join(DATA_DIR, "gm_logo.png")
-BANNER = os.path.join(DATA_DIR, "logo_pool.png")
 
 ASSETS_PREV = os.path.join("assets", "previews")
 
@@ -82,6 +79,12 @@ def _team_logo_path(team: str) -> str:
         if os.path.exists(p):
             return p
     return ""
+
+TEAM_LOGO = {k: _team_logo_path(k) for k in POOL_TEAMS}
+APP_LOGO = os.path.join(DATA_DIR, "gm_logo.png")
+BANNER = os.path.join(DATA_DIR, "logo_pool.png")
+
+
 
 
 # =========================
@@ -535,6 +538,18 @@ def main() -> None:
         is_admin=_is_admin(owner),
         theme=st.session_state.get("ui_theme", "dark"),
     )
+
+    # -------------------------------------------------
+    # 🔁 Backups AUTO (Drive) — midi & minuit (Whalers)
+    # -------------------------------------------------
+    try:
+        did, msg = scheduled_backup_tick(DATA_DIR, str(season), str(owner), show_debug=False)
+        if did:
+            st.toast("✅ Backup Drive auto fait (midi/minuit).", icon="✅")
+    except Exception:
+        # Ne jamais bloquer l’app si Drive est down
+        pass
+
 
     # Route
     modules = _import_tabs()
