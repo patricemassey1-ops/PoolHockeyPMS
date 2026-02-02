@@ -42,9 +42,46 @@ TEAM_LABELS = {
     "Canadiens": "Canadiens",
 }
 
-TEAM_LOGO = {k: os.path.join(DATA_DIR, f"{k}.png") for k in POOL_TEAMS}
+TEAM_LOGO = {k: _team_logo_path(k) for k in POOL_TEAMS}
 APP_LOGO = os.path.join(DATA_DIR, "gm_logo.png")
 BANNER = os.path.join(DATA_DIR, "logo_pool.png")
+
+ASSETS_PREV = os.path.join("assets", "previews")
+
+def _team_logo_path(team: str) -> str:
+    """
+    Cherche le logo d'équipe dans:
+    - assets/previews/<Team>_Logo.png (tes fichiers)
+    - data/<Team>.png (fallback)
+    """
+    team = str(team or "").strip()
+    if not team:
+        return ""
+    # assets/previews variants
+    candidates = [
+        os.path.join(ASSETS_PREV, f"{team}_Logo.png"),
+        os.path.join(ASSETS_PREV, f"{team}_Logo-2.png"),
+        os.path.join(ASSETS_PREV, f"{team}_Logo.jpg"),
+        os.path.join(ASSETS_PREV, f"{team}_Logo-2.jpg"),
+    ]
+    # some duplicates you have (ex: Canadiens_Logo vs Canadiens_Logo)
+    candidates += [
+        os.path.join(ASSETS_PREV, f"{team}s_Logo.png"),
+        os.path.join(ASSETS_PREV, f"{team}s_Logo.jpg"),
+        os.path.join(ASSETS_PREV, f"{team}E_Logo.png"),
+        os.path.join(ASSETS_PREV, f"{team}E_Logo.jpg"),
+    ]
+    # data fallback
+    candidates += [
+        os.path.join(DATA_DIR, f"{team}.png"),
+        os.path.join(DATA_DIR, f"{team}.jpg"),
+        os.path.join(DATA_DIR, f"{team}_logo.png"),
+        os.path.join(DATA_DIR, f"{team}_logo.jpg"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return ""
 
 
 # =========================
@@ -215,7 +252,25 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child{
 
 def apply_theme() -> None:
     mode = st.session_state.get("ui_theme", "dark")
-    st.markdown(THEME_CSS_LIGHT if mode == "light" else THEME_CSS_DARK, unsafe_allow_html=True)
+    collapsed = bool(st.session_state.get("sidebar_collapsed", False))
+    sb_w = "78px" if collapsed else "320px"
+
+    base = THEME_CSS_LIGHT if mode == "light" else THEME_CSS_DARK
+
+    # Dynamic (collapse + pro spacing)
+    dyn = f"""
+    <style>
+      section[data-testid="stSidebar"]{{ width: {sb_w} !important; min-width:{sb_w} !important; max-width:{sb_w} !important; }}
+      /* when collapsed: hide label text, keep icons */
+      {'section[data-testid="stSidebar"] div[role="radiogroup"] label p{display:none !important;}' if collapsed else ''}
+      /* push titles a bit down globally (pro) */
+      .block-container {{ padding-top: 2.4rem !important; }}
+      h1, h2, h3 {{ margin-top: 1.05rem !important; }}
+      /* pro red primary buttons */
+      .stButton > button[kind="primary"] {{ background: rgba(239,68,68,1) !important; border-color: rgba(220,38,38,1) !important; }}
+    </style>
+    """
+    st.markdown(base + dyn, unsafe_allow_html=True)
 
 
 # =========================
@@ -256,13 +311,12 @@ def _is_admin(owner: str) -> bool:
 # =========================
 TABS = [
     ("🏠  Home", "home"),
-    ("👥  Joueurs", "joueurs"),
-    ("🧊  Alignement", "alignement"),
-    ("🔁  Transactions", "transactions"),
     ("🧑‍💼  GM", "gm"),
+    ("🏒  Joueurs", "joueurs"),
+    ("📋  Alignement", "alignement"),
+    ("🔁  Transactions", "transactions"),
     ("🕘  Historique", "historique"),
     ("🏆  Classement", "classement"),
-    ("🛠️  Admin", "admin"),
 ]
 
 
@@ -286,16 +340,22 @@ def _apply_pending_widget_values_before_widgets() -> None:
 
 def _sidebar_brand() -> None:
     with st.sidebar:
-        c1, c2 = st.columns([1, 3], gap="small")
-        with c1:
-            if os.path.exists(APP_LOGO):
-                st.image(APP_LOGO, width=46)
-            else:
-                st.markdown(
-                    '<div style="width:46px;height:46px;border-radius:12px;background:rgba(239,68,68,.25)"></div>',
-                    unsafe_allow_html=True,
-                )
-        with c2:
+        # Triangle (collapse) like screenshot 3
+        collapsed = bool(st.session_state.get("sidebar_collapsed", False))
+        tri = "▶" if collapsed else "◀"
+        if st.button(tri, key="sb_toggle", help="Réduire / agrandir le menu", use_container_width=True):
+            st.session_state["sidebar_collapsed"] = not collapsed
+            st.rerun()
+
+        # logo_pool top (pro)
+        if os.path.exists(BANNER):
+            st.image(BANNER, use_container_width=True)
+
+        # gm_logo bigger (avatar / personnage)
+        if os.path.exists(APP_LOGO):
+            st.image(APP_LOGO, width=120 if not collapsed else 46)
+
+        if not collapsed:
             st.markdown(
                 """
                 <div class="pms-sidebrand">
@@ -313,57 +373,70 @@ def sidebar_nav() -> str:
     with st.sidebar:
         _sidebar_brand()
 
-        # Saison
-        st.selectbox(
-            "Saison",
-            options=[DEFAULT_SEASON, "2024-2025", "2023-2024"],
-            key="season_lbl",
-        )
+        collapsed = bool(st.session_state.get("sidebar_collapsed", False))
 
-        st.markdown("### Navigation")
+        # Saison (hidden when collapsed)
+        if not collapsed:
+            st.selectbox(
+                "Saison",
+                options=[DEFAULT_SEASON, "2024-2025", "2023-2024"],
+                key="season_lbl",
+            )
 
-        labels = [t[0] for t in TABS]
+        st.markdown("### Navigation" if not collapsed else "")
+
+        # Build tabs in requested order + Admin only when Whalers selected
+        owner_now = str(st.session_state.get("owner_select") or st.session_state.get("owner") or "Canadiens")
+        tabs = list(TABS)
+        if _is_admin(owner_now):
+            tabs.append(("⚙️  Admin", "admin"))
+
+        labels = [t[0] for t in tabs]
         cur = st.session_state.get("active_tab", labels[0])
         default_idx = labels.index(cur) if cur in labels else 0
 
         active = st.radio(
             "Navigation",
-            labels,
+            options=labels,
             index=default_idx,
             key="nav_radio",
             label_visibility="collapsed",
         )
         st.session_state["active_tab"] = active
 
-        st.markdown("---")
+        st.markdown("---" if not collapsed else "")
 
         # Mon équipe (avec logo à droite)
-        st.markdown("### Mon équipe")
-        c1, c2 = st.columns([4, 1], gap="small")
-        with c1:
-            st.selectbox(
-                "Mon équipe",
-                options=POOL_TEAMS,
-                key="owner_select",
-                format_func=lambda x: TEAM_LABELS.get(x, x),
-                label_visibility="collapsed",
-            )
-        with c2:
-            _safe_image(TEAM_LOGO.get(st.session_state.get("owner_select", "Whalers"), ""), width=34)
+        if not collapsed:
+            st.markdown("### Mon équipe")
+            c1, c2 = st.columns([4, 1], gap="small")
+            with c1:
+                st.selectbox(
+                    "Mon équipe",
+                    options=POOL_TEAMS,
+                    key="owner_select",
+                    format_func=lambda x: TEAM_LABELS.get(x, x),
+                    label_visibility="collapsed",
+                )
+            with c2:
+                _safe_image(_team_logo_path(st.session_state.get("owner_select", "Whalers")), width=34)
+        else:
+            # collapsed: show only team logo
+            _safe_image(_team_logo_path(owner_now), width=34)
 
         # Canonical owner value (no mutation of owner_select here)
-        st.session_state["owner"] = st.session_state.get("owner_select", "Whalers")
+        st.session_state["owner"] = st.session_state.get("owner_select", owner_now)
 
-        # Theme toggle (only here)
+        # Theme toggle (only here). Keep even in collapsed.
         is_light = st.toggle(
-            "Mode clair",
+            "☀️",
             value=(st.session_state.get("ui_theme", "dark") == "light"),
             key="ui_theme_toggle_sidebar",
+            help="Mode clair/sombre",
         )
         st.session_state["ui_theme"] = "light" if is_light else "dark"
 
     return active
-
 
 # =========================
 # RENDERERS IMPORT
@@ -449,16 +522,12 @@ def main() -> None:
     # Theme injection (once)
     apply_theme()
 
-    # Sidebar (pro)
-    sb = render_sidebar({"DATA_DIR": DATA_DIR})
-    # Map to old-style active_tab label for compatibility
-    active_label = sb.get("nav", "Home")
+    # Sidebar
+    active_label = sidebar_nav()
 
     # Build ctx
     owner = st.session_state.get("owner") or "Whalers"
-    season = st.session_state.get("season") or st.session_state.get("season_lbl") or DEFAULT_SEASON
-    # keep season_lbl synced for legacy code
-    st.session_state["season_lbl"] = season
+    season = st.session_state.get("season_lbl") or DEFAULT_SEASON
     ctx = AppCtx(
         data_dir=DATA_DIR,
         season_lbl=str(season),
@@ -469,17 +538,8 @@ def main() -> None:
 
     # Route
     modules = _import_tabs()
-    nav_to_key = {
-        "Home": "home",
-        "GM": "gm",
-        "Joueurs": "joueurs",
-        "Alignement": "alignement",
-        "Transactions": "transactions",
-        "Historique": "historique",
-        "Classement": "classement",
-        "Admin": "admin",
-    }
-    key = nav_to_key.get(str(active_label), "home")
+    key = dict(TABS).get(active_label, "home")
+
     try:
         if key == "home":
             _render_home(ctx)
