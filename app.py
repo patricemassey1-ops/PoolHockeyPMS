@@ -302,6 +302,28 @@ def apply_theme() -> None:
         "</style>"
     )
 
+    # pms_center_sidebar_images
+    dyn += ("<style>section[data-testid='stSidebar'] img{display:block; margin-left:auto; margin-right:auto;}</style>")
+
+        # pms_expanded_radio_red
+    dyn += (
+        "<style>"
+        "section[data-testid='stSidebar'] div[role='radiogroup'] label[data-baseweb='radio']{"
+        "  border-radius:14px !important; border:1px solid rgba(255,255,255,0.12) !important;"
+        "  background: rgba(255,255,255,0.05) !important;"
+        "  transition: transform 120ms ease, box-shadow 150ms ease, border-color 150ms ease, background 150ms ease !important;"
+        "}"
+        "section[data-testid='stSidebar'] div[role='radiogroup'] label[data-baseweb='radio']:hover{"
+        "  border-color: rgba(239,68,68,0.55) !important; transform: translateY(-1px) !important;"
+        "  box-shadow: 0 10px 22px rgba(0,0,0,0.22) !important;"
+        "}"
+        "section[data-testid='stSidebar'] div[role='radiogroup'] label[data-baseweb='radio']:has(input:checked){"
+        "  background: rgba(239,68,68,1) !important; border-color: rgba(220,38,38,1) !important;"
+        "  box-shadow: 0 14px 28px rgba(239,68,68,0.28) !important;"
+        "}"
+        "</style>"
+    )
+
     if collapsed:
         dyn += (
             "<style>"
@@ -329,14 +351,14 @@ def apply_theme() -> None:
             f"  box-shadow: inset 0 1px 0 rgba(255,255,255,0.25);"
             f"}}"
             "section[data-testid=\"stSidebar\"] div.stButton:first-of-type > button{"
-            "  width:42px !important; height:42px !important;"
+            "  width:46px !important; height:46px !important;"
             "  border-radius: 999px !important;"
             "  background: rgba(255,255,255,0.06) !important;"
             "  border-color: rgba(255,255,255,0.14) !important;"
             "}"
             "section[data-testid=\"stSidebar\"] div.stButton > button > div{"
-            "  font-size: 20px !important;"
-            "  line-height: 20px !important;"
+            "  font-size: 22px !important;"
+            "  line-height: 22px !important;"
             "}"
             "section[data-testid=\"stSidebar\"] [data-testid=\"stToggle\"]{ display:flex !important; justify-content:center !important; }"
             "</style>"
@@ -398,7 +420,7 @@ def _sidebar_brand() -> None:
             st.session_state["sidebar_collapsed"] = not collapsed
             st.rerun()
 
-        icon_px = 30
+        icon_px = 40
 
         # GM logo only (sidebar)
         if os.path.exists(APP_LOGO):
