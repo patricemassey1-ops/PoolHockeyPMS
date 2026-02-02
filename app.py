@@ -268,7 +268,7 @@ def apply_theme() -> None:
     <style>
       section[data-testid="stSidebar"]{{ width: {sb_w} !important; min-width:{sb_w} !important; max-width:{sb_w} !important; }}
       /* when collapsed: hide label text, keep icons */
-      {'section[data-testid="stSidebar"] div[role="radiogroup"] label p{display:none !important;}' if collapsed else ''}
+      {'section[data-testid="stSidebar"] div[role="radiogroup"] label p { display:none !important; }' if collapsed else ''}
       /* push titles a bit down globally (pro) */
       .block-container {{ padding-top: 2.4rem !important; }}
       h1, h2, h3 {{ margin-top: 1.05rem !important; }}
@@ -352,10 +352,6 @@ def _sidebar_brand() -> None:
         if st.button(tri, key="sb_toggle", help="Réduire / agrandir le menu", use_container_width=True):
             st.session_state["sidebar_collapsed"] = not collapsed
             st.rerun()
-
-        # logo_pool top (pro)
-        if os.path.exists(BANNER):
-            st.image(BANNER, use_container_width=True)
 
         # gm_logo bigger (avatar / personnage)
         if os.path.exists(APP_LOGO):
