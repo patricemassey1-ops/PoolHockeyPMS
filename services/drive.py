@@ -1,230 +1,360 @@
-# services/drive.py
+# services/backup_drive.py
+# -------------------------------------------------
+# Auto backups to Google Drive (noon + midnight) with retention
+# - Uses st.secrets["gdrive_oauth"] (same as Admin drive OAuth)
+# - Writes policy in data/backup_policy.json
+# - Writes state in data/backup_state.json (last run per period)
+# Notes:
+# - Streamlit can't run true cron in the background.
+# - This runs when the app is opened/refreshed around those times.
+# -------------------------------------------------
+
 from __future__ import annotations
 
+import io
+import json
 import os
-from typing import Any, Dict, List, Optional
+import re
+import tempfile
+import zipfile
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Tuple
 
 import streamlit as st
 
-
-# ============================================================
-# Secrets expectations
-# - gdrive_folder_id = "..."
-# - [gdrive_oauth]
-#     client_id = "..."
-#     client_secret = "..."
-#     refresh_token = "..."
-#     token_uri = "https://oauth2.googleapis.com/token"
-# ============================================================
-
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+# Optional Google Drive libs
+try:
+    from google.oauth2.credentials import Credentials  # type: ignore
+    from googleapiclient.discovery import build  # type: ignore
+    from googleapiclient.http import MediaIoBaseUpload  # type: ignore
+except Exception:
+    Credentials = None  # type: ignore
+    build = None  # type: ignore
+    MediaIoBaseUpload = None  # type: ignore
 
 
-def get_drive_folder_id() -> str:
-    """
-    Folder ID depuis Secrets.
-    Compat: accepte aussi "drive_folder_id" si tu l'avais avant.
-    """
+@dataclass
+class BackupPolicy:
+    enabled: bool = True
+    retention_days: int = 30
+    tz_offset_hours: int = -5  # Montreal default
+    folder_id: str = ""        # if empty: use secrets gdrive_oauth.folder_id
+    window_minutes: int = 45   # time window after 00:00 / 12:00
+    include_patterns: Tuple[str, ...] = ("*.csv", "*.json")  # data files to include
+
+
+def _data_dir(data_dir: str | None) -> str:
+    return str(data_dir or os.getenv("DATA_DIR") or "data")
+
+
+def _policy_path(data_dir: str) -> str:
+    return os.path.join(data_dir, "backup_policy.json")
+
+
+def _state_path(data_dir: str) -> str:
+    return os.path.join(data_dir, "backup_state.json")
+
+
+def load_policy(data_dir: str) -> BackupPolicy:
+    data_dir = _data_dir(data_dir)
+    p = _policy_path(data_dir)
+    pol = BackupPolicy()
     try:
-        fid = str(st.secrets.get("gdrive_folder_id", "") or "").strip()
-        if not fid:
-            fid = str(st.secrets.get("drive_folder_id", "") or "").strip()
-        return fid
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f) or {}
+            pol.enabled = bool(d.get("enabled", pol.enabled))
+            pol.retention_days = int(d.get("retention_days", pol.retention_days))
+            pol.tz_offset_hours = int(d.get("tz_offset_hours", pol.tz_offset_hours))
+            pol.folder_id = str(d.get("folder_id", pol.folder_id) or "")
+            pol.window_minutes = int(d.get("window_minutes", pol.window_minutes))
+            inc = d.get("include_patterns")
+            if isinstance(inc, list) and inc:
+                pol.include_patterns = tuple(str(x) for x in inc)
     except Exception:
-        return ""
+        pass
+    # clamp
+    pol.retention_days = max(1, min(pol.retention_days, 365))
+    pol.window_minutes = max(10, min(pol.window_minutes, 180))
+    pol.tz_offset_hours = max(-12, min(pol.tz_offset_hours, 14))
+    return pol
 
 
-def drive_ready() -> bool:
-    """
-    True si folder_id + gdrive_oauth sont présents.
-    """
+def save_policy(data_dir: str, pol: BackupPolicy) -> Tuple[bool, str]:
+    data_dir = _data_dir(data_dir)
     try:
-        fid = get_drive_folder_id()
-        oauth = st.secrets.get("gdrive_oauth", {}) or {}
-        return bool(fid) and bool(oauth.get("client_id")) and bool(oauth.get("client_secret")) and bool(oauth.get("refresh_token"))
+        os.makedirs(data_dir, exist_ok=True)
+        with open(_policy_path(data_dir), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "enabled": pol.enabled,
+                    "retention_days": pol.retention_days,
+                    "tz_offset_hours": pol.tz_offset_hours,
+                    "folder_id": pol.folder_id,
+                    "window_minutes": pol.window_minutes,
+                    "include_patterns": list(pol.include_patterns),
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def _load_state(data_dir: str) -> Dict[str, Any]:
+    data_dir = _data_dir(data_dir)
+    p = _state_path(data_dir)
+    try:
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_state(data_dir: str, state: Dict[str, Any]) -> None:
+    data_dir = _data_dir(data_dir)
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        with open(_state_path(data_dir), "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _drive_oauth_available() -> bool:
+    try:
+        sec = st.secrets
+        g = sec.get("gdrive_oauth", {}) or {}
+        return bool(g.get("client_id")) and bool(g.get("client_secret")) and bool(g.get("refresh_token"))
     except Exception:
         return False
 
 
-def build_drive_service():
-    """
-    Construit un service Drive v3 via OAuth refresh_token.
-    """
-    # imports lazy (évite crash si libs pas installées)
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
-    from googleapiclient.discovery import build
+def _drive_service():
+    if Credentials is None or build is None:
+        raise RuntimeError("Libs Google Drive manquantes (google-api-python-client / google-auth).")
 
-    oauth = st.secrets.get("gdrive_oauth", {}) or {}
+    sec = st.secrets
+    g = sec.get("gdrive_oauth", {}) or {}
+    client_id = str(g.get("client_id") or "").strip()
+    client_secret = str(g.get("client_secret") or "").strip()
+    refresh_token = str(g.get("refresh_token") or "").strip()
+    token_uri = str(g.get("token_uri") or "https://oauth2.googleapis.com/token").strip()
+    scopes = g.get("scopes")  # optional list
 
-    creds = Credentials(
-        token=None,
-        refresh_token=oauth.get("refresh_token"),
-        token_uri=oauth.get("token_uri", "https://oauth2.googleapis.com/token"),
-        client_id=oauth.get("client_id"),
-        client_secret=oauth.get("client_secret"),
-        scopes=[DRIVE_SCOPE],
-    )
+    if not (client_id and client_secret and refresh_token):
+        raise RuntimeError("Secrets OAuth Drive incomplets (client_id/client_secret/refresh_token).")
 
-    # refresh (obligatoire pour avoir access token)
-    creds.refresh(Request())
-
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
+    if scopes:
+        creds = Credentials(token=None, refresh_token=refresh_token, token_uri=token_uri, client_id=client_id, client_secret=client_secret, scopes=scopes)
+    else:
+        # Do NOT force scopes; use what the refresh token already has.
+        creds = Credentials(token=None, refresh_token=refresh_token, token_uri=token_uri, client_id=client_id, client_secret=client_secret)
+    return build("drive", "v3", credentials=creds)
 
 
-def _list_in_folder(service, folder_id: str, page_size: int = 200) -> List[Dict[str, Any]]:
-    """
-    Liste tous les fichiers dans un folder_id (non trashed).
-    """
-    q = f"'{folder_id}' in parents and trashed=false"
-    res = service.files().list(
-        q=q,
-        pageSize=page_size,
-        fields="files(id,name,modifiedTime,size,mimeType)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
-    return res.get("files", []) or []
-
-
-def drive_list_files(folder_id: Optional[str] = None, name_contains: str = "", limit: int = 200) -> List[Dict[str, Any]]:
-    """
-    Retourne la liste des fichiers (dicts) dans le folder.
-    Filtre optionnel name_contains (client-side).
-    """
-    if not drive_ready():
-        return []
-
-    folder_id = str(folder_id or get_drive_folder_id()).strip()
-    if not folder_id:
-        return []
-
+def _drive_folder_id(policy_folder_id: str) -> str:
     try:
-        service = build_drive_service()
-        files = _list_in_folder(service, folder_id, page_size=min(1000, max(10, limit)))
-        if name_contains:
-            nc = name_contains.lower().strip()
-            files = [f for f in files if nc in str(f.get("name", "")).lower()]
-        return files[:limit]
+        sec = st.secrets
+        g = sec.get("gdrive_oauth", {}) or {}
+        fid = str(policy_folder_id or g.get("folder_id") or "").strip()
+        return fid
     except Exception:
-        return []
+        return str(policy_folder_id or "").strip()
 
 
-def _find_file_by_name(service, folder_id: str, filename: str) -> Optional[Dict[str, Any]]:
-    """
-    Retourne le 1er fichier exact name=filename dans le folder.
-    """
-    q = f"'{folder_id}' in parents and trashed=false and name='{filename}'"
-    res = service.files().list(
-        q=q,
-        pageSize=10,
-        fields="files(id,name,modifiedTime,size,mimeType)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
-    files = res.get("files", []) or []
-    return files[0] if files else None
-
-
-def drive_download_file(file_id: str, dest_path: str) -> Dict[str, Any]:
-    """
-    Download un fichier Drive vers dest_path.
-    """
-    if not drive_ready():
-        return {"ok": False, "error": "Drive OAuth not ready (missing secrets)."}
-
-    if not file_id:
-        return {"ok": False, "error": "Missing file_id."}
-    if not dest_path:
-        return {"ok": False, "error": "Missing dest_path."}
-
+def _drive_upload_bytes(folder_id: str, name: str, data: bytes, mime: str = "application/zip") -> Tuple[bool, str]:
     try:
-        from googleapiclient.http import MediaIoBaseDownload
-        import io
-
-        service = build_drive_service()
-        req = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-
-        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
-
-        fh = io.FileIO(dest_path, "wb")
-        downloader = MediaIoBaseDownload(fh, req)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-
-        return {"ok": True, "path": dest_path}
+        svc = _drive_service()
+        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=True)
+        meta = {"name": name, "parents": [folder_id]}
+        svc.files().create(body=meta, media_body=media, fields="id,name", supportsAllDrives=True).execute()
+        return True, ""
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return False, str(e)
 
 
-def drive_upload_file(folder_id: Optional[str], local_path: str, drive_name: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Upload en mode UPSERT:
-    - si un fichier du même nom existe dans le folder → UPDATE
-    - sinon → CREATE
-    """
-    if not drive_ready():
-        return {"ok": False, "error": "Drive OAuth not ready (missing secrets)."}
-
-    folder_id = str(folder_id or get_drive_folder_id()).strip()
-    if not folder_id:
-        return {"ok": False, "error": "Missing folder_id."}
-
-    local_path = str(local_path or "").strip()
-    if not local_path or not os.path.exists(local_path):
-        return {"ok": False, "error": f"Local file not found: {local_path}"}
-
-    filename = str(drive_name or os.path.basename(local_path)).strip()
-    if not filename:
-        return {"ok": False, "error": "Missing drive_name/filename."}
-
-    try:
-        from googleapiclient.http import MediaFileUpload
-
-        service = build_drive_service()
-        media = MediaFileUpload(local_path, resumable=True)
-
-        existing = _find_file_by_name(service, folder_id, filename)
-        if existing:
-            file_id = existing["id"]
-            updated = service.files().update(
-                fileId=file_id,
-                media_body=media,
-                fields="id,name,modifiedTime",
-                supportsAllDrives=True,
-            ).execute()
-            return {
-                "ok": True,
-                "mode": "update",
-                "id": updated.get("id"),
-                "name": updated.get("name"),
-                "modifiedTime": updated.get("modifiedTime"),
-            }
-
-        created = service.files().create(
-            body={"name": filename, "parents": [folder_id]},
-            media_body=media,
-            fields="id,name,modifiedTime",
+def _drive_list_backups(folder_id: str) -> list[dict]:
+    svc = _drive_service()
+    q = f"'{folder_id}' in parents and trashed=false and name contains 'backup_'"
+    res = []
+    token = None
+    while True:
+        resp = svc.files().list(
+            q=q,
+            pageSize=200,
+            fields="nextPageToken, files(id,name,createdTime,modifiedTime)",
             supportsAllDrives=True,
+            pageToken=token,
         ).execute()
-        return {
-            "ok": True,
-            "mode": "create",
-            "id": created.get("id"),
-            "name": created.get("name"),
-            "modifiedTime": created.get("modifiedTime"),
-        }
+        res.extend(resp.get("files", []) or [])
+        token = resp.get("nextPageToken")
+        if not token:
+            break
+    return res
 
+
+def _drive_delete_file(file_id: str) -> Tuple[bool, str]:
+    try:
+        svc = _drive_service()
+        svc.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+        return True, ""
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return False, str(e)
 
 
-# ============================================================
-# Compat legacy (si ton app.py importe encore ça)
-# ============================================================
-def resolve_drive_folder_id() -> str:
+def _zip_data_dir(data_dir: str, include_patterns: Tuple[str, ...]) -> bytes:
+    # Zip all matching files in data_dir root (not recursive)
+    data_dir = _data_dir(data_dir)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        for pat in include_patterns:
+            # simple glob in root
+            import glob
+            for p in glob.glob(os.path.join(data_dir, pat)):
+                if os.path.isfile(p):
+                    z.write(p, arcname=os.path.basename(p))
+    return buf.getvalue()
+
+
+def cleanup_old_backups(data_dir: str, folder_id: str, retention_days: int) -> Tuple[int, int]:
     """
-    Compat legacy: retourne simplement get_drive_folder_id().
+    Returns (deleted, kept).
     """
-    return get_drive_folder_id()
+    deleted = 0
+    kept = 0
+    try:
+        files = _drive_list_backups(folder_id)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        for f in files:
+            ct = f.get("createdTime") or f.get("modifiedTime") or ""
+            try:
+                # createdTime is RFC3339
+                dt = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+            except Exception:
+                dt = None
+            if dt and dt < cutoff:
+                ok, _ = _drive_delete_file(f.get("id",""))
+                if ok:
+                    deleted += 1
+            else:
+                kept += 1
+    except Exception:
+        pass
+    return deleted, kept
+
+
+def _period_due(now_local: datetime, state: Dict[str, Any], period: str, window_minutes: int) -> bool:
+    """
+    period: 'midnight' or 'noon'
+    """
+    today = now_local.strftime("%Y-%m-%d")
+    key = f"last_{period}"
+    last = str(state.get(key, "")).strip()
+
+    if period == "midnight":
+        anchor = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        anchor = now_local.replace(hour=12, minute=0, second=0, microsecond=0)
+
+    if now_local < anchor:
+        return False
+    if (now_local - anchor) > timedelta(minutes=window_minutes):
+        return False
+    if last == today:
+        return False
+    return True
+
+
+def run_backup_now(data_dir: str, season: str, policy: BackupPolicy, label: str) -> Tuple[bool, str]:
+    """
+    Upload a zip backup of data/* to Drive folder.
+    """
+    if not policy.enabled:
+        return False, "backups disabled"
+
+    if not _drive_oauth_available():
+        return False, "drive oauth not configured"
+
+    folder_id = _drive_folder_id(policy.folder_id)
+    if not folder_id:
+        return False, "folder_id missing"
+
+    # build name
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_season = str(season).replace("/", "-").replace("\\", "-").replace(" ", "")
+    name = f"backup_{safe_season}_{label}_{ts}.zip"
+
+    # zip
+    payload = _zip_data_dir(data_dir, policy.include_patterns)
+
+    ok, err = _drive_upload_bytes(folder_id, name, payload, mime="application/zip")
+    if not ok:
+        return False, err
+
+    # cleanup
+    cleanup_old_backups(data_dir, folder_id, policy.retention_days)
+
+    return True, name
+
+
+def scheduled_backup_tick(data_dir: str, season: str, owner: str, show_debug: bool = False) -> Tuple[bool, str]:
+    """
+    Call on each run (cheap). If due, performs backup.
+    Safety: run backups only when owner == 'Whalers' (admin).
+    """
+    if str(owner) != "Whalers":
+        return False, "owner not whalers"
+
+    pol = load_policy(data_dir)
+    if not pol.enabled:
+        return False, "disabled"
+
+    if not _drive_oauth_available():
+        return False, "drive oauth missing"
+
+    folder_id = _drive_folder_id(pol.folder_id)
+    if not folder_id:
+        return False, "folder id missing"
+
+    state = _load_state(data_dir)
+
+    # local time = utc + offset
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc + timedelta(hours=pol.tz_offset_hours)
+
+    did = False
+    msg = "no backup"
+
+    if _period_due(now_local, state, "midnight", pol.window_minutes):
+        ok, res = run_backup_now(data_dir, season, pol, label="midnight")
+        if ok:
+            state["last_midnight"] = now_local.strftime("%Y-%m-%d")
+            state["last_run_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S")
+            _save_state(data_dir, state)
+            did = True
+            msg = f"backup ok: {res}"
+        else:
+            msg = f"backup failed: {res}"
+
+    if (not did) and _period_due(now_local, state, "noon", pol.window_minutes):
+        ok, res = run_backup_now(data_dir, season, pol, label="noon")
+        if ok:
+            state["last_noon"] = now_local.strftime("%Y-%m-%d")
+            state["last_run_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S")
+            _save_state(data_dir, state)
+            did = True
+            msg = f"backup ok: {res}"
+        else:
+            msg = f"backup failed: {res}"
+
+    if show_debug:
+        state2 = _load_state(data_dir)
+        msg += f" | state={state2}"
+
+    return did, msg
