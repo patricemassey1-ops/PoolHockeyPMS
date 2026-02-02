@@ -1,131 +1,665 @@
-# tabs/home.py
-import streamlit as st
-from services.storage import path_pool_logo, path_team_logo
-import json
+# app.py — PoolHockeyPMS (routing + thème + contexte) — UI "like screenshot"
+# -----------------------------------------------------------------------------
+# Objectifs:
+# - Look proche de tes screenshots: fond navy, accent rouge, sidebar propre (icônes + hover + actif rouge)
+# - Dark par défaut + toggle Mode clair (sidebar)
+# - Home: carte "Sélection d'équipe" + logo à droite + bannière logo_pool.png en dessous (proportions stables)
+# - Routing stable vers tabs/*.py (render(ctx_dict) ou render(ctx))
+# - Zéro expander nested ici (les tabs gèrent leur UI)
+# - Zéro StreamlitDuplicateElementKey / et pas de modification de session_state d'un widget après instanciation
+# -----------------------------------------------------------------------------
+
+from __future__ import annotations
+
 import os
+import traceback
+try:
+    from services.backup_drive import scheduled_backup_tick
+except Exception:
+    scheduled_backup_tick = None  # type: ignore
+from dataclasses import dataclass
+from typing import Dict, Any, Optional
 
+import streamlit as st
 
-def _data_dir(ctx: dict) -> str:
-    return str(ctx.get("DATA_DIR") or os.getenv("DATA_DIR") or "data")
+# =========================
+# CONFIG
+# =========================
+st.set_page_config(
+    page_title="Pool GM",
+    page_icon="🏒",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DEFAULT_SEASON = "2025-2026"
 
-def _load_season_state(data_dir: str) -> dict:
-    """Read data/season_state.json if present (dummy-proof)."""
-    p = os.path.join(data_dir, "season_state.json")
-    try:
+POOL_TEAMS = ["Whalers", "Red_Wings", "Predateurs", "Nordiques", "Cracheurs", "Canadiens"]
+
+TEAM_LABELS = {
+    "Whalers": "Whalers",
+    "Red_Wings": "Red Wings",
+    "Predateurs": "Prédateurs",
+    "Nordiques": "Nordiques",
+    "Cracheurs": "Cracheurs",
+    "Canadiens": "Canadiens",
+}
+
+ASSETS_PREV = os.path.join("assets", "previews")
+
+def _team_logo_path(team: str) -> str:
+    """
+    Cherche le logo d'équipe dans:
+    - assets/previews/<Team>_Logo.png (tes fichiers)
+    - data/<Team>.png (fallback)
+    """
+    team = str(team or "").strip()
+    if not team:
+        return ""
+    # assets/previews variants
+    candidates = [
+        os.path.join(ASSETS_PREV, f"{team}_Logo.png"),
+        os.path.join(ASSETS_PREV, f"{team}_Logo-2.png"),
+        os.path.join(ASSETS_PREV, f"{team}_Logo.jpg"),
+        os.path.join(ASSETS_PREV, f"{team}_Logo-2.jpg"),
+    ]
+    # some duplicates you have (ex: Canadiens_Logo vs Canadiens_Logo)
+    candidates += [
+        os.path.join(ASSETS_PREV, f"{team}s_Logo.png"),
+        os.path.join(ASSETS_PREV, f"{team}s_Logo.jpg"),
+        os.path.join(ASSETS_PREV, f"{team}E_Logo.png"),
+        os.path.join(ASSETS_PREV, f"{team}E_Logo.jpg"),
+    ]
+    # data fallback
+    candidates += [
+        os.path.join(DATA_DIR, f"{team}.png"),
+        os.path.join(DATA_DIR, f"{team}.jpg"),
+        os.path.join(DATA_DIR, f"{team}_logo.png"),
+        os.path.join(DATA_DIR, f"{team}_logo.jpg"),
+    ]
+    for p in candidates:
         if os.path.exists(p):
-            with open(p, "r", encoding="utf-8") as f:
-                return json.load(f) or {}
-    except Exception:
-        pass
-    return {}
+            return p
+    return ""
+
+TEAM_LOGO = {k: _team_logo_path(k) for k in POOL_TEAMS}
+APP_LOGO = os.path.join(DATA_DIR, "gm_logo.png")
+BANNER = os.path.join(DATA_DIR, "logo_pool.png")
 
 
-def render(ctx: dict) -> None:
-    st.header("🏠 Home")
-    st.caption("Choisis ton équipe ci-dessous (tout le reste suit automatiquement).")
 
-    # ----------------------------
-    # Pool logo
-    # ----------------------------
-    pool_logo = path_pool_logo()
-    if pool_logo:
-        try:
-            st.image(pool_logo, width=120)
-        except Exception:
-            pass
 
-    # ----------------------------
-    # Source de vérité: selected_owner
-    # ----------------------------
-    owners = ctx.get("owners")
-    if not isinstance(owners, list) or not owners:
-        # fallback safe
-        owners = ["Canadiens", "Cracheurs", "Nordiques", "Predateurs", "Red Wings", "Whalers"]
+# =========================
+# THEME (1 seule injection)
+# =========================
+THEME_CSS_DARK = """
+<style>
+:root{ color-scheme: dark; }
+html, body, [data-testid="stAppViewContainer"]{
+  background:
+    radial-gradient(1100px 760px at 18% -10%, rgba(239,68,68,.18), transparent 58%),
+    radial-gradient(1050px 740px at 96% 10%, rgba(59,130,246,.14), transparent 58%),
+    linear-gradient(180deg,#0b1220,#070b12 65%,#070b12) !important;
+  color:#e7eef7 !important;
+}
+.block-container{ padding-top: 1.1rem; padding-bottom: 2.6rem; max-width: 1200px; }
 
-    if "selected_owner" not in st.session_state:
-        st.session_state["selected_owner"] = owners[0]
+/* ---- Sidebar ---- */
+section[data-testid="stSidebar"]{
+  background: linear-gradient(180deg,#0d1627,#0b1220) !important;
+  border-right: 1px solid rgba(255,255,255,.07);
+}
+section[data-testid="stSidebar"] .block-container{ padding-top: 1.1rem; }
 
-    # si valeur invalide (ex: liste a changé)
-    if st.session_state["selected_owner"] not in owners:
-        st.session_state["selected_owner"] = owners[0]
+/* Brand header in sidebar */
+.pms-sidebrand{
+  display:flex; align-items:center; gap:.65rem;
+  margin-bottom: .85rem;
+}
+.pms-sidebrand img{ width: 44px; height: 44px; border-radius: 12px; }
+.pms-sidebrand .t1{ font-weight: 800; font-size: 20px; letter-spacing:-.02em; }
+.pms-sidebrand .t2{ opacity:.75; font-size: 12px; margin-top: -2px; }
 
-    st.subheader("🏒 Sélection d'équipe")
-    # 🏟️ logo_pool en haut (main page)
+/* ---- Cards ---- */
+.card{
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 18px;
+  padding: 18px;
+  box-shadow: 0 12px 34px rgba(0,0,0,.22);
+}
+.smallmuted{ opacity:.72; font-size: 13px; }
+hr{ border-color: rgba(255,255,255,.10); }
+
+/* ---- Accent red (buttons) ---- */
+.stButton>button{ border-radius: 12px !important; }
+.stButton>button[kind="primary"]{
+  background:#ef4444 !important;
+  border:1px solid rgba(239,68,68,.55) !important;
+}
+.stButton>button[kind="primary"]:hover{ filter: brightness(1.02); }
+
+/* ---- Sidebar Navigation RADIO styling (match screenshot) ---- */
+section[data-testid="stSidebar"] div[role="radiogroup"]{ gap:.35rem; }
+section[data-testid="stSidebar"] div[role="radiogroup"] label{
+  padding: .65rem .75rem !important;
+  border-radius: 12px !important;
+  border: 1px solid rgba(255,255,255,.08) !important;
+  background: rgba(255,255,255,.02) !important;
+  margin: 0 !important;
+  transition: all .14s ease;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] label:hover{
+  border-color: rgba(255,255,255,.14) !important;
+  background: rgba(255,255,255,.04) !important;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] label p{
+  color: #dbe5f5 !important;
+  font-size: 15px !important;
+  font-weight: 650 !important;
+  margin: 0 !important;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] input{ display:none !important; }
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked){
+  background: rgba(239,68,68,.18) !important;
+  border-color: rgba(239,68,68,.55) !important;
+  box-shadow: 0 0 0 3px rgba(239,68,68,.16) !important;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p{
+  color: #ffffff !important;
+}
+
+/* Hide Streamlit's tiny "radio dot" container */
+section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child{
+  display:none !important;
+}
+
+/* Inputs look */
+section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"]{
+  border-radius: 12px !important;
+}
+section[data-testid="stSidebar"] .stToggleSwitch{
+  margin-top: .6rem;
+}
+
+/* Banner rounding */
+.pms-banner img{ border-radius: 18px; box-shadow: 0 12px 34px rgba(0,0,0,.20); }
+</style>
+"""
+
+THEME_CSS_LIGHT = """
+<style>
+:root{ color-scheme: light; }
+html, body, [data-testid="stAppViewContainer"]{
+  background:
+    radial-gradient(1000px 720px at 18% -10%, rgba(239,68,68,.14), transparent 58%),
+    radial-gradient(1000px 720px at 96% 10%, rgba(59,130,246,.14), transparent 58%),
+    linear-gradient(180deg,#f7f8fc,#f2f5fb 60%,#f2f5fb) !important;
+  color:#0b1020 !important;
+}
+.block-container{ padding-top: 1.1rem; padding-bottom: 2.6rem; max-width: 1200px; }
+
+section[data-testid="stSidebar"]{
+  background: #ffffff !important;
+  border-right: 1px solid rgba(0,0,0,.06);
+}
+.pms-sidebrand .t2{ color: rgba(0,0,0,.55); }
+
+.card{
+  background: #ffffff;
+  border: 1px solid rgba(0,0,0,.08);
+  border-radius: 18px;
+  padding: 18px;
+  box-shadow: 0 12px 34px rgba(0,0,0,.08);
+}
+.smallmuted{ opacity:.72; font-size: 13px; }
+hr{ border-color: rgba(0,0,0,.10); }
+
+.stButton>button[kind="primary"]{
+  background:#ef4444 !important;
+  border:1px solid rgba(239,68,68,.35) !important;
+}
+
+/* Sidebar nav radio */
+section[data-testid="stSidebar"] div[role="radiogroup"] label{
+  padding: .65rem .75rem !important;
+  border-radius: 12px !important;
+  border: 1px solid rgba(0,0,0,.08) !important;
+  background: rgba(0,0,0,.02) !important;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] label:hover{
+  border-color: rgba(0,0,0,.12) !important;
+  background: rgba(0,0,0,.03) !important;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] label p{
+  color: #1f2937 !important;
+  font-size: 15px !important;
+  font-weight: 650 !important;
+  margin: 0 !important;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] input{ display:none !important; }
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked){
+  background: rgba(239,68,68,.12) !important;
+  border-color: rgba(239,68,68,.45) !important;
+  box-shadow: 0 0 0 3px rgba(239,68,68,.14) !important;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p{
+  color: #111827 !important;
+}
+section[data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child{
+  display:none !important;
+}
+
+.pms-banner img{ border-radius: 18px; box-shadow: 0 12px 34px rgba(0,0,0,.08); }
+</style>
+"""
+
+
+def apply_theme() -> None:
+    mode = st.session_state.get("ui_theme", "dark")
+    collapsed = bool(st.session_state.get("sidebar_collapsed", False))
+    sb_w = "72px" if collapsed else "320px"
+
+    base = THEME_CSS_LIGHT if mode == "light" else THEME_CSS_DARK
+
+    # Dynamic (collapse + pro spacing) — IMPORTANT: no indentation (otherwise Streamlit shows it as code)
+    dyn = (
+        "<style>"
+        f"section[data-testid=\"stSidebar\"]{{ width:{sb_w} !important; min-width:{sb_w} !important; max-width:{sb_w} !important; }}"
+        ".block-container{ padding-top:2.4rem !important; }"
+        "h1,h2,h3{ margin-top:1.05rem !important; }"
+        ".stButton > button[kind=\"primary\"]{ background: rgba(239,68,68,1) !important; border-color: rgba(220,38,38,1) !important; }"
+    )
+
+    if collapsed:
+        dyn += (
+            "section[data-testid=\"stSidebar\"] [data-testid=\"stVerticalBlock\"]{ gap:6px !important; }"
+            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]{ padding:10px 6px !important; }"
+            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label p{ margin:0 !important; text-align:center !important; font-size:18px !important; }"
+        )
+
+    dyn += "</style>"
+    st.markdown(base + dyn, unsafe_allow_html=True)
+
+
+# =========================
+# CONTEXT
+# =========================
+@dataclass
+class AppCtx:
+    data_dir: str
+    season_lbl: str
+    owner: str
+    is_admin: bool
+    theme: str
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "DATA_DIR": self.data_dir,
+            "season_lbl": self.season_lbl,
+            "owner": self.owner,
+            "is_admin": self.is_admin,
+            "theme": self.theme,
+        }
+
+
+def _safe_image(path: str, width: Optional[int] = None) -> None:
     try:
-        logo_pool = os.path.join(DATA_DIR, "logo_pool.png")
-        if os.path.exists(logo_pool):
-            st.image(logo_pool, use_container_width=True)
+        if path and os.path.exists(path):
+            st.image(path, width=width)
     except Exception:
         pass
 
-    c1, c2 = st.columns([1.2, 2.2], vertical_alignment="center")
 
-    with c1:
-        owner = st.selectbox(
-            "Équipe (propriétaire)",
-            owners,
-            key="selected_owner",
+def _is_admin(owner: str) -> bool:
+    return (owner or "").strip() == "Whalers"
+
+
+# =========================
+# NAV
+# =========================
+TABS = [
+    ("🏠  Home", "home"),
+    ("🧑‍💼  GM", "gm"),
+    ("🏒  Joueurs", "joueurs"),
+    ("📋  Alignement", "alignement"),
+    ("🔁  Transactions", "transactions"),
+    ("🕘  Historique", "historique"),
+    ("🏆  Classement", "classement"),
+]
+
+
+def _queue_owner_sync(new_owner: str) -> None:
+    """Home -> Sidebar sync sans toucher owner_select après instanciation: on planifie + rerun."""
+    new_owner = str(new_owner or "").strip()
+    if not new_owner:
+        return
+    st.session_state["owner"] = new_owner
+    st.session_state["_pending_owner_select"] = new_owner
+    st.rerun()
+
+
+def _apply_pending_widget_values_before_widgets() -> None:
+    """Applique les 'pending' AVANT la création des widgets (sinon StreamlitAPIException)."""
+    if st.session_state.get("_pending_owner_select"):
+        st.session_state["owner_select"] = st.session_state["_pending_owner_select"]
+        st.session_state["home_owner_select"] = st.session_state["_pending_owner_select"]
+        st.session_state.pop("_pending_owner_select", None)
+
+
+def _sidebar_brand() -> None:
+    with st.sidebar:
+        collapsed = bool(st.session_state.get("sidebar_collapsed", False))
+
+        # Triangle toggle (like screenshot 3)
+        tri = "▶" if collapsed else "◀"
+        if st.button(tri, key="sb_toggle", help="Réduire / agrandir le menu", use_container_width=True):
+            st.session_state["sidebar_collapsed"] = not collapsed
+            st.rerun()
+
+        # --- Logos (TOP) ---
+        # In collapsed mode: all logos are same size as nav icons (pro)
+        icon_px = 30
+
+        # 1) Pool logo should be TOP (always)
+        if os.path.exists(BANNER):
+            if collapsed:
+                st.image(BANNER, width=icon_px)
+            else:
+                st.image(BANNER, use_container_width=True)
+
+        # 2) GM logo (avatar/personnage) — same height as icons when collapsed
+        if os.path.exists(APP_LOGO):
+            if collapsed:
+                st.image(APP_LOGO, width=icon_px)
+            else:
+                st.image(APP_LOGO, width=120)
+
+        # 3) Team logo (current selected owner)
+        owner_now = str(st.session_state.get("owner_select") or st.session_state.get("owner") or "Canadiens")
+        tlogo = _team_logo_path(owner_now)
+        if tlogo and os.path.exists(tlogo):
+            if collapsed:
+                st.image(tlogo, width=icon_px)
+            else:
+                # in expanded mode, this is shown next to team selector, so keep it small here
+                pass
+
+        if not collapsed:
+            st.markdown(
+                """
+                <div class="pms-sidebrand">
+                  <div>
+                    <div class="t1">Pool GM</div>
+                    <div class="t2">Gestion du pool (PMS)</div>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def sidebar_nav() -> str:
+    with st.sidebar:
+        _sidebar_brand()
+
+        collapsed = bool(st.session_state.get("sidebar_collapsed", False))
+
+        # Saison (hidden when collapsed)
+        if not collapsed:
+            st.selectbox(
+                "Saison",
+                options=[DEFAULT_SEASON, "2024-2025", "2023-2024"],
+                key="season_lbl",
+            )
+
+        st.markdown("### Navigation" if not collapsed else "")
+
+        # Build tabs in requested order + Admin only when Whalers selected
+        owner_now = str(st.session_state.get("owner_select") or st.session_state.get("owner") or "Canadiens")
+        tabs = list(TABS)
+        if _is_admin(owner_now):
+            tabs.append(("⚙️  Admin", "admin"))
+
+        labels = [t[0] for t in tabs]
+
+        cur = st.session_state.get("active_tab", labels[0])
+
+
+        # When collapsed: show icon-only (more pro + gives more space, like your screenshot)
+
+        if collapsed:
+
+            icon_map = {lab.split(" ", 1)[0]: lab for lab in labels}  # "🏠" -> "🏠  Home"
+
+            icon_opts = list(icon_map.keys())
+
+            cur_icon = cur.split(" ", 1)[0] if isinstance(cur, str) and " " in cur else (cur if cur in icon_map else icon_opts[0])
+
+            try:
+
+                default_idx = icon_opts.index(cur_icon)
+
+            except Exception:
+
+                default_idx = 0
+
+
+            picked_icon = st.radio(
+
+                "Navigation",
+
+                options=icon_opts,
+
+                index=default_idx,
+
+                key="nav_radio",
+
+                label_visibility="collapsed",
+
+            )
+
+            active = icon_map.get(picked_icon, labels[0])
+
+        else:
+
+            default_idx = labels.index(cur) if cur in labels else 0
+
+            active = st.radio(
+
+                "Navigation",
+
+                options=labels,
+
+                index=default_idx,
+
+                key="nav_radio",
+
+                label_visibility="collapsed",
+
+            )
+
+
+        st.session_state["active_tab"] = active
+        st.markdown("---" if not collapsed else "")
+
+        # Mon équipe (avec logo à droite)
+        if not collapsed:
+            st.markdown("### Mon équipe")
+            c1, c2 = st.columns([4, 1], gap="small")
+            with c1:
+                st.selectbox(
+                    "Mon équipe",
+                    options=POOL_TEAMS,
+                    key="owner_select",
+                    format_func=lambda x: TEAM_LABELS.get(x, x),
+                    label_visibility="collapsed",
+                )
+            with c2:
+                _safe_image(_team_logo_path(st.session_state.get("owner_select", "Whalers")), width=34)
+        else:
+            # collapsed: show only team logo
+            _safe_image(_team_logo_path(owner_now), width=34)
+
+        # Canonical owner value (no mutation of owner_select here)
+        st.session_state["owner"] = st.session_state.get("owner_select", owner_now)
+
+                # spacer to push theme toggle lower when collapsed
+        if collapsed:
+            st.markdown("<div style='height: 55vh'></div>", unsafe_allow_html=True)
+
+        # Theme toggle (only here). Keep even in collapsed.
+        is_light = st.toggle(
+            "☀️" if collapsed else "☀️ Mode clair",
+            value=(st.session_state.get("ui_theme", "dark") == "light"),
+            key="ui_theme_toggle_sidebar",
+            help="Mode clair/sombre (☀️/🌙)",
         )
+        st.session_state["ui_theme"] = "light" if is_light else "dark"
 
-    with c2:
-        # Team logo (assets/previews puis data)
-        fn_candidates = [
-            f"{owner}_Logo.png",
-            f"{owner}E_Logo.png",
-            f"{owner}_logo.png",
-            f"{owner}.png",
-            f"{owner.replace(' ', '_')}_Logo.png",
-            f"{owner.replace(' ', '_')}E_Logo.png",
-        ]
-        shown = False
-        for fn in fn_candidates:
-            p = path_team_logo(fn)
-            if p:
-                try:
-                    st.image(p, width=130)
-                    shown = True
-                    break
-                except Exception:
-                    pass
-        if not shown:
-            st.caption("Logo équipe introuvable (ok).")
 
-    st.success(f"✅ Équipe sélectionnée: **{owner}**")
-    # ----------------------------
-    # 🚨 Alerte saison (Whalers seulement)
-    # ----------------------------
-    data_dir = _data_dir(ctx)
-    ss = _load_season_state(data_dir)
-    needs = bool(ss.get("needs_master_rebuild"))
-    if owner == "Whalers" and needs:
-        cur = str(ss.get("current_season") or st.session_state.get("season") or "").strip() or "nouvelle saison"
-        st.warning(
-            f"⚠️ Nouvelle saison détectée (**{cur}**) — tu dois reconstruire le master.",
-            icon="⚠️",
-        )
-        st.markdown("👉 **Clique ici :** Admin → **4️⃣ Master + Audit** → bouton rouge **Construire Master + Audit**.")
-        if st.button("🛠️ J'ai compris — je vais dans Admin (Étape 4)", use_container_width=True, key="home_go_admin_step4"):
-            # On ne peut pas forcer la sélection d’un onglet Streamlit, mais on garde un flag pour que l'Admin affiche une bannière.
-            st.session_state["admin_hint_step"] = 4
-            st.success("✅ OK. Va maintenant dans l’onglet **Admin** puis clique **4️⃣ Master + Audit**.")
+    return active
+
+# =========================
+# RENDERERS IMPORT
+# =========================
+def _import_tabs():
+    try:
+        from tabs import home, joueurs, alignement, transactions, gm, historique, classement, admin
+        return {
+            "home": home,
+            "joueurs": joueurs,
+            "alignement": alignement,
+            "transactions": transactions,
+            "gm": gm,
+            "historique": historique,
+            "classement": classement,
+            "admin": admin,
+        }
+    except Exception:
+        st.error("Impossible d'importer les modules dans /tabs/.")
+        st.code(traceback.format_exc())
+        st.stop()
+
+
+# =========================
+# HOME
+# =========================
+def _render_home(ctx: AppCtx) -> None:
+    st.title("🏠 Home")
+    st.markdown('<div class="smallmuted">Home reste clean — aucun bloc Admin ici.</div>', unsafe_allow_html=True)
+    st.markdown("")
+
+    # Card selection (same layout as screenshot)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### 🏒 Sélection d'équipe")
     st.caption("Cette sélection alimente Alignement / GM / Transactions (même clé session_state).")
 
-    st.divider()
+    c1, c2 = st.columns([3, 1], vertical_alignment="center")
+    with c1:
+        picked = st.selectbox(
+            "Équipe (propriétaire)",
+            options=POOL_TEAMS,
+            index=POOL_TEAMS.index(ctx.owner) if ctx.owner in POOL_TEAMS else 0,
+            key="home_owner_select",
+            format_func=lambda x: TEAM_LABELS.get(x, x),
+        )
+        # Home -> sidebar sync via pending + rerun (safe)
+        if picked != ctx.owner:
+            _queue_owner_sync(picked)
 
-    # ----------------------------
-    # Debug logos (optionnel)
-    # ----------------------------
-    with st.expander("🔎 Debug — chemins de logos (optionnel)", expanded=False):
-        st.caption("Résolution: assets/previews puis data.")
-        for fn in ["Whalers_Logo.png","Nordiques_Logo.png","Predateurs_Logo.png","Cracheurs_Logo.png","Canadiens_Logo.png","Red_Wings_Logo.png"]:
-            p = path_team_logo(fn)
-            if p:
-                st.write(f"- {fn} → {p}")
+    with c2:
+        logo = TEAM_LOGO.get(ctx.owner, "")
+        if logo and os.path.exists(logo):
+            st.image(logo, width=92)
+
+    st.success(f"✅ Équipe sélectionnée: **{TEAM_LABELS.get(ctx.owner, ctx.owner)}**")
+    st.markdown(f"**Saison:** {ctx.season_lbl}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # Banner below card (proportions)
+    if os.path.exists(BANNER):
+        st.markdown('<div class="pms-banner">', unsafe_allow_html=True)
+        st.image(BANNER, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+# =========================
+# MAIN
+# =========================
+def main() -> None:
+    # Defaults
+    st.session_state.setdefault("ui_theme", "dark")
+    st.session_state.setdefault("season_lbl", DEFAULT_SEASON)
+    st.session_state.setdefault("active_tab", "🏠  Home")
+    st.session_state.setdefault("owner", "Whalers")
+    st.session_state.setdefault("owner_select", st.session_state.get("owner", "Whalers"))
+    st.session_state.setdefault("home_owner_select", st.session_state.get("owner", "Whalers"))
+
+    # Apply any pending widget sync BEFORE widgets are instantiated
+    _apply_pending_widget_values_before_widgets()
+
+    # Theme injection (once)
+    apply_theme()
+
+    # Sidebar
+    active_label = sidebar_nav()
+
+    # Build ctx
+    owner = st.session_state.get("owner") or "Whalers"
+    season = st.session_state.get("season_lbl") or DEFAULT_SEASON
+    ctx = AppCtx(
+        data_dir=DATA_DIR,
+        season_lbl=str(season),
+        owner=str(owner),
+        is_admin=_is_admin(owner),
+        theme=st.session_state.get("ui_theme", "dark"),
+    )
+
+    # -------------------------------------------------
+    # 🔁 Backups AUTO (Drive) — midi & minuit (Whalers)
+    # -------------------------------------------------
+    try:
+        if scheduled_backup_tick:
+            did, msg = scheduled_backup_tick(DATA_DIR, str(season), str(owner), show_debug=False)
+        else:
+            did, msg = (False, "backup_drive module missing")
+        if did:
+            st.toast("✅ Backup Drive auto fait (midi/minuit).", icon="✅")
+    except Exception:
+        # Ne jamais bloquer l’app si Drive est down
+        pass
+
+
+    # Route
+    modules = _import_tabs()
+    key = dict(TABS).get(active_label, "home")
+
+    try:
+        if key == "home":
+            _render_home(ctx)
+        elif key == "admin" and not ctx.is_admin:
+            st.title("🛠️ Admin")
+            st.warning("Accès admin requis.")
+        else:
+            mod = modules.get(key)
+            if mod is None:
+                st.error(f"Module introuvable: tabs/{key}.py")
             else:
-                st.write(f"- {fn} → (introuvable)")
+                if hasattr(mod, "render"):
+                    try:
+                        mod.render(ctx.as_dict())
+                    except TypeError:
+                        mod.render(ctx)
+                else:
+                    st.error(f"tabs/{key}.py n'a pas de fonction render(ctx).")
+    except Exception:
+        st.error("Une erreur a été détectée (évite l'écran noir).")
+        st.code(traceback.format_exc())
 
 
-
-
-
+if __name__ == "__main__":
+    main()
