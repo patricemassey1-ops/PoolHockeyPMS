@@ -19,6 +19,14 @@ def _load_season_state(data_dir: str) -> dict:
     return {}
 
 def render(ctx: dict) -> None:
+    # 🏟️ logo_pool tout en haut de la page (Home)
+    try:
+        logo_pool = os.path.join(DATA_DIR, "logo_pool.png") if 'DATA_DIR' in globals() else os.path.join("data", "logo_pool.png")
+        if os.path.exists(logo_pool):
+            st.image(logo_pool, use_container_width=True)
+    except Exception:
+        pass
+
     st.header("🏠 Home")
     st.caption("Choisis ton équipe ci-dessous (tout le reste suit automatiquement).")
 
@@ -121,4 +129,3 @@ def render(ctx: dict) -> None:
                 st.write(f"- {fn} → {p}")
             else:
                 st.write(f"- {fn} → (introuvable)")
-
