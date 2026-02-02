@@ -35,6 +35,24 @@ st.set_page_config(
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 DEFAULT_SEASON = "2025-2026"
 
+
+@dataclass
+class AppCtx:
+    data_dir: str
+    season_lbl: str
+    owner: str
+    is_admin: bool
+    theme: str = "dark"
+
+    def as_dict(self) -> dict:
+        return {
+            "data_dir": self.data_dir,
+            "season_lbl": self.season_lbl,
+            "owner": self.owner,
+            "is_admin": self.is_admin,
+            "theme": self.theme,
+        }
+
 POOL_TEAMS = ["Whalers", "Red_Wings", "Predateurs", "Nordiques", "Cracheurs", "Canadiens"]
 
 TEAM_LABELS = {
@@ -263,42 +281,97 @@ def apply_theme() -> None:
 
     base = THEME_CSS_LIGHT if mode == "light" else THEME_CSS_DARK
 
-    # Dynamic (collapse + pro spacing) — IMPORTANT: no indentation (otherwise Streamlit shows it as code)
+    # Pro red (like your screenshot)
+    red = "#ef4444"
+    red_border = "#dc2626"
+
+    # Wow background accents (subtle)
+    page_bg = "radial-gradient(1200px 600px at 70% 10%, rgba(59,130,246,0.22), transparent 55%), radial-gradient(900px 500px at 15% 0%, rgba(239,68,68,0.18), transparent 55%)"
+    sidebar_bg_dark = "linear-gradient(180deg, rgba(18,24,38,0.92), rgba(10,14,22,0.92))"
+    sidebar_bg_light = "linear-gradient(180deg, rgba(248,250,252,0.95), rgba(241,245,249,0.95))"
+
+    # Global polish
     dyn = (
         "<style>"
+        f"section.main {{ background:{page_bg}; }}"
         f"section[data-testid=\"stSidebar\"]{{ width:{sb_w} !important; min-width:{sb_w} !important; max-width:{sb_w} !important; }}"
+        # Sidebar glass background
+        f"section[data-testid=\"stSidebar\"] > div{{ background: {(sidebar_bg_light if mode=='light' else sidebar_bg_dark)} !important; backdrop-filter: blur(10px) !important; }}"
+        # Divider line between sidebar/content
+        "section[data-testid=\"stSidebar\"]{ border-right: 1px solid rgba(255,255,255,0.10) !important; }"
         ".block-container{ padding-top:2.2rem !important; }"
         "h1,h2,h3{ margin-top:1.0rem !important; }"
-        "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]{  transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease, background .12s ease !important; "
-        "  border-radius:14px !important; border:1px solid rgba(255,255,255,0.10) !important;"
-        "  background: rgba(255,255,255,0.04) !important;"
-        "}"
-        "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]:hover{  transform: scale(1.04) !important; "
-        "  border-color: rgba(239,68,68,0.55) !important;"
-        "}"
-        "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]:has(input:checked){"
-        "  background: rgba(239,68,68,1) !important;"
-        "  border-color: rgba(239,68,68,1) !important;"
-        "  box-shadow: 0 10px 24px rgba(239,68,68,0.30) !important;"
-        "}"
-        ".stButton > button[kind=\"primary\"]{ background: rgba(239,68,68,1) !important; border-color: rgba(220,38,38,1) !important; }"
+
+        # Primary buttons everywhere
+        f".stButton > button[kind=\"primary\"]{{ background:{red} !important; border-color:{red_border} !important; }}"
+        f".stButton > button[kind=\"primary\"]:hover{{ filter:brightness(0.98) !important; transform: translateY(-1px) !important; }}"
+
+        # Micro-animations
+        "@keyframes pmsGlow { 0%{ box-shadow:0 0 0 rgba(239,68,68,0.0);} 100%{ box-shadow:0 14px 28px rgba(239,68,68,0.28);} }"
         "</style>"
     )
 
+    # WOW collapsed nav buttons (icon-only) — premium glass pills
     if collapsed:
         dyn += (
             "<style>"
+            "section[data-testid=\"stSidebar\"] div.stButton > button{"
+            "  width:46px !important; height:46px !important; min-width:46px !important;"
+            "  padding:0 !important; margin:7px auto !important;"
+            "  border-radius:14px !important;"
+            "  border: 1px solid rgba(255,255,255,0.12) !important;"
+            "  background: rgba(255,255,255,0.05) !important;"
+            "  backdrop-filter: blur(10px) !important;"
+            "  transition: transform 120ms ease, box-shadow 150ms ease, border-color 150ms ease, background 150ms ease !important;"
+            "}"
+            "section[data-testid=\"stSidebar\"] div.stButton > button:hover{"
+            "  border-color: rgba(239,68,68,0.55) !important;"
+            "  background: rgba(255,255,255,0.07) !important;"
+            "  transform: translateY(-1px) scale(1.03) !important;"
+            "  box-shadow: 0 10px 22px rgba(0,0,0,0.28) !important;"
+            "}"
+
+            # Active (primary) already red — add glow + subtle highlight
+            f"section[data-testid=\"stSidebar\"] div.stButton > button[kind=\"primary\"]{{"
+            f"  box-shadow: 0 14px 28px rgba(239,68,68,0.28) !important;"
+            f"  animation: pmsGlow 0.22s ease-out forwards;"
+            f"}}"
+            f"section[data-testid=\"stSidebar\"] div.stButton > button[kind=\"primary\"]::after{{"
+            f"  content:''; position:absolute; inset:0; border-radius:14px;"
+            f"  box-shadow: inset 0 1px 0 rgba(255,255,255,0.25);"
+            f"}}"
+
+            # Make the triangle button feel like a header control
+            "section[data-testid=\"stSidebar\"] div.stButton:first-of-type > button{"
+            "  height:38px !important; width:46px !important;"
+            "  border-radius: 12px !important;"
+            "  background: rgba(255,255,255,0.06) !important;"
+            "}"
+
+            # Ensure icons are same visual size
+            "section[data-testid=\"stSidebar\"] div.stButton > button > div{"
+            "  font-size: 20px !important;"
+            "}"
+            "</style>"
+        )
+    else:
+        # Expanded mode: radio list looks premium too
+        dyn += (
+            "<style>"
             "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]{"
-            "  width:46px !important; min-width:46px !important; max-width:46px !important;"
-            "  margin:6px auto !important; padding:10px 0 !important;"
+            "  border-radius:14px !important; border:1px solid rgba(255,255,255,0.10) !important;"
+            "  background: rgba(255,255,255,0.04) !important;"
+            "  transition: border-color 150ms ease, transform 120ms ease, box-shadow 150ms ease !important;"
             "}"
-            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"] > div{"
-            "  width:100% !important; display:flex !important; justify-content:center !important; align-items:center !important;"
+            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]:hover{"
+            "  border-color: rgba(239,68,68,0.55) !important;"
+            "  transform: translateY(-1px) !important;"
+            "  box-shadow: 0 10px 22px rgba(0,0,0,0.20) !important;"
             "}"
-            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label p{"
-            "  margin:0 !important; text-align:center !important;"
-            "  font-size:20px !important; line-height:20px !important;"
-            "  width:20px !important; height:20px !important; overflow:hidden !important;"
+            "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]:has(input:checked){"
+            f"  background: {red} !important;"
+            f"  border-color: {red} !important;"
+            "  box-shadow: 0 14px 28px rgba(239,68,68,0.22) !important;"
             "}"
             "</style>"
         )
@@ -319,27 +392,6 @@ def _is_admin(owner: str) -> bool:
 
 
 # =========================
-
-# =========================
-# CONTEXT
-# =========================
-@dataclass
-class AppCtx:
-    data_dir: str
-    season_lbl: str
-    owner: str
-    is_admin: bool
-    theme: str
-
-    def as_dict(self) -> Dict[str, Any]:
-        return {
-            "DATA_DIR": self.data_dir,
-            "season_lbl": self.season_lbl,
-            "owner": self.owner,
-            "is_admin": self.is_admin,
-            "theme": self.theme,
-        }
-
 # NAV
 # =========================
 TABS = [
@@ -375,20 +427,18 @@ def _sidebar_brand() -> None:
     with st.sidebar:
         collapsed = bool(st.session_state.get("sidebar_collapsed", False))
 
-        # Triangle toggle (mini button)
         tri = "▶" if collapsed else "◀"
         if st.button(tri, key="sb_toggle", help="Réduire / agrandir le menu", use_container_width=True):
             st.session_state["sidebar_collapsed"] = not collapsed
             st.rerun()
 
-        # Uniform icon size in collapsed mode
         icon_px = 30
 
         # GM logo only (sidebar)
         if os.path.exists(APP_LOGO):
             st.image(APP_LOGO, width=(icon_px if collapsed else 120))
 
-        # Team logo ONLY in collapsed (avoid duplicate)
+        # Team logo only when collapsed (avoid duplicates)
         owner_now = str(st.session_state.get("owner_select") or st.session_state.get("owner") or "Canadiens")
         tlogo = _team_logo_path(owner_now)
         if collapsed and tlogo and os.path.exists(tlogo):
@@ -411,10 +461,8 @@ def _sidebar_brand() -> None:
 def sidebar_nav() -> str:
     with st.sidebar:
         _sidebar_brand()
-
         collapsed = bool(st.session_state.get("sidebar_collapsed", False))
 
-        # Saison (hide selector when collapsed)
         if not collapsed:
             st.selectbox(
                 "Saison",
@@ -422,8 +470,8 @@ def sidebar_nav() -> str:
                 key="season_lbl",
             )
 
-        # Build tabs in requested order + Admin only when Whalers selected
         owner_now = str(st.session_state.get("owner_select") or st.session_state.get("owner") or "Canadiens")
+
         tabs = list(TABS)
         if _is_admin(owner_now):
             tabs.append(("⚙️  Admin", "admin"))
@@ -431,27 +479,33 @@ def sidebar_nav() -> str:
         labels = [t[0] for t in tabs]
         cur = str(st.session_state.get("active_tab", labels[0]) or labels[0])
 
-        # ICON-ONLY in collapsed mode (uniform size)
         if collapsed:
-            icons = [lab.split(" ", 1)[0] for lab in labels]  # "🏠"
-            try:
-                cur_icon = cur.split(" ", 1)[0]
-                default_idx = icons.index(cur_icon) if cur_icon in icons else 0
-            except Exception:
-                default_idx = 0
-
-            pick = st.radio("Navigation", options=icons, index=default_idx, key="nav_radio", label_visibility="collapsed")
-            active = labels[icons.index(pick)]
+            active = cur if cur in labels else labels[0]
+            for lab in labels:
+                icon = lab.split(" ", 1)[0]
+                is_active = (lab == active)
+                if st.button(
+                    icon,
+                    key=f"nav_btn_{lab}",
+                    help=lab,
+                    type=("primary" if is_active else "secondary"),
+                    use_container_width=True,
+                ):
+                    st.session_state["active_tab"] = lab
+                    st.rerun()
         else:
             default_idx = labels.index(cur) if cur in labels else 0
-            active = st.radio("Navigation", options=labels, index=default_idx, key="nav_radio", label_visibility="collapsed")
+            active = st.radio(
+                "Navigation",
+                options=labels,
+                index=default_idx,
+                key="nav_radio",
+                label_visibility="collapsed",
+            )
+            st.session_state["active_tab"] = active
 
-        st.session_state["active_tab"] = active
-
-        st.markdown("---" if not collapsed else "")
-
-        # Mon équipe (logo à droite). En mode réduit: pas de doublon (logo déjà en haut).
         if not collapsed:
+            st.markdown("---")
             st.markdown("### Mon équipe")
             c1, c2 = st.columns([4, 1], gap="small")
             with c1:
@@ -467,11 +521,11 @@ def sidebar_nav() -> str:
 
         st.session_state["owner"] = st.session_state.get("owner_select", owner_now)
 
-        # Spacer to push light mode to bottom in collapsed
         if collapsed:
-            st.markdown("<div style='height: 55vh;'></div>", unsafe_allow_html=True)
+            st.markdown("<div style='height: 38vh;'></div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div style='height: 2vh;'></div>", unsafe_allow_html=True)
 
-        # Light mode toggle (bottom)
         is_light = st.toggle(
             "☀️" if collapsed else "☀️ Mode clair",
             value=(st.session_state.get("ui_theme", "dark") == "light"),
@@ -480,7 +534,7 @@ def sidebar_nav() -> str:
         )
         st.session_state["ui_theme"] = "light" if is_light else "dark"
 
-    return active
+    return st.session_state.get("active_tab", labels[0])  # type: ignore
 
 # =========================
 # RENDERERS IMPORT
