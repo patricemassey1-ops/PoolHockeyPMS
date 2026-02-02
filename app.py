@@ -269,11 +269,11 @@ def apply_theme() -> None:
         f"section[data-testid=\"stSidebar\"]{{ width:{sb_w} !important; min-width:{sb_w} !important; max-width:{sb_w} !important; }}"
         ".block-container{ padding-top:2.2rem !important; }"
         "h1,h2,h3{ margin-top:1.0rem !important; }"
-        "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]{"
+        "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]{  transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease, background .12s ease !important; "
         "  border-radius:14px !important; border:1px solid rgba(255,255,255,0.10) !important;"
         "  background: rgba(255,255,255,0.04) !important;"
         "}"
-        "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]:hover{"
+        "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]:hover{  transform: scale(1.04) !important; "
         "  border-color: rgba(239,68,68,0.55) !important;"
         "}"
         "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label[data-baseweb=\"radio\"]:has(input:checked){"
@@ -297,8 +297,8 @@ def apply_theme() -> None:
             "}"
             "section[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label p{"
             "  margin:0 !important; text-align:center !important;"
-            "  font-size:18px !important; line-height:18px !important;"
-            "  width:18px !important; height:18px !important; overflow:hidden !important;"
+            "  font-size:20px !important; line-height:20px !important;"
+            "  width:20px !important; height:20px !important; overflow:hidden !important;"
             "}"
             "</style>"
         )
@@ -319,6 +319,27 @@ def _is_admin(owner: str) -> bool:
 
 
 # =========================
+
+# =========================
+# CONTEXT
+# =========================
+@dataclass
+class AppCtx:
+    data_dir: str
+    season_lbl: str
+    owner: str
+    is_admin: bool
+    theme: str
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "DATA_DIR": self.data_dir,
+            "season_lbl": self.season_lbl,
+            "owner": self.owner,
+            "is_admin": self.is_admin,
+            "theme": self.theme,
+        }
+
 # NAV
 # =========================
 TABS = [
@@ -448,7 +469,7 @@ def sidebar_nav() -> str:
 
         # Spacer to push light mode to bottom in collapsed
         if collapsed:
-            st.markdown("<div style='height: 35vh;'></div>", unsafe_allow_html=True)
+            st.markdown("<div style='height: 55vh;'></div>", unsafe_allow_html=True)
 
         # Light mode toggle (bottom)
         is_light = st.toggle(
