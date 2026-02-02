@@ -389,6 +389,60 @@ section.main .block-container {{
         unsafe_allow_html=True,
     )
 
+    # pms_shimmer_css: Apple micro-press + glass shimmer
+    st.markdown(
+        """<style>
+        /* === Apple Micro Press (click) === */
+        section[data-testid="stSidebar"] .pms-item:active,
+        section[data-testid="stSidebar"] div.stButton > button:active {
+          transform: translateY(0px) scale(0.98) !important;
+        }
+
+        /* === Apple Glass Shimmer === */
+        @keyframes pmsShimmer {
+          0% { transform: translateX(-120%) rotate(12deg); opacity: 0.0; }
+          35% { opacity: 0.35; }
+          100% { transform: translateX(220%) rotate(12deg); opacity: 0.0; }
+        }
+
+        /* Shimmer overlay on hover for nav items */
+        .pms-item { overflow: hidden; }
+        .pms-item::after {
+          content: "";
+          position: absolute;
+          inset: -40% -60%;
+          background: linear-gradient(90deg,
+            rgba(255,255,255,0.00) 0%,
+            rgba(255,255,255,0.08) 40%,
+            rgba(255,255,255,0.18) 50%,
+            rgba(255,255,255,0.08) 60%,
+            rgba(255,255,255,0.00) 100%);
+          transform: translateX(-140%) rotate(12deg);
+          opacity: 0;
+          pointer-events: none;
+        }
+        .pms-item:hover::after { animation: pmsShimmer 650ms ease-out; }
+
+        /* Apply shimmer to Streamlit buttons in sidebar (expanded mode) */
+        section[data-testid="stSidebar"] div.stButton > button { position: relative !important; overflow: hidden !important; }
+        section[data-testid="stSidebar"] div.stButton > button::after {
+          content: "";
+          position: absolute;
+          inset: -40% -60%;
+          background: linear-gradient(90deg,
+            rgba(255,255,255,0.00) 0%,
+            rgba(255,255,255,0.07) 40%,
+            rgba(255,255,255,0.16) 50%,
+            rgba(255,255,255,0.07) 60%,
+            rgba(255,255,255,0.00) 100%);
+          transform: translateX(-140%) rotate(12deg);
+          opacity: 0;
+          pointer-events: none;
+        }
+        section[data-testid="stSidebar"] div.stButton > button:hover::after { animation: pmsShimmer 650ms ease-out; }
+        </style>""",
+        unsafe_allow_html=True,
+    )
 
 def _set_sidebar_mode(collapsed: bool):
     # In Streamlit, easiest is to set CSS vars on :root
