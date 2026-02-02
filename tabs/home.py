@@ -96,3 +96,4 @@ def render(ctx: dict) -> None:
             st.image(str(p), width=64)
 
     st.success(f"✅ Équipe sélectionnée: {st.session_state.get('owner')}")
+
