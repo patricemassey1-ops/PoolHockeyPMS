@@ -1,19 +1,23 @@
 import streamlit as st
 
-THEME_CSS = r'''
-<style>
-.nowrap { white-space: nowrap; }
-.right { text-align: right; }
-.muted { color: rgba(120,120,120,0.95); font-size: 0.90rem; }
-.small { font-size: 0.92rem; }
-.card { padding: 10px 12px; border: 1px solid rgba(120,120,120,0.25); border-radius: 14px; }
-div.stButton > button { padding: 0.35rem 0.6rem; border-radius: 10px; }
-</style>
-'''
-
 def apply_theme() -> None:
-    # One single injection per run
-    if st.session_state.get("_theme_injected"):
+    """
+    Theme is driven by app.py (single injection). This file keeps only utility classes.
+    """
+    if st.session_state.get("_theme_utils_injected"):
         return
-    st.markdown(THEME_CSS, unsafe_allow_html=True)
-    st.session_state["_theme_injected"] = True
+
+    st.markdown(
+        r"""
+        <style>
+          .nowrap { white-space: nowrap; }
+          .right { text-align: right; }
+          .muted { color: rgba(180,190,210,0.75); font-size: 0.92rem; }
+          .small { font-size: 0.92rem; }
+          .card { padding: 10px 12px; border: 1px solid rgba(255,255,255,0.10); border-radius: 14px; background: rgba(255,255,255,0.04); }
+          div.stButton > button { padding: 0.40rem 0.70rem; border-radius: 12px; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.session_state["_theme_utils_injected"] = True
