@@ -124,56 +124,36 @@ def _pick_existing(base_dir: Path, candidates: list[str]) -> Optional[Path]:
     return None
 
 
-def _team_logo_path(team_key: str) -> Optional[Path]:
-    cand = TEAM_LOGO_CANDIDATES.get(team_key) or []
-    p = _pick_existing(ASSETS_DIR, cand)
-    if p:
+def _team_logo_path(team: str) -> Path:
+    """Return ORIGINAL team logo (keep white background)."""
+    team = str(team or "").strip()
+    cands = TEAM_LOGO_CANDIDATES.get(team, [])
+    for fn in cands:
+        p = ASSETS_DIR / fn
+        if p.exists():
+            return p
+    p = ASSETS_DIR / f"{team}_Logo.png"
+    return p if p.exists() else Path("")
+
+
+def _emoji_path(slug: str) -> Path:
+    slug = str(slug or "").strip()
+    fn = EMOJI_ICON.get(slug, "")
+    p = (ASSETS_DIR / fn) if fn else Path("")
+    if not p.exists():
+        return p
+    # Only the cup icon tends to have a white box — remove it for that one only.
+    if fn == "emoji_coupe.png":
         return _transparent_copy(p)
-    # fallback: accept any file matching "{team}*.png"
-    try:
-        hits = sorted(ASSETS_DIR.glob(f"{team_key}*Logo*.png"))
-        if hits:
-            return _transparent_copy(hits[0])
-    except Exception:
-        pass
-    return None
+    return p
 
 
-def _emoji_path(slug: str) -> Optional[Path]:
-    fn = EMOJI_FILES.get(slug)
-    if not fn:
-        return None
-    p = ASSETS_DIR / fn
-    return _transparent_copy(p) if p.exists() else None
+def _gm_logo_path() -> Path:
+    """Return ORIGINAL GM logo (keep its background)."""
+    p = DATA_DIR / "gm_logo.png"
+    return p if p.exists() else Path("")
 
 
-def _gm_logo_path() -> Optional[Path]:
-    return _transparent_copy(GM_LOGO) if GM_LOGO.exists() else None
-
-
-@dataclass
-class NavItem:
-    slug: str
-    label: str
-    emoji_slug: str  # key in EMOJI_FILES
-
-
-# Navigation order requested
-NAV_ORDER = [
-    NavItem("home", "Home", "home"),
-    NavItem("gm", "GM", "gm"),
-    NavItem("joueurs", "Joueurs", "joueurs"),
-    NavItem("alignement", "Alignement", "alignement"),
-    NavItem("transactions", "Transactions", "transactions"),
-    NavItem("historique", "Historique", "historique"),
-    NavItem("classement", "Classement", "classement"),
-    NavItem("admin", "Admin", "historique"),  # icon fallback (admin has no emoji file)
-]
-
-
-# ----------------------------
-# CSS (Apple-like)
-# ----------------------------
 def _apply_css():
     """
     CSS global (Apple glass + navigation). IMPORTANT:
@@ -371,7 +351,7 @@ def _set_sidebar_mode(collapsed: bool):
         st.markdown(
             """
 <style>
-:root { --pms-sb-w: 76px; --pms-ico: 54px; --pms-ico-c: 44px; --pms-gm: 46px; }
+:root { --pms-sb-w: 76px; --pms-ico: 54px; --pms-ico-c: 44px; --pms-gm: 120px; }
 section[data-testid="stSidebar"] { padding-left: 4px !important; padding-right: 4px !important; }
 </style>
 """,
@@ -384,7 +364,7 @@ section[data-testid="stSidebar"] { padding-left: 4px !important; padding-right: 
         st.markdown(
             """
 <style>
-:root { --pms-sb-w: 320px; --pms-ico: 54px; --pms-ico-c: 44px; --pms-gm: 160px; }
+:root { --pms-sb-w: 320px; --pms-ico: 54px; --pms-ico-c: 44px; --pms-gm: 120px; }
 </style>
 """,
             unsafe_allow_html=True,
@@ -549,13 +529,24 @@ def _set_query_tab(slug: str) -> None:
 # ----------------------------
 # Page renders
 # ----------------------------
+def _sync_owner_from_home():
+    # Callback: runs before script body on rerun (safe with Streamlit widgets)
+    try:
+        val = st.session_state.get("owner_select")
+        if val:
+            st.session_state["owner"] = val
+    except Exception:
+        pass
+
 def _render_home(owner_key: str):
     # ✅ Pool logo MUST be above the page title
     if POOL_LOGO.exists():
-        st.image(str(_transparent_copy(POOL_LOGO)), width=150)
+        c1, c2, c3 = st.columns([1, 4, 1])
+        with c2:
+            st.image(str(POOL_LOGO), use_container_width=True)
 
     st.title("🏠 Home")
-    st.caption("Home reste clean — aucun bloc Admin ici.")
+    st.caption("Choisis ton équipe ci-dessous.")
 
     st.subheader("🏒 Sélection d'équipe")
     st.caption("Cette sélection alimente Alignement / GM / Transactions (même clé session_state).")
@@ -563,24 +554,19 @@ def _render_home(owner_key: str):
     colA, colB = st.columns([5, 1.2])
     with colA:
         idx = POOL_TEAMS.index(owner_key) if owner_key in POOL_TEAMS else 0
-        new_owner = st.selectbox("Équipe (propriétaire)", POOL_TEAMS, index=idx, key="owner_select")
+        new_owner = st.selectbox("Équipe (propriétaire)", POOL_TEAMS, index=idx, key="owner_select", on_change=_sync_owner_from_home)
     with colB:
         p = _team_logo_path(new_owner)
         if p and p.exists():
-            st.image(str(p), width=54)
+            st.image(str(p), width=72)
 
     st.success(f"✅ Équipe sélectionnée: {TEAM_LABEL.get(new_owner, new_owner)}")
-    st.write(f"Saison: {st.session_state.get('season', '2025-2026')}")
-
+    
     # Optional banner in center (kept if you want)
     banner = DATA_DIR / "nhl_teams_header_banner.png"
     if banner.exists():
         st.image(str(_transparent_copy(banner)), use_container_width=True)
-
-    st.session_state["owner"] = new_owner
-
-
-def _safe_import_tabs() -> Dict[str, Any]:
+    # owner is synced via callbackdef _safe_import_tabs() -> Dict[str, Any]:
     """
     IMPORTANT:
     - Avoid importing tabs/__init__.py that imports everything.
@@ -646,9 +632,7 @@ def main():
 
     # Sidebar: season + nav
     with st.sidebar:
-        st.selectbox("Saison", ["2025-2026"], index=0, key="season_select", label_visibility="visible")
-
-    _sidebar_nav(owner, active)
+        _sidebar_nav(owner, active)
 
     # Prevent non-whalers from accessing Admin
     if active == "admin" and owner != "Whalers":
