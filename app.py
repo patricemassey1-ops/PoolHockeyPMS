@@ -124,20 +124,15 @@ def _pick_existing(base_dir: Path, candidates: list[str]) -> Optional[Path]:
     return None
 
 
-def _team_logo_path(team_key: str) -> Optional[Path]:
-    cand = TEAM_LOGO_CANDIDATES.get(team_key) or []
-    p = _pick_existing(ASSETS_DIR, cand)
-    if p:
-        return _transparent_copy(p)
-    # fallback: accept any file matching "{team}*.png"
-    try:
-        hits = sorted(ASSETS_DIR.glob(f"{team_key}*Logo*.png"))
-        if hits:
-            return _transparent_copy(hits[0])
-    except Exception:
-        pass
-    return None
-
+def _team_logo_path(team: str) -> Path:
+    team = str(team or "").strip()
+    cands = TEAM_LOGO_CANDIDATES.get(team, [])
+    for fn in cands:
+        p = ASSETS_DIR / fn
+        if p.exists():
+            return p
+    p = ASSETS_DIR / f"{team}_Logo.png"
+    return p if p.exists() else Path("")
 
 def _emoji_path(slug: str) -> Optional[Path]:
     fn = EMOJI_FILES.get(slug)
@@ -147,189 +142,110 @@ def _emoji_path(slug: str) -> Optional[Path]:
     return _transparent_copy(p) if p.exists() else None
 
 
-def _gm_logo_path() -> Optional[Path]:
-    return _transparent_copy(GM_LOGO) if GM_LOGO.exists() else None
+def _gm_logo_path() -> Path:
+    p = DATA_DIR / "gm_logo.png"
+    return p if p.exists() else Path("")
 
-
-@dataclass
-class NavItem:
-    slug: str
-    label: str
-    emoji_slug: str  # key in EMOJI_FILES
-
-
-# Navigation order requested
-NAV_ORDER = [
-    NavItem("home", "Home", "home"),
-    NavItem("gm", "GM", "gm"),
-    NavItem("joueurs", "Joueurs", "joueurs"),
-    NavItem("alignement", "Alignement", "alignement"),
-    NavItem("transactions", "Transactions", "transactions"),
-    NavItem("historique", "Historique", "historique"),
-    NavItem("classement", "Classement", "classement"),
-    NavItem("admin", "Admin", "historique"),  # icon fallback (admin has no emoji file)
-]
-
-
-# ----------------------------
-# CSS (Apple-like)
-# ----------------------------
 def _apply_css():
-    st.markdown(
-        f"""
+    """Inject global CSS (SAFE: all CSS stays inside strings)."""
+    css = r"""
 <style>
 /* Layout: custom sidebar widths */
-section[data-testid="stSidebar"] {{
+section[data-testid="stSidebar"] {
   width: var(--pms-sb-w, 320px) !important;
   min-width: var(--pms-sb-w, 320px) !important;
   max-width: var(--pms-sb-w, 320px) !important;
-}}
-/* Give content a little breathing room (also pushes titles down so they're not hidden) */
-.block-container {{
-  padding-top: 2.1rem !important;
-}}
+}
+/* Hide Streamlit menu footer spacing a bit */
+section.main .block-container { padding-top: 2.2rem !important; }
 
-/* Hide Streamlit default nav + make our sidebar clean */
-section[data-testid="stSidebar"] [data-testid="stSidebarNav"] {{
-  display:none !important;
-}}
-section[data-testid="stSidebar"] .stRadio, section[data-testid="stSidebar"] .stSelectbox {{
-  margin-top: 0.25rem;
-}}
+/* Apple glass sidebar */
+section[data-testid="stSidebar"] > div { backdrop-filter: blur(16px) !important; }
 
-/* Brand */
-.pms-brand {{
-  display:flex; align-items:center; gap:10px;
-  padding: 10px 10px 12px 10px;
-}}
-.pms-brand img {{
-  width: 34px; height: 34px; border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(0,0,0,.20);
-}}
-.pms-brand .t {{
-  font-weight: 700; font-size: 1.05rem;
-  letter-spacing: .2px;
-}}
-
-/* Nav container */
-.pms-nav {{
-  display:flex; flex-direction: column; gap: 10px;
-  padding: 6px 10px 8px 10px;
-}}
-.pms-item {{
-  display:flex; align-items:center; gap: 12px;
-  border-radius: 14px;
-  padding: 8px 10px;
-  text-decoration:none !important;
-  color: rgba(255,255,255,.88);
-  background: rgba(255,255,255,.04);
-  border: 1px solid rgba(255,255,255,.05);
-  transition: all .12s ease-in-out;
-}}
-.pms-item:hover {{
-  transform: translateY(-1px);
-  background: rgba(255,255,255,.06);
-  border-color: rgba(255,255,255,.10);
-}}
-.pms-item.active {{
-  background: {RED_ACTIVE};
-  border-color: rgba(0,0,0,.18);
-  box-shadow: 0 18px 36px rgba(239,68,68,.22);
-  color: white;
-}}
-.pms-item img {{
-  width: var(--pms-ico, 54px);
-  height: var(--pms-ico, 54px);
-  border-radius: 12px;
-  object-fit: contain;
-}}
-.pms-item .lbl {{
-  font-weight: 650;
-  font-size: 1.00rem;
-  line-height: 1;
-}}
-
-/* Collapsed mode: hide text, center icons, make pills */
-.pms-collapsed .pms-brand .t {{ display:none; }}
-.pms-collapsed .pms-item .lbl {{ display:none; }}
-.pms-collapsed .pms-nav {{
-  padding: 6px 8px;
-}}
-.pms-collapsed .pms-item {{
-  justify-content: center;
-  padding: 10px 0;
-}}
-.pms-collapsed .pms-item img {{
-  width: var(--pms-ico-c, 36px);
-  height: var(--pms-ico-c, 36px);
-  border-radius: 12px;
-}}
-.pms-collapsed .pms-item {{
-  border-radius: 16px;
-}}
-
-/* Team logo chip (collapsed + expanded) */
-.pms-team {{
-  display:flex; align-items:center; gap:10px;
-  padding: 10px 10px 0 10px;
-}}
-.pms-team img {{
-  width: 34px; height: 34px; border-radius: 12px;
-  object-fit: contain;
-  background: transparent;
-}}
-.pms-team .tt {{
-  font-size: .92rem;
-  font-weight: 650;
-  opacity: .90;
-}}
-.pms-collapsed .pms-team .tt {{ display:none; }}
-.pms-collapsed .pms-team {{
+/* "Chip" glass frame for logos */
+.pms-chip {
+  display:inline-flex;
+  align-items:center;
   justify-content:center;
-  padding: 8px 8px 0 8px;
-}}
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.06);
+  box-shadow: 0 18px 40px rgba(0,0,0,0.18);
+  padding: 8px;
+}
+.pms-chip img { display:block; border-radius: 14px; }
 
-/* Theme toggle bottom */
-.pms-theme {{
-  padding: 10px 10px 6px 10px;
-}}
-.pms-theme .sun {{
-  font-size: 18px;
-  opacity: .9;
-  padding-left: 4px;
-  padding-bottom: 2px;
-}}
+/* NAV */
+.pms-nav { margin-top: 12px; display:flex; flex-direction:column; gap: 10px; }
+.pms-item {
+  position: relative;
+  display:flex;
+  align-items:center;
+  gap: 12px;
+  border-radius: 18px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.05);
+  box-shadow: 0 10px 22px rgba(0,0,0,0.12);
+  transition: transform 120ms ease, box-shadow 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+.pms-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(239,68,68,0.55);
+  background: rgba(255,255,255,0.08);
+  box-shadow: 0 14px 28px rgba(0,0,0,0.18);
+}
+.pms-item.active {
+  background: rgba(239,68,68,0.95);
+  border-color: rgba(220,38,38,1);
+  box-shadow: 0 16px 34px rgba(239,68,68,0.22);
+}
+.pms-item.active::before {
+  content:"";
+  position:absolute;
+  left:-7px; top:10px; bottom:10px;
+  width:3px; border-radius:6px;
+  background: rgba(239,68,68,1);
+  box-shadow: 0 10px 24px rgba(239,68,68,0.45);
+}
 
-/* Active button (primary) uses same red as nav active */
-.stButton > button[kind="primary"] {{
-  background: {RED_ACTIVE} !important;
-  border-color: rgba(0,0,0,.18) !important;
-}}
+/* Emojis/logos never stretch */
+.pms-emoji, .pms-emoji-c, .pms-teamlogo, .pms-gmlogo {
+  object-fit: contain !important;
+  aspect-ratio: 1/1;
+}
 
-/* ================================
-   PMS Apple-like Sidebar Nav v22
-   ================================ */
-:root { --pms-emo: 60px; --pms-emo-c: 44px; }
+/* icon sizes */
+.pms-item img.pms-emoji { width: var(--pms-emo, 60px); height: var(--pms-emo, 60px); border-radius: 16px; }
+.pms-item img.pms-teamlogo { width: var(--pms-emo, 60px); height: var(--pms-emo, 60px); border-radius: 16px; }
+.pms-brand img.pms-gmlogo { width: var(--pms-gm, 80px); height: var(--pms-gm, 80px); border-radius: 18px; }
 
-/* Center all images in sidebar */
-section[data-testid="stSidebar"] img { display:block; margin-left:auto; margin-right:auto; }
+/* Collapsed mode: show icons centered */
+.pms-collapsed .pms-item { justify-content:center; padding: 10px 0; }
+.pms-collapsed .pms-item .lbl { display:none; }
+.pms-collapsed .pms-item img.pms-emoji,
+.pms-collapsed .pms-item img.pms-teamlogo { width: var(--pms-emo-c,44px); height: var(--pms-emo-c,44px); border-radius: 14px; }
 
-/* Collapsed: icons-only + hide any widgets */
-.pms-collapsed .pms-title, .pms-collapsed .pms-teamname, .pms-collapsed .pms-label { display:none !important; }
-.pms-collapsed .pms-top { flex-direction: column; gap: 8px; padding-top: 8px; }
-.pms-collapsed .pms-nav { padding: 6px 6px; gap: 10px; }
-.pms-collapsed .pms-item { justify-content:center; padding: 10px 6px; border-radius: 16px; }
-.pms-collapsed .pms-emo { width: var(--pms-emo-c) !important; height: var(--pms-emo-c) !important; }
-section[data-testid="stSidebar"] .stSelectbox, section[data-testid="stSidebar"] .stRadio { display:none; }
+/* Primary buttons red (match selection) */
+.stButton > button[kind="primary"] {
+  background: rgba(239,68,68,1) !important;
+  border-color: rgba(220,38,38,1) !important;
+  box-shadow: 0 18px 40px rgba(239,68,68,0.18) !important;
+}
+.stButton > button[kind="primary"]:hover { filter: brightness(1.03); }
 
-/* Expanded: slightly tighter rows */
-.pms-expanded .pms-item { padding: 10px 12px; border-radius: 18px; }
-.pms-expanded .pms-emo { width: var(--pms-emo) !important; height: var(--pms-emo) !important; }
+/* Micro press */
+section[data-testid="stSidebar"] .pms-item:active,
+section[data-testid="stSidebar"] div.stButton > button:active {
+  transform: translateY(0px) scale(0.98) !important;
+}
 
+/* Snap page transition */
+@keyframes pmsPageIn { from { opacity:0; transform:translateY(6px);} to { opacity:1; transform:translateY(0px);} }
+section.main .block-container { animation: pmsPageIn 240ms ease-out; }
 </style>
-""",
-        unsafe_allow_html=True,
-    )
+"""
+    st.markdown(css, unsafe_allow_html=True)
 
 
 def _set_sidebar_mode(collapsed: bool):
@@ -338,17 +254,20 @@ def _set_sidebar_mode(collapsed: bool):
         st.markdown(
             """
 <style>
-:root { --pms-sb-w: 86px; --pms-emo: 60px; --pms-emo-c: 44px; }
+:root { --pms-sb-w: 76px; --pms-ico: 54px; --pms-ico-c: 44px; --pms-gm: 52px; --pms-emo: 44px; --pms-emo-c: 40px; }
 section[data-testid="stSidebar"] { padding-left: 4px !important; padding-right: 4px !important; }
 </style>
 """,
             unsafe_allow_html=True,
         )
+        st.markdown("<style>section[data-testid='stSidebar']{}</style>", unsafe_allow_html=True)
+        # Also add a class hook
+        st.markdown("<style>body{}</style>", unsafe_allow_html=True)
     else:
         st.markdown(
             """
 <style>
-:root { --pms-sb-w: 320px; --pms-emo: 60px; --pms-emo-c: 44px; }
+:root { --pms-sb-w: 320px; --pms-ico: 54px; --pms-ico-c: 44px; --pms-gm: 80px; --pms-emo: 60px; --pms-emo-c: 44px; }
 </style>
 """,
             unsafe_allow_html=True,
@@ -356,112 +275,129 @@ section[data-testid="stSidebar"] { padding-left: 4px !important; padding-right: 
 
 
 
+
 def _sidebar_nav(owner_key: str, active_slug: str):
-    """
-    Sidebar Apple-like:
-    - Mode agrandi: saison + choix d'équipe + nav (emoji PNG + texte)
-    - Mode réduit: emoji PNG only (mêmes icônes), rapide, sans widgets qui "cassent" en narrow
-    """
     collapsed = bool(st.session_state.get("pms_sidebar_collapsed", False))
+
+    # Expanded: season + team controls
+    if not collapsed:
+        st.sidebar.selectbox(
+            "Saison",
+            options=[st.session_state.get("season", "2025-2026"), "2024-2025", "2023-2024"],
+            key="season",
+        )
+        st.sidebar.selectbox(
+            "Équipe",
+            options=POOL_TEAMS,
+            index=POOL_TEAMS.index(st.session_state.get("owner", owner_key)) if st.session_state.get("owner", owner_key) in POOL_TEAMS else 0,
+            key="owner",
+        )
+        owner_key = str(st.session_state.get("owner", owner_key))
+
     _set_sidebar_mode(collapsed)
 
-    # ----------------------------
-    # Controls (only in expanded)
-    # ----------------------------
-    if not collapsed:
-        st.sidebar.selectbox("Saison", ["2025-2026"], index=0, key="season_select", label_visibility="visible")
-
-        # Team chooser in sidebar
-        cur_owner = str(st.session_state.get("owner") or owner_key or "Canadiens")
-        try:
-            idx = POOL_TEAMS.index(cur_owner)
-        except Exception:
-            idx = 0
-        owner_key = st.sidebar.selectbox(
-            "Équipe",
-            POOL_TEAMS,
-            index=idx,
-            key="owner_select",
-            format_func=lambda x: TEAM_LABEL.get(x, x),
-            label_visibility="visible",
-        )
-        st.session_state["owner"] = owner_key
-    else:
-        owner_key = str(st.session_state.get("owner") or owner_key or "Canadiens")
-
-    # ----------------------------
-    # Brand (GM logo) + Team logo
-    # ----------------------------
+    # Brand: GM logo only (smaller)
     gm_logo = _gm_logo_path()
-    gm_b64 = _b64_png(gm_logo) if gm_logo else ""
-    t_logo = _team_logo_path(owner_key)
-    t_b64 = _b64_png(t_logo) if t_logo else ""
+    if gm_logo and gm_logo.exists():
+        st.sidebar.markdown("<div class='pms-brand pms-chip'>", unsafe_allow_html=True)
+        st.sidebar.image(str(gm_logo), width=80)
+        st.sidebar.markdown("</div>", unsafe_allow_html=True)
+        st.sidebar.markdown("**Pool GM**")
 
-    # Sizes: GM logo 4x in expanded
-    gm_size = 140 if not collapsed else 42
-    team_size = 44 if not collapsed else 42
+    # Team badge (optional in expanded)
+    if not collapsed:
+        t_logo = _team_logo_path(owner_key)
+        if t_logo and t_logo.exists():
+            st.sidebar.markdown("<div class='pms-chip' style='margin-top:10px'>", unsafe_allow_html=True)
+            st.sidebar.image(str(t_logo), width=48)
+            st.sidebar.markdown("</div>", unsafe_allow_html=True)
+            st.sidebar.markdown(f"**{TEAM_LABEL.get(owner_key, owner_key)}**")
 
-    gm_img = f"<img class='pms-gm' style='width:{gm_size}px;height:{gm_size}px' src='data:image/png;base64,{gm_b64}'/>" if gm_b64 else ""
-    team_img = f"<img class='pms-team-ico' style='width:{team_size}px;height:{team_size}px' src='data:image/png;base64,{t_b64}'/>" if t_b64 else ""
-
-    # ----------------------------
-    # Items (Admin only when Whalers)
-    # ----------------------------
+    # Items
     items = []
     for it in NAV_ORDER:
         if it.slug == "admin" and owner_key != "Whalers":
             continue
         items.append(it)
 
-    # ----------------------------
-    # HTML nav (same for expanded + collapsed)
-    # ----------------------------
-    sb_class = "pms-collapsed" if collapsed else "pms-expanded"
+    st.sidebar.markdown("<div class='pms-nav %s'>" % ("pms-collapsed" if collapsed else ""), unsafe_allow_html=True)
 
-    html = []
-    html.append(f"<div class='pms-shell {sb_class}'>")
-
-    if collapsed:
-        # Only icons + GM and Team logos (same size)
-        html.append(f"<div class='pms-top'>{gm_img}{team_img}</div>")
-    else:
-        html.append(f"<div class='pms-top pms-top-wide'>{gm_img}<div class='pms-title'>{APP_TITLE}</div></div>")
-        html.append(f"<div class='pms-teamrow'>{team_img}<div class='pms-teamname'>{TEAM_LABEL.get(owner_key, owner_key)}</div></div>")
-
-    html.append("<div class='pms-nav'>")
     for it in items:
-        emo = _emoji_path(it.slug)
-        emo_b64 = _b64_png(emo) if emo else ""
-        emo_img = f"<img class='pms-emo' src='data:image/png;base64,{emo_b64}'/>" if emo_b64 else ""
-        active_cls = "active" if it.slug == active_slug else ""
-        # Use query param for navigation (stable + works with HTML)
-        html.append(
-            f"<a class='pms-item {active_cls}' href='?tab={it.slug}' title='{it.label}'>"
-            f"{emo_img}<span class='pms-label'>{it.label}</span></a>"
-        )
-    html.append("</div>")  # nav
-    html.append("</div>")  # shell
+        icon_p = _emoji_path(it.slug)  # png emoji (no stretch)
+        is_active = (it.slug == active_slug)
+        # Collapsed: icon-only button
+        if collapsed:
+            # show icon
+            if icon_p and icon_p.exists():
+                st.sidebar.image(str(icon_p), width=44)
+            # clickable button (icon-only)
+            if st.sidebar.button(" ", key=f"nav_{it.slug}", help=it.label, type="primary" if is_active else "secondary"):
+                st.session_state["active_tab"] = it.slug
+        else:
+            c1, c2 = st.sidebar.columns([1.1, 3.4], gap="small")
+            with c1:
+                if icon_p and icon_p.exists():
+                    st.image(str(icon_p), width=60)
+            with c2:
+                if st.button(it.label, key=f"nav_{it.slug}", use_container_width=True, type="primary" if is_active else "secondary"):
+                    st.session_state["active_tab"] = it.slug
 
-    st.sidebar.markdown("\n".join(html), unsafe_allow_html=True)
+    st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
-    # ----------------------------
-    # Footer controls (fast)
-    # ----------------------------
-    col1, col2 = st.sidebar.columns([1, 1])
-    with col1:
-        if st.button("▶" if collapsed else "◀", key="pms_toggle_sidebar", help="Réduire / agrandir le menu"):
-            st.session_state["pms_sidebar_collapsed"] = not collapsed
-            # no st.rerun(): Streamlit already reruns on click
-    with col2:
-        st.write("")
+    # Collapse toggle
+    if st.sidebar.button("◀" if not collapsed else "▶", key="pms_collapse_btn"):
+        st.session_state["pms_sidebar_collapsed"] = not collapsed
 
-    st.sidebar.markdown("<div class='pms-theme'><div class='sun'>☀️</div></div>", unsafe_allow_html=True)
+    # Theme toggle (sun above)
+    st.sidebar.markdown("<div style='margin-top:10px'>☀️</div>", unsafe_allow_html=True)
     light = bool(st.session_state.get("pms_light_mode", False))
-    new_light = st.sidebar.toggle("Clair", value=light, key="pms_light_toggle", label_visibility="collapsed" if collapsed else "visible")
-    st.session_state["pms_light_mode"] = bool(new_light)
+    st.sidebar.toggle("Clair", value=light, key="pms_light_toggle")
+    st.session_state["pms_light_mode"] = bool(st.session_state.get("pms_light_toggle", False))
 
-    # small spacer bottom
-    st.sidebar.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+def _apply_theme_mode():
+    # Light mode quick polish without breaking your global theme:
+    # We switch background + default text a bit. Keeps your existing dark theme too.
+    light = bool(st.session_state.get("pms_light_mode", False))
+    if not light:
+        return
+    st.markdown(
+        f"""
+<style>
+/* Light mode look */
+html, body, [data-testid="stAppViewContainer"] {{
+  background: #f6f7fb !important;
+}}
+section[data-testid="stSidebar"] {{
+  background: #ffffff !important;
+  border-right: 1px solid rgba(0,0,0,.06);
+}}
+/* Card backgrounds */
+div[data-testid="stVerticalBlock"] > div {{
+  background: transparent;
+}}
+/* Make our nav readable */
+.pms-item {{
+  background: rgba(0,0,0,.03) !important;
+  border-color: rgba(0,0,0,.06) !important;
+  color: rgba(0,0,0,.78) !important;
+}}
+.pms-item:hover {{
+  background: rgba(0,0,0,.05) !important;
+}}
+.pms-item.active {{
+  color: white !important;
+}}
+.pms-brand .t, .pms-team .tt {{
+  color: rgba(0,0,0,.80) !important;
+}}
+/* Title color */
+h1, h2, h3 {{
+  color: rgba(0,0,0,.86) !important;
+}}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def _get_query_tab() -> Optional[str]:
@@ -496,36 +432,53 @@ def _set_query_tab(slug: str) -> None:
 # ----------------------------
 # Page renders
 # ----------------------------
+def _sync_owner_from_home():
+    try:
+        val = st.session_state.get("owner_select")
+        if val:
+            st.session_state["owner"] = val
+    except Exception:
+        pass
+
 def _render_home(owner_key: str):
-    # ✅ Pool logo MUST be above the page title
+    # ✅ Pool logo (double size) — centered ABOVE title
     if POOL_LOGO.exists():
-        st.image(str(_transparent_copy(POOL_LOGO)), width=150)
+        c1, c2, c3 = st.columns([1, 4, 1])
+        with c2:
+            st.markdown("<div class='pms-chip'>", unsafe_allow_html=True)
+            st.image(str(POOL_LOGO), use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
     st.title("🏠 Home")
-    st.caption("Home reste clean — aucun bloc Admin ici.")
+    st.caption("Choisis ton équipe ci-dessous.")
 
     st.subheader("🏒 Sélection d'équipe")
     st.caption("Cette sélection alimente Alignement / GM / Transactions (même clé session_state).")
 
-    colA, colB = st.columns([5, 1.2])
+    colA, colB = st.columns([6, 1.4])
     with colA:
         idx = POOL_TEAMS.index(owner_key) if owner_key in POOL_TEAMS else 0
-        new_owner = st.selectbox("Équipe (propriétaire)", POOL_TEAMS, index=idx, key="owner_select")
+        st.selectbox(
+            "Équipe (propriétaire)",
+            POOL_TEAMS,
+            index=idx,
+            key="owner_select",
+            on_change=_sync_owner_from_home,
+        )
+        new_owner = st.session_state.get("owner_select", owner_key)
     with colB:
         p = _team_logo_path(new_owner)
         if p and p.exists():
-            st.image(str(p), width=54)
+            st.markdown("<div class='pms-chip'>", unsafe_allow_html=True)
+            st.image(str(p), width=72)
+            st.markdown("</div>", unsafe_allow_html=True)
 
     st.success(f"✅ Équipe sélectionnée: {TEAM_LABEL.get(new_owner, new_owner)}")
-    st.write(f"Saison: {st.session_state.get('season', '2025-2026')}")
 
-    # Optional banner in center (kept if you want)
+    # Optional banner
     banner = DATA_DIR / "nhl_teams_header_banner.png"
     if banner.exists():
-        st.image(str(_transparent_copy(banner)), use_container_width=True)
-
-    st.session_state["owner"] = new_owner
-
+        st.image(str(banner), use_container_width=True)
 
 def _safe_import_tabs() -> Dict[str, Any]:
     """
@@ -590,7 +543,11 @@ def main():
 
     owner = str(st.session_state.get("owner") or "Canadiens")
     active = str(st.session_state.get("active_tab") or "home")
-    # Sidebar: nav
+
+    # Sidebar: season + nav
+    with st.sidebar:
+        st.selectbox("Saison", ["2025-2026"], index=0, key="season_select", label_visibility="visible")
+
     _sidebar_nav(owner, active)
 
     # Prevent non-whalers from accessing Admin
