@@ -212,6 +212,16 @@ def _file_sig(path: Path) -> tuple[int, int]:
         return (0, 0)
 
 @st.cache_data(show_spinner=False, max_entries=256)
+def _img_bytes_cached(p: str, sig: tuple[int,int]) -> bytes:
+    try:
+        return Path(p).read_bytes()
+    except Exception:
+        return b""
+
+def _img_bytes(path: Path) -> bytes:
+    return _img_bytes_cached(str(path), _file_sig(path))
+
+@st.cache_data(show_spinner=False, max_entries=256)
 def _b64_png_cached(p: str, sig: tuple[int, int]) -> str:
     try:
         b = Path(p).read_bytes()
@@ -648,40 +658,30 @@ def _sidebar_nav(owner_key: str, active_slug: str):
 
     _set_sidebar_mode(collapsed)
 
-    # Brand: GM logo + selected team logo (side-by-side in expanded sidebar)
-    gm_logo = _gm_logo_path()
-    t_logo = _team_logo_path(owner_key)
 
-    if (not collapsed) and gm_logo and gm_logo.exists():
-        b64g = _b64_png(gm_logo)
-        b64t = _b64_png(t_logo) if (t_logo and t_logo.exists() and t_logo.is_file()) else ""
-        team_html = (
-            f"<div class='pms-chip'><img class='pms-team' src='data:image/png;base64,{b64t}' alt='team'/></div>"
-            if b64t else ""
-        )
-        st.sidebar.markdown(
-            f"""<div class='pms-brand-row'>
-  <div class='pms-chip'><img class='pms-gm' src='data:image/png;base64,{b64g}' alt='gm'/></div>
-  {team_html}
-</div>""",
-            unsafe_allow_html=True,
-        )
-    else:
-        # Fallback (collapsed mode or missing assets): stack like before
+    # Brand: GM logo + selected team logo (bytes-cached; big only on Home)
+gm_logo = _gm_logo_path()
+t_logo = _team_logo_path(owner_key)
+
+is_home = (active_pre == "home" or st.session_state.get("active_tab") == "home")
+
+if not collapsed:
+    cols = st.sidebar.columns([1, 1, 6], vertical_alignment="center")
+    with cols[0]:
         if gm_logo and gm_logo.exists():
-            st.sidebar.markdown("<div class='pms-brand pms-chip'>", unsafe_allow_html=True)
-            st.sidebar.image(str(gm_logo), width=(56 if collapsed else 110))
-            st.sidebar.markdown("</div>", unsafe_allow_html=True)
-            # Intentionally no text labels under the brand images
-
+            st.image(_img_bytes(gm_logo), width=(96 if is_home else 52))
+    with cols[1]:
         if t_logo and t_logo.exists() and t_logo.is_file():
-            st.sidebar.markdown("<div class='pms-chip' style='margin-top:10px'>", unsafe_allow_html=True)
-            st.sidebar.image(str(t_logo), width=(44 if collapsed else 56))
-            st.sidebar.markdown("</div>", unsafe_allow_html=True)
-            # Intentionally no text labels under the brand images
+            st.image(_img_bytes(t_logo), width=(96 if is_home else 44))
+else:
+    if gm_logo and gm_logo.exists():
+        st.sidebar.image(_img_bytes(gm_logo), width=(56 if is_home else 40))
+    if t_logo and t_logo.exists() and t_logo.is_file():
+        st.sidebar.image(_img_bytes(t_logo), width=(44 if is_home else 32))
+
+# Items
 
 
-    # Items
     items = []
     for it in NAV_ORDER:
         if it.slug == "admin" and owner_key != "Whalers":
@@ -808,8 +808,7 @@ def _set_query_tab(slug: str) -> None:
         st.query_params.update({"tab": slug})  # type: ignore
     except Exception:
         try:
-            st.experimental_set_query_params(tab=slug)
-        except Exception:
+                    except Exception:
             pass
 
 
