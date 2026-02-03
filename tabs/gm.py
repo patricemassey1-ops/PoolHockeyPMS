@@ -19,7 +19,7 @@ def _file_sig(path: str) -> tuple[int, int]:
     except Exception:
         return (0, 0)
 
-@st.cache_data(show_spinner=False, persist="disk", max_entries=32)
+@st.cache_data(show_spinner=False, max_entries=32)
 def _read_csv_cached(path: str, sig: tuple[int, int]) -> pd.DataFrame:
     """CSV loader cached by (path, mtime_ns, size).
 
@@ -257,7 +257,7 @@ def _season_end_year(season: str) -> Optional[int]:
 # =====================================================
 # Loaders
 # =====================================================
-@st.cache_data(show_spinner=False, persist="disk", max_entries=8)
+@st.cache_data(show_spinner=False, max_entries=8)
 def load_equipes_joueurs(data_dir: str, season: str) -> pd.DataFrame:
     path = _first_existing(
         os.path.join(data_dir, f"equipes_joueurs_{season}.csv"),
@@ -289,41 +289,27 @@ def load_equipes_joueurs(data_dir: str, season: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False, persist="disk", max_entries=8)
+@st.cache_data(show_spinner=False, max_entries=8)
+def _load_players_db_cached(path: str, sig: tuple[int,int]) -> pd.DataFrame:
+    df = _safe_read_csv(path)
+    if df.empty:
+        return pd.DataFrame()
+    df = df.copy()
+    df.attrs['__path__'] = path
+    name_col = _guess_col(df, ['Joueur','Player','Name','name'])
+    if not name_col:
+        name_col = df.columns[0]
+    df['_name_key'] = df[name_col].astype(str).map(_norm_player_key)
+    df['_display_name'] = df[name_col].astype(str)
+    return df
+
 def load_players_db(data_dir: str) -> pd.DataFrame:
     path = _first_existing(
         os.path.join(data_dir, "hockey.players.csv"),
         os.path.join(data_dir, "Hockey.Players.csv"),
         os.path.join(data_dir, "data", "hockey.players.csv"),
     )
-    df = _safe_read_csv(path)
-    if df.empty:
-        return pd.DataFrame()
-    df = df.copy()
-    df.attrs["__path__"] = path
-
-    name_col = _guess_col(df, ["Joueur", "Player", "Name", "name"])
-    if not name_col:
-        name_col = df.columns[0]
-    df["_name_key"] = df[name_col].astype(str).map(_norm_player_key)
-    df["_display_name"] = df[name_col].astype(str)
-
-    if "Cap Hit" not in df.columns:
-        df["Cap Hit"] = df.get("Salary", df.get("AAV", ""))
-    if "Level" not in df.columns:
-        df["Level"] = ""
-    if "Pos" not in df.columns:
-        df["Pos"] = df.get("Position", "")
-    if "Team" not in df.columns:
-        df["Team"] = df.get("Equipe", "")
-
-    nhl_col = _guess_col(df, ["NHL ID", "NHL_ID", "nhl_id", "playerId", "player_id", "PlayerID", "NHLID"])
-    df["_nhl_id"] = df[nhl_col].astype(str) if nhl_col else ""
-
-    if "Country" not in df.columns:
-        df["Country"] = ""
-
-    return df
+        return _load_players_db_cached(path, _file_sig(path))
 
 
 
@@ -337,7 +323,7 @@ def _find_contracts_file(data_dir: str) -> str:
         os.path.join(data_dir, "puckpedia_contracts.csv"),
     )
 
-@st.cache_data(show_spinner=False, persist="disk", max_entries=8)
+@st.cache_data(show_spinner=False, max_entries=8)
 def load_contracts(data_dir: str) -> pd.DataFrame:
     path = _first_existing(
         os.path.join(data_dir, "puckpedia.contracts.csv"),

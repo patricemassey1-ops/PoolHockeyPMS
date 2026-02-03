@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -203,10 +204,24 @@ def _transparent_copy_edge(src: Path, thr: int = 245) -> Path:
 
 
 @st.cache_data(show_spinner=False)
-def _b64_png(path: Path) -> str:
+def _file_sig(path: Path) -> tuple[int, int]:
     try:
-        data = path.read_bytes()
-        return base64.b64encode(data).decode("utf-8")
+        st_ = path.stat()
+        return (int(st_.st_mtime_ns), int(st_.st_size))
+    except Exception:
+        return (0, 0)
+
+@st.cache_data(show_spinner=False, max_entries=256)
+def _b64_png_cached(p: str, sig: tuple[int, int]) -> str:
+    try:
+        b = Path(p).read_bytes()
+        return base64.b64encode(b).decode("utf-8")
+    except Exception:
+        return ""
+
+def _b64_png(path: Path) -> str:
+    return _b64_png_cached(str(path), _file_sig(path))
+
     except Exception:
         return ""
 
@@ -921,9 +936,12 @@ def main():
     st.session_state.setdefault("_pms_booted", False)
     st.session_state.setdefault("pms_sidebar_collapsed", False)
     st.session_state.setdefault("pms_light_mode", False)
+    st.session_state.setdefault("_pms_prof", {})
 
+    _t0 = time.perf_counter()
     _apply_css()
     _apply_theme_mode()
+    st.session_state['_pms_prof']['css_theme_ms'] = int((time.perf_counter()-_t0)*1000)
 
     # Read query param tab
     qp = (_get_query_tab() or "").strip().lower()
@@ -940,7 +958,9 @@ def main():
     owner = str(st.session_state.get("owner") or "Canadiens")
     active_pre = str(st.session_state.get("active_tab") or "home")
     # Sidebar: season + nav (handled inside _sidebar_nav)
+    _t1 = time.perf_counter()
     _sidebar_nav(owner, active_pre)
+    st.session_state['_pms_prof']['sidebar_ms'] = int((time.perf_counter()-_t1)*1000)
     # Re-read after sidebar: avoids "2 clicks" even if rerun is skipped
     active = str(st.session_state.get("active_tab") or active_pre or "home")
 
@@ -966,12 +986,19 @@ def main():
     # Center icon for other pages (keeps tab modules intact; shows the same PNG icon as sidebar)
     _render_page_header(active, _nav_label(active), show_title=True)
 
+    _t2 = time.perf_counter()
     mod = _safe_import_tab(active)
+    st.session_state['_pms_prof']['import_ms'] = int((time.perf_counter()-_t2)*1000)
     if mod is None:
         st.warning("Onglet indisponible.")
         return
 
+    _t3 = time.perf_counter()
     _render_module(mod, ctx)
+    st.session_state['_pms_prof']['render_ms'] = int((time.perf_counter()-_t3)*1000)
+    # Quick perf readout
+    with st.sidebar.expander('⚡ Perf', expanded=False):
+        st.json(st.session_state.get('_pms_prof', {}))
 
 
 if __name__ == "__main__":
