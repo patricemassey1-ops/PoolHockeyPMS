@@ -5,6 +5,10 @@ import streamlit as st
 import pandas as pd
 
 from services.roster_common import load_roster, normalize_roster_df, players_db_path, derive_scope
+@st.cache_data(show_spinner=False)
+def _load_roster_cached(data_dir: str, season: str, owner_key: str) -> tuple[pd.DataFrame, str]:
+    # owner_key is only to vary the cache when user switches owner/team
+    return load_roster(data_dir, season)
 
 
 def render(ctx: dict) -> None:
@@ -13,7 +17,9 @@ def render(ctx: dict) -> None:
     data_dir = str(ctx.get("DATA_DIR") or "data")
     season = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
 
-    df, roster_path = load_roster(data_dir, season)
+    owner_key = str(st.session_state.get("selected_owner") or ctx.get("selected_owner") or "").strip()
+
+    df, roster_path = _load_roster_cached(data_dir, season, owner_key)
     st.caption(f"Roster: {roster_path}")
 
     if df is None or df.empty:

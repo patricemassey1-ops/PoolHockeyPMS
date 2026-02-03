@@ -3,6 +3,14 @@ import unicodedata
 import pandas as pd
 import streamlit as st
 from .storage import path_players_db, safe_read_csv
+@st.cache_data(show_spinner=False)
+def load_players_df(players_db_path: str | None = None) -> pd.DataFrame:
+    """Charge hockey.players.csv (ou autre DB joueurs) avec cache."""
+    path = players_db_path or path_players_db()
+    df = safe_read_csv(path)
+    if df is None:
+        return pd.DataFrame()
+    return df.copy()
 
 def _strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))

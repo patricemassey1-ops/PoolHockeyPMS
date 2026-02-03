@@ -324,7 +324,7 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
 /* Team logo next to dropdown (rounded card + transparent logo) */
 .pms-team-hero{ display:flex; align-items:center; justify-content:center; min-height: 92px; margin-top: 18px; }
 .pms-team-card{
-  border-radius: 22px;
+  border-radius: 28px;
   padding: 14px;
   background: rgba(255,255,255,0.04);
   border: 1px solid rgba(255,255,255,0.10);
@@ -402,10 +402,22 @@ section[data-testid="stSidebar"] > div {
 }
 
 /* Expanded sidebar nav: bigger icons + perfect vertical alignment */
+/* Ensure emoji + button are perfectly centered on the same row */
+section[data-testid="stSidebar"] .pms-nav-row{
+  display:flex !important;
+  align-items:center !important;
+  gap: 14px !important;
+}
+section[data-testid="stSidebar"] .pms-nav-row .pms-nav-ico-wrap{
+  display:flex !important;
+  align-items:center !important;
+  justify-content:center !important;
+  width: 170px !important;
+}
 section[data-testid="stSidebar"] .pms-nav img.pms-emoji{
-  width: 120px !important;
-  height: 120px !important;
-  border-radius: 22px !important;
+  width: 160px !important;
+  height: 160px !important;
+  border-radius: 28px !important;
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.10);
   box-shadow: 0 10px 30px rgba(0,0,0,0.25);
@@ -414,7 +426,7 @@ section[data-testid="stSidebar"] .pms-nav img.pms-emoji{
 
 /* Sidebar nav button height to match big emoji */
 section[data-testid="stSidebar"] .pms-nav .stButton > button{
-  min-height: 120px !important;
+  min-height: 160px !important;
   padding-top: 0.55rem !important;
   padding-bottom: 0.55rem !important;
 }

@@ -143,6 +143,7 @@ def _resolve_plafonds(ctx: dict) -> Dict[str, float]:
     return {}
 
 
+@st.cache_data(show_spinner=False)
 def _asset_dirs(data_dir: str) -> List[str]:
     return [
         os.path.join("assets", "previews"),
@@ -159,6 +160,7 @@ def _find_image(filename: str, data_dir: str) -> str:
     return ""
 
 
+@st.cache_data(show_spinner=False)
 def _find_team_logo(owner: str, data_dir: str) -> str:
     """
     Cherche un logo d'équipe correspondant au GM/Owner.

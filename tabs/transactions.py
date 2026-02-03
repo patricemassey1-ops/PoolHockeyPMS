@@ -129,6 +129,7 @@ def _safe_owner_from_session() -> str:
     return str(st.session_state.get("selected_owner") or st.session_state.get("owner") or "").strip()
 
 
+@st.cache_data(show_spinner=False)
 def _asset_dirs(data_dir: str) -> List[str]:
     return [
         os.path.join("assets", "previews"),
@@ -137,6 +138,7 @@ def _asset_dirs(data_dir: str) -> List[str]:
     ]
 
 
+@st.cache_data(show_spinner=False)
 def _find_team_logo(owner: str, data_dir: str) -> str:
     """
     Cherche un logo d'équipe correspondant au GM/Owner.
