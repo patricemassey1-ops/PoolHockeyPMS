@@ -309,7 +309,7 @@ def load_players_db(data_dir: str) -> pd.DataFrame:
         os.path.join(data_dir, "Hockey.Players.csv"),
         os.path.join(data_dir, "data", "hockey.players.csv"),
     )
-        return _load_players_db_cached(path, _file_sig(path))
+    return _load_players_db_cached(path, _file_sig(path))
 
 
 
