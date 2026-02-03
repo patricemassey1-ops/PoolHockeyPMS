@@ -322,7 +322,7 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
 }
 
 /* Team logo next to dropdown (rounded card + transparent logo) */
-.pms-team-hero{ display:flex; align-items:center; justify-content:center; min-height: 92px; margin-top: 26px; }
+.pms-team-hero{ display:flex; align-items:center; justify-content:center; min-height: 92px; margin-top: 18px; }
 .pms-team-card{
   border-radius: 22px;
   padding: 14px;
@@ -351,6 +351,26 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
   justify-content:center;
 }
 .pms-pool-card img{ width: 220px; height: auto; display:block; object-fit: contain; }
+
+/* Brand row (GM + selected team) */
+.pms-brand-row{ display:flex; gap:12px; align-items:center; justify-content:flex-start; margin: 14px 0 6px 0; }
+.pms-brand-row .pms-chip{ padding: 8px; }
+.pms-brand-row img{ display:block; object-fit:contain; border-radius: 16px; }
+.pms-brand-row img.pms-gm{ width: 96px; height: 96px; }
+.pms-brand-row img.pms-team{ width: 62px; height: 62px; }
+
+/* Center page icon (Home/GM/Joueurs/...) */
+.pms-page-header{ display:flex; align-items:center; gap:14px; margin: 6px 0 10px 0; }
+.pms-page-ico{
+  width: 64px; height: 64px;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 18px 55px rgba(0,0,0,0.22);
+  object-fit: contain;
+  display:block;
+}
+.pms-page-title{ font-size: 3.0rem; font-weight: 800; line-height: 1.05; margin:0; padding:0; }
 
 /* Hide tiny loader dots/containers sometimes rendered by st.image */
 /* Hide Streamlit image skeleton/loader artifacts (keep real images visible) */
@@ -552,22 +572,42 @@ def _sidebar_nav(owner_key: str, active_slug: str):
 
     _set_sidebar_mode(collapsed)
 
-    # Brand: GM logo only (smaller)
+    # Brand: GM logo + selected team logo (side-by-side in expanded sidebar)
     gm_logo = _gm_logo_path()
-    if gm_logo and gm_logo.exists():
-        st.sidebar.markdown("<div class='pms-brand pms-chip'>", unsafe_allow_html=True)
-        st.sidebar.image(str(gm_logo), width=(56 if collapsed else 110))
-        st.sidebar.markdown("</div>", unsafe_allow_html=True)
-        if not collapsed:
-            st.sidebar.markdown("**Pool GM**")
-    # Team badge (show in sidebar, also in collapsed but smaller)
     t_logo = _team_logo_path(owner_key)
-    if t_logo and t_logo.exists():
-        st.sidebar.markdown("<div class='pms-chip' style='margin-top:10px'>", unsafe_allow_html=True)
-        st.sidebar.image(str(t_logo), width=(44 if collapsed else 56))
-        st.sidebar.markdown("</div>", unsafe_allow_html=True)
-        if not collapsed:
-            st.sidebar.markdown(f"**{TEAM_LABEL.get(owner_key, owner_key)}**")
+
+    if (not collapsed) and gm_logo and gm_logo.exists():
+        b64g = _b64_png(gm_logo)
+        b64t = _b64_png(t_logo) if (t_logo and t_logo.exists() and t_logo.is_file()) else ""
+        team_html = (
+            f"<div class='pms-chip'><img class='pms-team' src='data:image/png;base64,{b64t}' alt='team'/></div>"
+            if b64t else ""
+        )
+        st.sidebar.markdown(
+            f"""<div class='pms-brand-row'>
+  <div class='pms-chip'><img class='pms-gm' src='data:image/png;base64,{b64g}' alt='gm'/></div>
+  {team_html}
+</div>""",
+            unsafe_allow_html=True,
+        )
+        st.sidebar.markdown("**Pool GM**")
+        st.sidebar.markdown(f"**{TEAM_LABEL.get(owner_key, owner_key)}**")
+    else:
+        # Fallback (collapsed mode or missing assets): stack like before
+        if gm_logo and gm_logo.exists():
+            st.sidebar.markdown("<div class='pms-brand pms-chip'>", unsafe_allow_html=True)
+            st.sidebar.image(str(gm_logo), width=(56 if collapsed else 110))
+            st.sidebar.markdown("</div>", unsafe_allow_html=True)
+            if not collapsed:
+                st.sidebar.markdown("**Pool GM**")
+
+        if t_logo and t_logo.exists() and t_logo.is_file():
+            st.sidebar.markdown("<div class='pms-chip' style='margin-top:10px'>", unsafe_allow_html=True)
+            st.sidebar.image(str(t_logo), width=(44 if collapsed else 56))
+            st.sidebar.markdown("</div>", unsafe_allow_html=True)
+            if not collapsed:
+                st.sidebar.markdown(f"**{TEAM_LABEL.get(owner_key, owner_key)}**")
+
 
     # Items
     items = []
@@ -698,6 +738,39 @@ def _set_query_tab(slug: str) -> None:
 # ----------------------------
 # Page renders
 # ----------------------------
+
+def _nav_label(slug: str) -> str:
+    for it in NAV_ORDER:
+        if it.slug == slug:
+            return it.label
+    return slug.title()
+
+
+def _render_page_header(slug: str, label: str, show_title: bool = True) -> None:
+    """Renders the PNG emoji icon in the main area (optionally with a big title)."""
+    icon_p = _emoji_path(slug)
+    b64i = _b64_png(icon_p) if icon_p and icon_p.exists() else ""
+    if not b64i:
+        if show_title:
+            st.title(label)
+        return
+
+    if show_title:
+        st.markdown(
+            f"""<div class='pms-page-header'>
+  <img class='pms-page-ico' src='data:image/png;base64,{b64i}' alt='{label}' />
+  <div><div class='pms-page-title'>{label}</div></div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""<div class='pms-page-header'>
+  <img class='pms-page-ico' src='data:image/png;base64,{b64i}' alt='{label}' />
+</div>""",
+            unsafe_allow_html=True,
+        )
+
 def _sync_owner_from_home():
     try:
         val = st.session_state.get("owner_select")
@@ -719,13 +792,13 @@ def _render_home(owner_key: str):
                 unsafe_allow_html=True,
             )
 
-    st.title("🏠 Home")
+    _render_page_header('home', 'Home', show_title=True)
     st.caption("Choisis ton équipe ci-dessous.")
 
     st.subheader("🏒 Sélection d'équipe")
     st.caption("Cette sélection alimente Alignement / GM / Transactions (même clé session_state).")
 
-    colA, colB = st.columns([7, 2])
+    colA, colB = st.columns([6.8, 1.8])
     with colA:
         idx = POOL_TEAMS.index(owner_key) if owner_key in POOL_TEAMS else 0
         st.selectbox(
@@ -835,6 +908,9 @@ def main():
     if active == "home":
         _render_home(owner)
         return
+
+    # Center icon for other pages (keeps tab modules intact; shows the same PNG icon as sidebar)
+    _render_page_header(active, _nav_label(active), show_title=True)
 
     mods = _safe_import_tabs()
     mod = mods.get(active)
