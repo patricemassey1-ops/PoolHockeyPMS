@@ -861,32 +861,39 @@ def _render_home(owner_key: str):
 </div></div>""",
                 unsafe_allow_html=True,
             )
-def _safe_import_tabs() -> Dict[str, Any]:
-    """
-    IMPORTANT:
-    - Avoid importing tabs/__init__.py that imports everything.
-    - Your tabs/__init__.py should be EMPTY or minimal.
-    """
-    modules: Dict[str, Any] = {}
-    try:
-        import importlib
-        for slug, mod in [
-            ("joueurs", "tabs.joueurs"),
-            ("alignement", "tabs.alignement"),
-            ("transactions", "tabs.transactions"),
-            ("gm", "tabs.gm"),
-            ("historique", "tabs.historique"),
-            ("classement", "tabs.classement"),
-            ("admin", "tabs.admin"),
-        ]:
-            try:
-                modules[slug] = importlib.import_module(mod)
-            except Exception as e:
-                modules[slug] = e
-    except Exception:
-        pass
-    return modules
+TAB_MODULES = {
+    "home": None,
+    "gm": "tabs.gm",
+    "joueurs": "tabs.joueurs",
+    "alignement": "tabs.alignement",
+    "transactions": "tabs.transactions",
+    "historique": "tabs.historique",
+    "classement": "tabs.classement",
+    "admin": "tabs.admin",
+}
 
+@st.cache_resource(show_spinner=False)
+def _import_module_cached(modpath: str):
+    import importlib
+    return importlib.import_module(modpath)
+
+def _safe_import_tab(slug: str):
+    modpath = TAB_MODULES.get(slug)
+    if not modpath:
+        return None
+    try:
+        return _import_module_cached(modpath)
+    except Exception as e:
+        return e
+
+def _safe_import_tabs() -> Dict[str, Any]:
+    """Compatibility helper (avoid using this in main; it's slower)."""
+    modules: Dict[str, Any] = {}
+    for slug, modpath in TAB_MODULES.items():
+        if not modpath:
+            continue
+        modules[slug] = _safe_import_tab(slug)
+    return modules
 
 def _render_module(mod: Any, ctx: Dict[str, Any]):
     if isinstance(mod, Exception):
@@ -911,6 +918,7 @@ def main():
     st.session_state.setdefault("owner", "Canadiens")
     st.session_state.setdefault("active_tab", "home")
     st.session_state.setdefault("_pms_qp_applied", False)
+    st.session_state.setdefault("_pms_booted", False)
     st.session_state.setdefault("pms_sidebar_collapsed", False)
     st.session_state.setdefault("pms_light_mode", False)
 
@@ -921,8 +929,11 @@ def main():
     qp = (_get_query_tab() or "").strip().lower()
     allowed = {it.slug for it in NAV_ORDER}
     # Apply URL query param only once (otherwise it can overwrite sidebar clicks and feel like "2 clicks").
-    if qp in allowed and not bool(st.session_state.get("_pms_qp_applied", False)):
-        st.session_state["active_tab"] = qp
+    # Apply URL query param only at first boot (prevents overwrite + avoids the '2 clicks' feeling).
+    if not bool(st.session_state.get("_pms_booted", False)):
+        if qp in allowed:
+            st.session_state["active_tab"] = qp
+        st.session_state["_pms_booted"] = True
         st.session_state["_pms_qp_applied"] = True
 
     # Owner is needed for access control + sidebar rendering.
@@ -955,8 +966,7 @@ def main():
     # Center icon for other pages (keeps tab modules intact; shows the same PNG icon as sidebar)
     _render_page_header(active, _nav_label(active), show_title=True)
 
-    mods = _safe_import_tabs()
-    mod = mods.get(active)
+    mod = _safe_import_tab(active)
     if mod is None:
         st.warning("Onglet indisponible.")
         return
