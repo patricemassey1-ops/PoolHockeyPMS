@@ -403,13 +403,20 @@ section[data-testid="stSidebar"] > div {
 
 /* Expanded sidebar nav: bigger icons + perfect vertical alignment */
 section[data-testid="stSidebar"] .pms-nav img.pms-emoji{
-  width: 84px !important;
-  height: 84px !important;
-  border-radius: 18px !important;
+  width: 120px !important;
+  height: 120px !important;
+  border-radius: 22px !important;
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.10);
   box-shadow: 0 10px 30px rgba(0,0,0,0.25);
-  padding: 2px;
+  padding: 0px;
+}
+
+/* Sidebar nav button height to match big emoji */
+section[data-testid="stSidebar"] .pms-nav .stButton > button{
+  min-height: 120px !important;
+  padding-top: 0.55rem !important;
+  padding-bottom: 0.55rem !important;
 }
 section[data-testid="stSidebar"] .pms-nav div[data-testid="stHorizontalBlock"]{
   align-items:center !important;
@@ -675,7 +682,7 @@ def _sidebar_nav(owner_key: str, active_slug: str):
 
             st.sidebar.markdown("</div>", unsafe_allow_html=True)
         else:
-            c1, c2 = st.sidebar.columns([1.6, 4.0], gap="small")
+            c1, c2 = st.sidebar.columns([2.8, 4.0], gap="small")
             with c1:
                 if icon_p and icon_p.exists():
                     b64i = _b64_png(icon_p)
@@ -859,6 +866,7 @@ def _render_home(owner_key: str):
 </div></div>""",
                 unsafe_allow_html=True,
             )
+@st.cache_resource(show_spinner=False)
 def _safe_import_tabs() -> Dict[str, Any]:
     """
     IMPORTANT:
