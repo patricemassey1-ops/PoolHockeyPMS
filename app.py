@@ -60,6 +60,26 @@ EMOJI_FILES = {
     "classement": "emoji_coupe.png",
 }
 
+# =========================
+# NAV order (single page)
+# =========================
+@dataclass(frozen=True)
+class NavItem:
+    slug: str
+    label: str
+
+NAV_ORDER: list[NavItem] = [
+    NavItem("home", "Home"),
+    NavItem("gm", "GM"),
+    NavItem("joueurs", "Joueurs"),
+    NavItem("alignement", "Alignement"),
+    NavItem("transactions", "Transactions"),
+    NavItem("historique", "Historique"),
+    NavItem("classement", "Classement"),
+    NavItem("admin", "Admin"),
+]
+
+
 GM_LOGO = DATA_DIR / "gm_logo.png"
 POOL_LOGO = DATA_DIR / "logo_pool.png"
 
@@ -543,17 +563,12 @@ def main():
 
     owner = str(st.session_state.get("owner") or "Canadiens")
     active = str(st.session_state.get("active_tab") or "home")
-
-    # Sidebar: season + nav
-    with st.sidebar:
-        st.selectbox("Saison", ["2025-2026"], index=0, key="season_select", label_visibility="visible")
-
+    # Sidebar: season + nav (handled inside _sidebar_nav)
     _sidebar_nav(owner, active)
 
     # Prevent non-whalers from accessing Admin
     if active == "admin" and owner != "Whalers":
         st.session_state["active_tab"] = "home"
-        _set_query_tab("home")
         active = "home"
 
     # Context passed to tabs
