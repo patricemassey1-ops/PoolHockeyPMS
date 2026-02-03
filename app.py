@@ -170,6 +170,134 @@ def _apply_css():
     """Inject global CSS (SAFE: all CSS stays inside strings)."""
     css = r"""
 <style>
+
+/* === Apple WOW++++++++++++ Active Pill (expanded sidebar) === */
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]{
+  background: linear-gradient(180deg, rgba(255,92,92,1) 0%, rgba(239,68,68,1) 55%, rgba(220,38,38,1) 100%) !important;
+  border: 1px solid rgba(255,255,255,0.18) !important;
+  box-shadow:
+    0 18px 55px rgba(239,68,68,0.28),
+    inset 0 1px 0 rgba(255,255,255,0.22),
+    inset 0 -10px 22px rgba(0,0,0,0.18) !important;
+  position: relative !important;
+  overflow: hidden !important;
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]::before{
+  content:"";
+  position:absolute;
+  left: 10px;
+  right: 10px;
+  top: 7px;
+  height: 55%;
+  border-radius: 14px;
+  background: radial-gradient(ellipse at top, rgba(255,255,255,0.26) 0%, rgba(255,255,255,0.10) 42%, rgba(255,255,255,0.00) 70%);
+  pointer-events:none;
+}
+@keyframes pmsPillSheen {
+  0% { transform: translateX(-120%) rotate(12deg); opacity: 0.0; }
+  18% { opacity: 0.20; }
+  100% { transform: translateX(220%) rotate(12deg); opacity: 0.0; }
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]::after{
+  content:"";
+  position:absolute;
+  inset:-40% -60%;
+  background: linear-gradient(90deg,
+    rgba(255,255,255,0.00) 0%,
+    rgba(255,255,255,0.10) 40%,
+    rgba(255,255,255,0.22) 50%,
+    rgba(255,255,255,0.10) 60%,
+    rgba(255,255,255,0.00) 100%);
+  transform: translateX(-140%) rotate(12deg);
+  opacity: 0;
+  pointer-events:none;
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover::after{
+  animation: pmsPillSheen 780ms ease-out;
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]:active{
+  transform: translateY(0px) scale(0.985) !important;
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] p,
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
+  color: rgba(255,255,255,0.98) !important;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.22);
+}
+
+
+/* === Apple WOW+++++++++++ Dock (collapsed) === */
+.pms-nav.pms-collapsed { padding-top: 6px; }
+.pms-dock-item{ position: relative; display:flex; justify-content:center; align-items:center; margin: 10px 0; }
+.pms-dock-ico{
+  width: 58px; height: 58px; border-radius: 18px; object-fit: contain;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 18px 55px rgba(0,0,0,0.28);
+}
+.pms-dock-item.active .pms-dock-ico{
+  transform: scale(1.05);
+  box-shadow: 0 18px 46px rgba(239,68,68,0.22), 0 0 0 2px rgba(239,68,68,0.30);
+}
+.pms-dock-item:hover .pms-dock-ico{ transform: translateY(-1px) scale(1.03); }
+
+/* Invisible overlay button in dock */
+.pms-dock-item .stButton{ position:absolute; inset:0; margin:0 !important; display:flex; justify-content:center; align-items:center; }
+.pms-dock-item .stButton > button{
+  width: 58px !important; height: 58px !important; border-radius: 18px !important;
+  opacity: 0 !important; padding:0 !important; margin:0 !important;
+}
+
+/* Team logo next to dropdown */
+.pms-team-hero{ height: 100%; display:flex; align-items:center; justify-content:center; }
+.pms-team-hero img{
+  width: 96px; height: 96px; border-radius: 20px; object-fit: contain;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 18px 60px rgba(0,0,0,0.30);
+}
+
+/* Hide tiny loader dots/containers sometimes rendered by st.image */
+div[data-testid="stImage"] > div { display:none !important; }
+
+
+/* === Apple WOW+++++++ === */
+
+/* hide Streamlit image loaders (little circles) */
+section[data-testid="stSidebar"] [role="progressbar"],
+section.main [role="progressbar"] { display:none !important; }
+
+/* global polish */
+* { -webkit-font-smoothing: antialiased; }
+section[data-testid="stSidebar"] > div {
+  backdrop-filter: blur(18px) saturate(125%) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(125%) !important;
+}
+
+/* premium glass cards */
+.pms-card, .pms-chip, .pms-item, section[data-testid="stSidebar"] .stButton > button {
+  border: 1px solid rgba(255,255,255,.10) !important;
+  box-shadow: 0 18px 55px rgba(0,0,0,.26) !important;
+}
+
+/* icon sizes */
+:root{
+  --pms-emo: 72px;
+  --pms-emo-c: 52px;
+  --pms-gm: 120px;
+}
+
+/* keep ratio for all icons */
+.pms-item img, .pms-brand img, .pms-team-badge img { object-fit: contain !important; }
+
+/* hover + active */
+section[data-testid="stSidebar"] .stButton > button:hover { transform: translateY(-1px); }
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+  box-shadow: 0 14px 38px rgba(239,68,68,.22) !important;
+}
+
+/* collapsed sidebar: hide any leftover labels */
+.pms-collapsed label, .pms-collapsed .stSelectbox { display:none !important; }
+
 /* Layout: custom sidebar widths */
 section[data-testid="stSidebar"] {
   width: var(--pms-sb-w, 320px) !important;
@@ -263,6 +391,15 @@ section[data-testid="stSidebar"] div.stButton > button:active {
 /* Snap page transition */
 @keyframes pmsPageIn { from { opacity:0; transform:translateY(6px);} to { opacity:1; transform:translateY(0px);} }
 section.main .block-container { animation: pmsPageIn 240ms ease-out; }
+
+/* micro iOS press for all sidebar buttons */
+section[data-testid="stSidebar"] .stButton > button{
+  transition: transform 120ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+section[data-testid="stSidebar"] .stButton > button:active{
+  transform: scale(0.985);
+}
+
 </style>
 """
     st.markdown(css, unsafe_allow_html=True)
@@ -320,10 +457,10 @@ def _sidebar_nav(owner_key: str, active_slug: str):
     gm_logo = _gm_logo_path()
     if gm_logo and gm_logo.exists():
         st.sidebar.markdown("<div class='pms-brand pms-chip'>", unsafe_allow_html=True)
-        st.sidebar.image(str(gm_logo), width=80)
+        st.sidebar.image(str(gm_logo), width=110)
         st.sidebar.markdown("</div>", unsafe_allow_html=True)
-        st.sidebar.markdown("**Pool GM**")
-
+        if not collapsed:
+            st.sidebar.markdown("**Pool GM**")
     # Team badge (optional in expanded)
     if not collapsed:
         t_logo = _team_logo_path(owner_key)
@@ -345,19 +482,28 @@ def _sidebar_nav(owner_key: str, active_slug: str):
     for it in items:
         icon_p = _emoji_path(it.slug)  # png emoji (no stretch)
         is_active = (it.slug == active_slug)
-        # Collapsed: icon-only button
+        # Collapsed: iOS dock item (image + invisible overlay button)
         if collapsed:
-            # show icon
+            cls = "pms-dock-item active" if is_active else "pms-dock-item"
+            st.sidebar.markdown(f"<div class='{cls}'>", unsafe_allow_html=True)
+
             if icon_p and icon_p.exists():
-                st.sidebar.image(str(icon_p), width=44)
-            # clickable button (icon-only)
+                b64 = _b64_png(icon_p)
+                st.sidebar.markdown(
+                    f"<img class='pms-dock-ico' src='data:image/png;base64,{b64}' alt='{it.label}'/>",
+                    unsafe_allow_html=True,
+                )
+
+            # Invisible overlay button (captures click, no ugly box)
             if st.sidebar.button(" ", key=f"nav_{it.slug}", help=it.label, type="primary" if is_active else "secondary"):
                 st.session_state["active_tab"] = it.slug
+
+            st.sidebar.markdown("</div>", unsafe_allow_html=True)
         else:
             c1, c2 = st.sidebar.columns([1.1, 3.4], gap="small")
             with c1:
                 if icon_p and icon_p.exists():
-                    st.image(str(icon_p), width=60)
+                    st.image(str(icon_p), width=82)
             with c2:
                 if st.button(it.label, key=f"nav_{it.slug}", use_container_width=True, type="primary" if is_active else "secondary"):
                     st.session_state["active_tab"] = it.slug
@@ -463,7 +609,7 @@ def _sync_owner_from_home():
 def _render_home(owner_key: str):
     # ✅ Pool logo (double size) — centered ABOVE title
     if POOL_LOGO.exists():
-        c1, c2, c3 = st.columns([1, 4, 1])
+        c1, c2, c3 = st.columns([1, 6, 1])
         with c2:
             st.markdown("<div class='pms-chip'>", unsafe_allow_html=True)
             st.image(str(POOL_LOGO), use_container_width=True)
@@ -489,8 +635,9 @@ def _render_home(owner_key: str):
     with colB:
         p = _team_logo_path(new_owner)
         if p and p.exists():
-            st.markdown("<div class='pms-chip'>", unsafe_allow_html=True)
-            st.image(str(p), width=72)
+            b64t = _b64_png(p)
+            st.markdown("<div class='pms-team-hero'>", unsafe_allow_html=True)
+            st.markdown(f"<img src='data:image/png;base64,{b64t}' alt='team' />", unsafe_allow_html=True)
             st.markdown("</div>", unsafe_allow_html=True)
 
     st.success(f"✅ Équipe sélectionnée: {TEAM_LABEL.get(new_owner, new_owner)}")
