@@ -12,6 +12,23 @@ from typing import Dict, Any, List, Optional
 import pandas as pd
 import streamlit as st
 
+# -----------------------------------------------------
+# Cache helpers (speed: avoid re-reading CSV on every rerun)
+# -----------------------------------------------------
+def _file_sig(path: str) -> tuple[int, int]:
+    try:
+        st_ = os.stat(path)
+        return (int(st_.st_mtime_ns), int(st_.st_size))
+    except Exception:
+        return (0, 0)
+
+@st.cache_data(show_spinner=False)
+def _read_csv_cached(path: str, sig: tuple[int, int]) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path, low_memory=False)
+    except Exception:
+        return pd.read_csv(path, engine="python", on_bad_lines="skip", low_memory=False)
+
 
 # =====================================================
 # Helpers
@@ -52,15 +69,7 @@ def _norm_player_key(name: str) -> str:
 
 
 def _safe_read_csv(path: str) -> pd.DataFrame:
-    if not path or not os.path.exists(path):
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(path)
-    except Exception:
-        try:
-            return pd.read_csv(path, engine="python", on_bad_lines="skip")
-        except Exception:
-            return pd.DataFrame()
+    return _read_csv_cached(path, _file_sig(path))
 
 
 def _safe_write_csv(df: pd.DataFrame, path: str) -> bool:
@@ -129,7 +138,6 @@ def _safe_owner_from_session() -> str:
     return str(st.session_state.get("selected_owner") or st.session_state.get("owner") or "").strip()
 
 
-@st.cache_data(show_spinner=False)
 def _asset_dirs(data_dir: str) -> List[str]:
     return [
         os.path.join("assets", "previews"),
@@ -138,7 +146,6 @@ def _asset_dirs(data_dir: str) -> List[str]:
     ]
 
 
-@st.cache_data(show_spinner=False)
 def _find_team_logo(owner: str, data_dir: str) -> str:
     """
     Cherche un logo d'équipe correspondant au GM/Owner.

@@ -15,8 +15,6 @@ import os
 import re
 import requests
 import pandas as pd
-import csv
-import io
 
 # =====================================================
 # ROSTERS (pool teams) — robust reader for Fantrax-like CSV exports
@@ -64,7 +62,6 @@ def _find_header_line(lines):
             best_i = i
     return best_i
 
-@st.cache_data(show_spinner=False)
 def read_roster_csv_robust(path: str) -> pd.DataFrame:
     """Read a roster CSV robustly (Fantrax exports often include extra header rows)."""
     try:
@@ -111,7 +108,6 @@ def _pool_team_from_filename(path: str) -> str:
     # normalize common casing
     return name
 
-@st.cache_data(show_spinner=False)
 def build_owned_index_from_rosters(data_dir: str) -> dict:
     """Return dict: norm_player_key -> pool_team_name, by scanning roster csv files in data_dir."""
     owned = {}
@@ -163,12 +159,6 @@ DATA_DIR = "data"
 if not os.path.isdir(DATA_DIR) and os.path.isdir("Data"):
     DATA_DIR = "Data"
 PLAYERS_PATH = os.path.join(DATA_DIR, "hockey.players.csv")
-def _file_sig(path: str) -> str:
-    try:
-        stt = os.stat(path)
-        return f"{int(stt.st_mtime)}:{stt.st_size}"
-    except Exception:
-        return "0:0"
 
 PMS_TEAM_FILES = [
     "Whalers.csv",
@@ -362,7 +352,7 @@ def render_team_with_logo(team_abbrev: str):
 # Load local players DB
 # ----------------------------
 @st.cache_data(show_spinner=False)
-def load_players_db(path: str, _sig: str | None = None) -> pd.DataFrame:
+def load_players_db(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame()
 
@@ -473,7 +463,49 @@ def _read_csv_loose(path: str) -> pd.DataFrame:
         except Exception:
             return pd.DataFrame()
 
+
 @st.cache_data(show_spinner=False)
+def _load_owned_index_cached(data_dir: str, season_lbl: str | None, sig: tuple[int, int, int]) -> dict:
+    # Wrapper to make load_owned_index cacheable with file signatures.
+    return load_owned_index(data_dir, season_lbl)
+
+def _owned_sig(data_dir: str, season_lbl: str | None) -> tuple[int, int, int]:
+    # Returns (max_mtime_ns, total_size, file_count) across candidate sources.
+    try:
+        season_lbl = str(season_lbl or "").strip()
+        candidates = []
+        if season_lbl:
+            candidates += [
+                f"equipes_joueurs_{season_lbl}.csv",
+                f"equipes_joueurs_{season_lbl.replace('-', '_')}.csv",
+            ]
+        candidates += [
+            "equipes_joueurs_2025-2026.csv",
+            "equipes_joueurs_2025_2026.csv",
+            "equipes_joueurs.csv",
+            "Whalers.csv",
+            "Canadiens.csv",
+            "Nordiques.csv",
+            "Red_Wings.csv",
+            "Predateurs.csv",
+            "Cracheurs.csv",
+        ]
+        mt = 0
+        sz = 0
+        n = 0
+        for fn in candidates:
+            p = os.path.join(data_dir, fn)
+            if not os.path.exists(p):
+                continue
+            st_ = os.stat(p)
+            mt = max(mt, int(st_.st_mtime_ns))
+            sz += int(st_.st_size)
+            n += 1
+        return (mt, sz, n)
+    except Exception:
+        return (0, 0, 0)
+
+
 def load_owned_index(data_dir: str, season_lbl: str | None = None) -> dict:
     """
     Index des joueurs déjà dans une équipe du pool (pour "Disponible / Non disponible").
@@ -563,7 +595,6 @@ def load_owned_index(data_dir: str, season_lbl: str | None = None) -> dict:
 
     # --- 2) Fallback: fichiers d'équipes
     return load_owned_index_from_team_files(data_dir)
-@st.cache_data(show_spinner=False)
 def load_owned_index_from_team_files(data_dir: str) -> dict:
     """Index des joueurs déjà dans une équipe du pool.
 
@@ -942,12 +973,12 @@ def render_local_pro_panel(row: pd.DataFrame):
 def render_tab_joueurs():
     st.header("🏒 Joueurs")
 
-    df = load_players_db(PLAYERS_PATH, _file_sig(PLAYERS_PATH))
+    df = load_players_db(PLAYERS_PATH)
     if df.empty:
         st.error("❌ data/hockey.players.csv introuvable ou vide.")
         return
-
-    owned_idx = load_owned_index(DATA_DIR, st.session_state.get('season_lbl') or st.session_state.get('season') or '')
+    season_lbl = (st.session_state.get('season_lbl') or st.session_state.get('season') or '').strip()
+    owned_idx = _load_owned_index_cached(DATA_DIR, season_lbl, _owned_sig(DATA_DIR, season_lbl))
 
     # Filtres (1 ligne)
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])

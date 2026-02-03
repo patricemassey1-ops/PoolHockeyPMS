@@ -7,16 +7,23 @@ import pandas as pd
 import streamlit as st
 
 from services.event_log import read_events, event_log_path
-def _file_sig(path: str) -> str:
+
+# -----------------------------------------------------
+# Cache helpers (speed: avoid re-reading event log on every rerun)
+# -----------------------------------------------------
+def _file_sig(path: str) -> tuple[int, int]:
     try:
-        stt = os.stat(path)
-        return f"{int(stt.st_mtime)}:{stt.st_size}"
+        st_ = os.stat(path)
+        return (int(st_.st_mtime_ns), int(st_.st_size))
     except Exception:
-        return "0:0"
+        return (0, 0)
 
 @st.cache_data(show_spinner=False)
-def _read_events_cached(path: str, _sig: str) -> pd.DataFrame:
-    return read_events(path)
+def _read_events_cached(path: str, sig: tuple[int, int]):
+    try:
+        return _read_events_cached(path, _file_sig(path))
+    except Exception:
+        return []
 
 
 def _data_dir(ctx: dict) -> str:

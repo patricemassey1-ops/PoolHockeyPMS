@@ -1,13 +1,25 @@
 # tabs/alignement.py
 from __future__ import annotations
 
+import os
 import streamlit as st
 import pandas as pd
 
 from services.roster_common import load_roster, normalize_roster_df, players_db_path, derive_scope
+
+# -----------------------------------------------------
+# Cache helpers (speed: avoid re-reading roster on every rerun)
+# -----------------------------------------------------
+def _file_sig(path: str) -> tuple[int, int]:
+    try:
+        st_ = os.stat(path)
+        return (int(st_.st_mtime_ns), int(st_.st_size))
+    except Exception:
+        return (0, 0)
+
 @st.cache_data(show_spinner=False)
-def _load_roster_cached(data_dir: str, season: str, owner_key: str) -> tuple[pd.DataFrame, str]:
-    # owner_key is only to vary the cache when user switches owner/team
+def _load_roster_cached(data_dir: str, season: str, owner: str, roster_sig: tuple[int, int], players_sig: tuple[int, int]):
+    # Keyed by owner + file signatures. load_roster reads st.session_state internally; owner arg keeps cache safe.
     return load_roster(data_dir, season)
 
 
@@ -17,9 +29,10 @@ def render(ctx: dict) -> None:
     data_dir = str(ctx.get("DATA_DIR") or "data")
     season = str(ctx.get("season") or "2025-2026").strip() or "2025-2026"
 
-    owner_key = str(st.session_state.get("selected_owner") or ctx.get("selected_owner") or "").strip()
-
-    df, roster_path = _load_roster_cached(data_dir, season, owner_key)
+    owner = str(st.session_state.get('owner') or 'Canadiens')
+    roster_guess = os.path.join(data_dir, f"{owner}.csv")
+    players_path = str(players_db_path(data_dir))
+    df, roster_path = _load_roster_cached(data_dir, season, owner, _file_sig(roster_guess), _file_sig(players_path))
     st.caption(f"Roster: {roster_path}")
 
     if df is None or df.empty:
