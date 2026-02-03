@@ -322,7 +322,7 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
 }
 
 /* Team logo next to dropdown (rounded card + transparent logo) */
-.pms-team-hero{ height: 100%; display:flex; align-items:center; justify-content:center; }
+.pms-team-hero{ display:flex; align-items:center; justify-content:center; min-height: 92px; margin-top: 26px; }
 .pms-team-card{
   border-radius: 22px;
   padding: 14px;
@@ -338,8 +338,25 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
   display: block;
 }
 
+/* Pool logo centered above Home */
+.pms-pool-wrap{ display:flex; justify-content:center; margin: 6px 0 14px 0; }
+.pms-pool-card{
+  border-radius: 24px;
+  padding: 16px 18px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 18px 60px rgba(0,0,0,0.28);
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+}
+.pms-pool-card img{ width: 220px; height: auto; display:block; object-fit: contain; }
+
 /* Hide tiny loader dots/containers sometimes rendered by st.image */
-div[data-testid="stImage"] > div { display:none !important; }
+/* Hide Streamlit image skeleton/loader artifacts (keep real images visible) */
+div[data-testid="stImage"] [data-testid="stSkeleton"] { display:none !important; }
+div[data-testid="stImage"] [role="progressbar"] { display:none !important; }
+div[data-testid="stImage"] svg { display:none !important; }
 
 
 /* === Apple WOW+++++++ === */
@@ -539,17 +556,17 @@ def _sidebar_nav(owner_key: str, active_slug: str):
     gm_logo = _gm_logo_path()
     if gm_logo and gm_logo.exists():
         st.sidebar.markdown("<div class='pms-brand pms-chip'>", unsafe_allow_html=True)
-        st.sidebar.image(str(gm_logo), width=110)
+        st.sidebar.image(str(gm_logo), width=(56 if collapsed else 110))
         st.sidebar.markdown("</div>", unsafe_allow_html=True)
         if not collapsed:
             st.sidebar.markdown("**Pool GM**")
-    # Team badge (optional in expanded)
-    if not collapsed:
-        t_logo = _team_logo_path(owner_key)
-        if t_logo and t_logo.exists():
-            st.sidebar.markdown("<div class='pms-chip' style='margin-top:10px'>", unsafe_allow_html=True)
-            st.sidebar.image(str(t_logo), width=48)
-            st.sidebar.markdown("</div>", unsafe_allow_html=True)
+    # Team badge (show in sidebar, also in collapsed but smaller)
+    t_logo = _team_logo_path(owner_key)
+    if t_logo and t_logo.exists():
+        st.sidebar.markdown("<div class='pms-chip' style='margin-top:10px'>", unsafe_allow_html=True)
+        st.sidebar.image(str(t_logo), width=(44 if collapsed else 56))
+        st.sidebar.markdown("</div>", unsafe_allow_html=True)
+        if not collapsed:
             st.sidebar.markdown(f"**{TEAM_LABEL.get(owner_key, owner_key)}**")
 
     # Items
@@ -585,7 +602,8 @@ def _sidebar_nav(owner_key: str, active_slug: str):
             c1, c2 = st.sidebar.columns([1.1, 3.4], gap="small")
             with c1:
                 if icon_p and icon_p.exists():
-                    st.image(str(icon_p), width=82)
+                    b64i = _b64_png(icon_p)
+                    st.markdown(f"<img class='pms-emoji' src='data:image/png;base64,{b64i}' style='width:72px;height:72px;border-radius:16px;' />", unsafe_allow_html=True)
             with c2:
                 if st.button(it.label, key=f"nav_{it.slug}", use_container_width=True, type="primary" if is_active else "secondary"):
                     st.session_state["active_tab"] = it.slug
@@ -689,13 +707,17 @@ def _sync_owner_from_home():
         pass
 
 def _render_home(owner_key: str):
-    # ✅ Pool logo (double size) — centered ABOVE title
+    # ✅ Pool logo — centered ABOVE title
     if POOL_LOGO.exists():
-        c1, c2, c3 = st.columns([1, 6, 1])
-        with c2:
-            st.markdown("<div class='pms-chip'>", unsafe_allow_html=True)
-            st.image(str(POOL_LOGO), use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+        p = _transparent_copy_edge(POOL_LOGO)
+        b64p = _b64_png(p) if p and p.exists() else _b64_png(POOL_LOGO)
+        if b64p:
+            st.markdown(
+                f"""<div class='pms-pool-wrap'><div class='pms-pool-card'>
+<img src='data:image/png;base64,{b64p}' alt='pool' />
+</div></div>""",
+                unsafe_allow_html=True,
+            )
 
     st.title("🏠 Home")
     st.caption("Choisis ton équipe ci-dessous.")
@@ -703,7 +725,7 @@ def _render_home(owner_key: str):
     st.subheader("🏒 Sélection d'équipe")
     st.caption("Cette sélection alimente Alignement / GM / Transactions (même clé session_state).")
 
-    colA, colB = st.columns([6, 1.4])
+    colA, colB = st.columns([7, 2])
     with colA:
         idx = POOL_TEAMS.index(owner_key) if owner_key in POOL_TEAMS else 0
         st.selectbox(
