@@ -221,6 +221,34 @@ def _b64_png_cached(p: str, sig: tuple[int, int]) -> str:
 
 def _b64_png(path: Path) -> str:
     return _b64_png_cached(str(path), _file_sig(path))
+@st.cache_data(show_spinner=False, max_entries=256)
+def _b64_image_resized_cached(p: str, sig: tuple[int, int], max_w: int) -> tuple[str, str]:
+    """Return (mime, b64) for a resized WEBP (fast to transfer)."""
+    try:
+        from PIL import Image  # type: ignore
+        src = Path(p)
+        if not src.exists():
+            return ("", "")
+        im = Image.open(src).convert("RGBA")
+        if max_w and im.width > max_w:
+            h = max(1, int(im.height * (max_w / float(im.width))))
+            im = im.resize((max_w, h), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="WEBP", quality=82, method=6)
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return ("image/webp", b64)
+    except Exception:
+        # Fallback to raw bytes
+        try:
+            b = Path(p).read_bytes()
+            return ("image/png", base64.b64encode(b).decode("utf-8"))
+        except Exception:
+            return ("", "")
+
+def _b64_image(path: Path, max_w: int = 0) -> tuple[str, str]:
+    return _b64_image_resized_cached(str(path), _file_sig(path), int(max_w or 0))
+
+(str(path), _file_sig(path))
 
 
 
@@ -834,11 +862,11 @@ def _render_home(owner_key: str):
     # ✅ Pool logo — centered ABOVE title
     if POOL_LOGO.exists():
         p = _transparent_copy_edge(POOL_LOGO)
-        b64p = _b64_png(p) if p and p.exists() else _b64_png(POOL_LOGO)
+        mime_p, b64p = _b64_image(p if (p and p.exists()) else POOL_LOGO, max_w=680)
         if b64p:
             st.markdown(
                 f"""<div class='pms-pool-wrap'><div class='pms-pool-card'>
-<img src='data:image/png;base64,{b64p}' alt='pool' />
+<img src='data:{mime_p};base64,{b64p}' alt='pool' />
 </div></div>""",
                 unsafe_allow_html=True,
             )
@@ -864,13 +892,13 @@ def _render_home(owner_key: str):
 
     # Optional banner (rendered as HTML to avoid loader dots)
     banner = DATA_DIR / "nhl_teams_header_banner.png"
-    if banner.exists():
+    if active == 'home' and banner.exists():
         b = _transparent_copy_edge(banner)
-        b64b = _b64_png(b) if b and b.exists() else _b64_png(banner)
+        mime_b, b64b = _b64_image(b if (b and b.exists()) else banner, max_w=980)
         if b64b:
             st.markdown(
                 f"""<div class='pms-pool-wrap'><div class='pms-pool-card'>
-<img src='data:image/png;base64,{b64b}' alt='banner' />
+<img src='data:{mime_b};base64,{b64b}' alt='banner' />
 </div></div>""",
                 unsafe_allow_html=True,
             )
