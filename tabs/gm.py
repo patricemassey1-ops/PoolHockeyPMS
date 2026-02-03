@@ -19,13 +19,19 @@ def _file_sig(path: str) -> tuple[int, int]:
     except Exception:
         return (0, 0)
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, persist="disk", max_entries=32)
 def _read_csv_cached(path: str, sig: tuple[int, int]) -> pd.DataFrame:
-    # NOTE: keep behavior identical to previous _safe_read_csv
+    """CSV loader cached by (path, mtime_ns, size).
+
+    Prefer fast C engine; if parsing fails, retry with python engine.
+    """
     try:
-        return pd.read_csv(path, low_memory=False)
+        # Fast path (C engine). low_memory is supported here.
+        return pd.read_csv(path, engine="c", low_memory=False, on_bad_lines="skip")
     except Exception:
-        return pd.read_csv(path, engine="python", on_bad_lines="skip", low_memory=False)
+        # Fallback path (python engine). low_memory is NOT supported here.
+        return pd.read_csv(path, engine="python", on_bad_lines="skip")
+
 
 
 # =====================================================
@@ -239,7 +245,7 @@ def _season_end_year(season: str) -> Optional[int]:
 # =====================================================
 # Loaders
 # =====================================================
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, persist="disk", max_entries=8)
 def load_equipes_joueurs(data_dir: str, season: str) -> pd.DataFrame:
     path = _first_existing(
         os.path.join(data_dir, f"equipes_joueurs_{season}.csv"),
@@ -271,7 +277,7 @@ def load_equipes_joueurs(data_dir: str, season: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, persist="disk", max_entries=8)
 def load_players_db(data_dir: str) -> pd.DataFrame:
     path = _first_existing(
         os.path.join(data_dir, "hockey.players.csv"),
@@ -308,7 +314,7 @@ def load_players_db(data_dir: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, persist="disk", max_entries=8)
 def load_contracts(data_dir: str) -> pd.DataFrame:
     path = _first_existing(os.path.join(data_dir, "puckpedia.contracts.csv"))
     df = _safe_read_csv(path)
