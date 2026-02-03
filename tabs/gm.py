@@ -326,7 +326,18 @@ def load_players_db(data_dir: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False, persist="disk", max_entries=8)
+
+def _find_contracts_file(data_dir: str) -> str:
+    """Return first existing contracts CSV path (PuckPedia)."""
+    return _first_existing(
+        os.path.join(data_dir, "puckpedia.contracts.csv"),
+        os.path.join(data_dir, "PuckPedia2025_26.csv"),
+        os.path.join(data_dir, "puckpedia2025_26.csv"),
+        os.path.join(data_dir, "puckpedia2025_26_contracts.csv"),
+        os.path.join(data_dir, "puckpedia_contracts.csv"),
+    )
+
+@st.cache_data(show_spinner=False, persist=\"disk\", max_entries=8)
 def load_contracts(data_dir: str) -> pd.DataFrame:
     path = _first_existing(
         os.path.join(data_dir, "puckpedia.contracts.csv"),
@@ -409,12 +420,12 @@ def _build_owner_list(roster: pd.DataFrame) -> List[str]:
     if roster is None or roster.empty:
         return []
     owners = roster["_owner"].astype(str).str.strip()
-    owners = owners[owners.ne("") & owners.ne("nan")]
+    owners = owners[owners.ne("") & owners.ne("nan") & owners.ne("(N/A)")]
     return sorted(owners.unique().tolist())
 
 
-def _owner_summary(roster_all: pd.DataFrame, owner: str, plafonds: Dict[str, float]) -> Dict[str, Any]:
-    sub = roster_all[roster_all["_owner"].astype(str).str.strip() == str(owner).strip()].copy()
+def _owner_summary(roster_base: pd.DataFrame, owner: str, plafonds: Dict[str, float]) -> Dict[str, Any]:
+    sub = roster_base[roster_base["_owner"].astype(str).str.strip() == str(owner).strip()].copy()
     cap_total = float(sub["_cap_num"].sum()) if not sub.empty else 0.0
     counts = sub["_bucket"].value_counts().to_dict() if not sub.empty else {}
 
@@ -435,7 +446,11 @@ def _owner_summary(roster_all: pd.DataFrame, owner: str, plafonds: Dict[str, flo
 def _roster_table(df: pd.DataFrame) -> pd.DataFrame:
     show = pd.DataFrame()
     show["Joueur"] = df["_display_name"].astype(str)
-    show["Pos"] = df.get("Pos", "—").astype(str)
+    # Pos column can be missing; df.get default would be a scalar string -> no .astype
+    if isinstance(df, pd.DataFrame) and "Pos" in df.columns:
+        show["Pos"] = df["Pos"].astype(str)
+    else:
+        show["Pos"] = pd.Series(["—"] * len(df), index=df.index if isinstance(df, pd.DataFrame) else None)
     show["Team"] = df.get("Team", "—").astype(str)
     show["Country"] = df.get("Country", "—").astype(str)
     show["Level"] = df["_level"].astype(str).apply(_level_badge)
@@ -546,7 +561,7 @@ def _render_contracts(df: pd.DataFrame, season: str) -> None:
         st.dataframe(exp, use_container_width=True, hide_index=True)
 
 
-def _render_compare(owners: List[str], roster_all: pd.DataFrame, plafonds: Dict[str, float], season: str, data_dir: str) -> None:
+def _render_compare(owners: List[str], roster_base: pd.DataFrame, plafonds: Dict[str, float], season: str, data_dir: str) -> None:
     st.subheader("⚖️ Comparatif GM vs GM")
 
     if len(owners) < 2:
@@ -559,8 +574,8 @@ def _render_compare(owners: List[str], roster_all: pd.DataFrame, plafonds: Dict[
     with colB:
         o2 = st.selectbox("GM B", owners, index=1, key="gm_cmp_b")
 
-    s1 = _owner_summary(roster_all, o1, plafonds)
-    s2 = _owner_summary(roster_all, o2, plafonds)
+    s1 = _owner_summary(roster_base, o1, plafonds)
+    s2 = _owner_summary(roster_base, o2, plafonds)
 
     df_sum = pd.DataFrame(
         [
@@ -621,10 +636,12 @@ def render(ctx: dict) -> None:
         return
 
     players = load_players_db(data_dir)
-    contracts = load_contracts(data_dir)
+    # ⚡ PERF: contracts file can be very large (PuckPedia). Don't load it unless needed.
+    # We build a base roster from equipes + players only. Contracts are merged lazily in the Contracts tab.
+    contracts = pd.DataFrame()
 
-    roster_all = _merge_roster(equipes, players, contracts)
-    owners = _build_owner_list(roster_all)
+    roster_base = _merge_roster(equipes, players, contracts)
+    owners = _build_owner_list(roster_base)
     if not owners:
         st.error("Impossible de détecter les équipes/GM (colonne Owner/Proprietaire/Equipe manquante ?).")
         st.write("Colonnes détectées:", list(equipes.columns))
@@ -638,7 +655,7 @@ def render(ctx: dict) -> None:
     # Header pro + logos
     _render_header(selected_owner, data_dir)
 
-    summary = _owner_summary(roster_all, selected_owner, plafonds)
+    summary = _owner_summary(roster_base, selected_owner, plafonds)
 
     # Sous-onglets pro
     t_over, t_roster, t_contracts, t_compare = st.tabs(["📌 Vue d’ensemble", "📋 Roster", "📄 Contrats", "⚖️ Comparatif"])
@@ -668,15 +685,20 @@ def render(ctx: dict) -> None:
         _render_rosters(summary["df"])
 
     with t_contracts:
-        _render_contracts(summary["df"], season)
+        # Load contracts lazily (can be heavy). Cached on disk.
+        contracts2 = load_contracts(data_dir)
+        roster_with_contracts = _merge_roster(equipes, players, contracts2)
+        summary2 = _summary_for_owner(roster_with_contracts, selected_owner, plafonds)
+        _render_contracts(summary2["df"], season)
 
     with t_compare:
-        _render_compare(owners, roster_all, plafonds, season, data_dir)
+        # Comparatif can be heavy; use base roster first.
+        _render_compare(owners, roster_base, plafonds, season, data_dir)
 
     # Debug minimal
     with st.expander("🧪 Debug (sources)", expanded=False):
         st.write("equipes_joueurs:", equipes.attrs.get("__path__", ""))
         st.write("players db:", players.attrs.get("__path__", "(absent)"))
-        st.write("contracts:", contracts.attrs.get("__path__", "(absent)"))
+                st.write("contracts:", _find_contracts_file(data_dir) or "(absent)")
         st.write("gm_logo:", _find_image("gm_logo.png", data_dir) or "(introuvable)")
         st.write("team_logo:", _find_team_logo(selected_owner, data_dir) or "(introuvable)")
