@@ -1,696 +1,1032 @@
-# tabs/gm.py
 from __future__ import annotations
 
+import base64
 import os
-import re
-import unicodedata
-from typing import Dict, Any, List, Optional, Tuple
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-import pandas as pd
 import streamlit as st
 
-# -----------------------------------------------------
-# Cache helpers (speed: avoid re-reading CSV on every rerun)
-# -----------------------------------------------------
-def _file_sig(path: str) -> tuple[int, int]:
+# ============================================================
+# PoolHockeyPMS — App (Pro Sidebar + Emoji PNG nav)
+# Notes:
+# - st.set_page_config() MUST be called exactly once and first -> here.
+# - No other module (tabs/*) should call set_page_config.
+# ============================================================
+
+APP_TITLE = "Pool GM"
+DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
+ASSETS_DIR = Path(os.getenv("ASSETS_DIR", "assets")) / "previews"
+CACHE_UI_DIR = DATA_DIR / "_ui_cache"
+CACHE_UI_DIR.mkdir(parents=True, exist_ok=True)
+
+POOL_TEAMS = [
+    "Canadiens",
+    "Whalers",
+    "Nordiques",
+    "Red_Wings",
+    "Predateurs",
+    "Cracheurs",
+]
+
+TEAM_LABEL = {
+    "Canadiens": "Canadiens",
+    "Whalers": "Whalers",
+    "Nordiques": "Nordiques",
+    "Red_Wings": "Red Wings",
+    "Predateurs": "Prédateurs",
+    "Cracheurs": "Cracheurs",
+}
+
+# Team logo filenames (your repo has multiple variants; we pick the "best" if it exists)
+TEAM_LOGO_CANDIDATES = {
+    "Canadiens": ["Canadiens_Logo.png", "CanadiensE_Logo.png"],
+    "Whalers": ["Whalers_Logo.png", "WhalersE_Logo.png"],
+    "Nordiques": ["Nordiques_Logo.png", "NordiquesE_Logo.png"],
+    "Red_Wings": ["Red_Wings_Logo.png", "Red_WingsE_Logo.png"],
+    "Predateurs": ["Predateurs_Logo.png", "PredateursE_Logo-2.png", "PredateursE_Logo.png"],
+    "Cracheurs": ["Cracheurs_Logo.png", "CracheursE_Logo.png"],
+}
+
+# Emoji PNG in assets/previews (provided by you)
+EMOJI_FILES = {
+    "home": "emoji_home.png",
+    "gm": "emoji_gm.png",
+    "joueurs": "emoji_joueur.png",
+    "alignement": "emoji_alignement.png",
+    "transactions": "emoji_transaction.png",
+    "historique": "emoji_historique.png",
+    "classement": "emoji_coupe.png",
+}
+
+# =========================
+# NAV order (single page)
+# =========================
+@dataclass(frozen=True)
+class NavItem:
+    slug: str
+    label: str
+
+NAV_ORDER: list[NavItem] = [
+    NavItem("home", "Home"),
+    NavItem("gm", "GM"),
+    NavItem("joueurs", "Joueurs"),
+    NavItem("alignement", "Alignement"),
+    NavItem("transactions", "Transactions"),
+    NavItem("historique", "Historique"),
+    NavItem("classement", "Classement"),
+    NavItem("admin", "Admin"),
+]
+
+
+GM_LOGO = DATA_DIR / "gm_logo.png"
+POOL_LOGO = DATA_DIR / "logo_pool.png"
+
+# Apple-like red (close to your screenshot)
+RED_ACTIVE = "#ef4444"
+
+
+# ----------------------------
+# Transparent background helper
+# ----------------------------
+def _transparent_copy(src: Path, thr: int = 245) -> Path:
+    """
+    Creates a cached RGBA version removing near-white background.
+    Returns original if Pillow is unavailable or file missing.
+    """
     try:
-        st_ = os.stat(path)
+        if not src.exists():
+            return src
+        dst = CACHE_UI_DIR / (src.stem + "_t.png")
+        # Cache: regenerate only if missing or older
+        if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+            return dst
+
+        try:
+            from PIL import Image  # type: ignore
+        except Exception:
+            return src
+
+        im = Image.open(src).convert("RGBA")
+        px = im.getdata()
+        new_px = []
+        for r, g, b, a in px:
+            if a == 0:
+                new_px.append((r, g, b, 0))
+                continue
+            # remove near-white / paper-white
+            if r >= thr and g >= thr and b >= thr:
+                new_px.append((r, g, b, 0))
+            else:
+                new_px.append((r, g, b, a))
+        im.putdata(new_px)
+        im.save(dst, "PNG")
+        return dst
+    except Exception:
+        return src
+
+
+def _transparent_copy_edge(src: Path, thr: int = 245) -> Path:
+    """
+    Creates a cached RGBA version removing a near-white *edge-connected* background.
+    This preserves internal whites (e.g., logo highlights) while removing the white square behind it.
+    Returns original if Pillow is unavailable or file missing.
+    """
+    try:
+        if not src.exists():
+            return src
+        dst = CACHE_UI_DIR / (src.stem + "_edge_t.png")
+        # Cache: regenerate only if missing or older
+        if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+            return dst
+
+        try:
+            from PIL import Image  # type: ignore
+        except Exception:
+            return src
+
+        im = Image.open(src).convert("RGBA")
+        w, h = im.size
+        px = im.load()
+        if px is None:
+            return src
+
+        # Helper: near-white pixel?
+        def is_bg(x: int, y: int) -> bool:
+            r, g, b, a = px[x, y]
+            return a > 0 and r >= thr and g >= thr and b >= thr
+
+        # BFS flood fill from edges for background pixels
+        from collections import deque
+
+        visited = bytearray(w * h)
+        q = deque()
+
+        def push(x: int, y: int):
+            idx = y * w + x
+            if visited[idx]:
+                return
+            if not is_bg(x, y):
+                return
+            visited[idx] = 1
+            q.append((x, y))
+
+        # seed with corner pixels (preserves internal/edge whites better)
+        k = 6  # corner box size
+        for y in range(min(k, h)):
+            for x in range(min(k, w)):
+                push(x, y)  # top-left
+                push(w - 1 - x, y)  # top-right
+                push(x, h - 1 - y)  # bottom-left
+                push(w - 1 - x, h - 1 - y)  # bottom-right
+
+        while q:
+            x, y = q.popleft()
+            # Make transparent
+            r, g, b, a = px[x, y]
+            px[x, y] = (r, g, b, 0)
+            # neighbors
+            if x > 0:
+                push(x - 1, y)
+            if x < w - 1:
+                push(x + 1, y)
+            if y > 0:
+                push(x, y - 1)
+            if y < h - 1:
+                push(x, y + 1)
+
+        im.save(dst, "PNG")
+        return dst
+    except Exception:
+        return src
+
+
+@st.cache_data(show_spinner=False)
+def _file_sig(path: Path) -> tuple[int, int]:
+    try:
+        st_ = path.stat()
         return (int(st_.st_mtime_ns), int(st_.st_size))
     except Exception:
         return (0, 0)
 
-@st.cache_data(show_spinner=False, max_entries=32)
-def _read_csv_cached(path: str, sig: tuple[int, int]) -> pd.DataFrame:
-    """CSV loader cached by (path, mtime_ns, size).
-
-    Prefer fast C engine; if parsing fails, retry with python engine.
-    """
+@st.cache_data(show_spinner=False, max_entries=256)
+def _b64_png_cached(p: str, sig: tuple[int, int]) -> str:
     try:
-        # Fast path (C engine). low_memory is supported here.
-        return pd.read_csv(path, engine="c", low_memory=False, on_bad_lines="skip")
+        b = Path(p).read_bytes()
+        return base64.b64encode(b).decode("utf-8")
     except Exception:
-        # Fallback path (python engine). low_memory is NOT supported here.
-        return pd.read_csv(path, engine="python", on_bad_lines="skip")
-
-
-
-# =====================================================
-# Helpers
-# =====================================================
-def _data_dir(ctx: dict) -> str:
-    return str(ctx.get("DATA_DIR") or "data")
-
-
-def _season(ctx: dict) -> str:
-    return str(ctx.get("season") or st.session_state.get("season") or "2025-2026").strip() or "2025-2026"
-
-
-def _strip_accents(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s or "")
-    return "".join(ch for ch in s if not unicodedata.combining(ch))
-
-
-def _norm(s: str) -> str:
-    s = str(s or "").strip().lower()
-    s = _strip_accents(s)
-    s = re.sub(r"[^a-z0-9]+", " ", s).strip()
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def _norm_player_key(name: str) -> str:
-    s = str(name or "").strip()
-    if not s:
         return ""
-    s = _strip_accents(s).lower()
-    s = s.replace(".", " ").replace("-", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    if "," in s:
-        a, b = [p.strip() for p in s.split(",", 1)]
-        if a and b:
-            s = f"{b} {a}"
-    return s
+
+def _b64_png(path: Path) -> str:
+    return _b64_png_cached
+
+@st.cache_data(show_spinner=False, max_entries=256)
+def _b64_image_resized_cached(p: str, sig: tuple[int, int], max_w: int) -> tuple[str, str]:
+    """Return (mime, b64) for a resized WEBP (fast to transfer)."""
+    try:
+        from PIL import Image  # type: ignore
+        src = Path(p)
+        if not src.exists():
+            return ("", "")
+        im = Image.open(src).convert("RGBA")
+        if max_w and im.width > max_w:
+            h = max(1, int(im.height * (max_w / float(im.width))))
+            im = im.resize((max_w, h), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="WEBP", quality=82, method=6)
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return ("image/webp", b64)
+    except Exception:
+        # Fallback to raw bytes
+        try:
+            b = Path(p).read_bytes()
+            return ("image/png", base64.b64encode(b).decode("utf-8"))
+        except Exception:
+            return ("", "")
+
+def _b64_image(path: Path, max_w: int = 0) -> tuple[str, str]:
+    return _b64_image_resized_cached(str(path), _file_sig(path), int(max_w or 0))
+
+(str(path), _file_sig(path))
 
 
-def _first_existing(*paths: str) -> str:
-    for p in paths:
-        if p and os.path.exists(p):
+
+def _pick_existing(base_dir: Path, candidates: list[str]) -> Optional[Path]:
+    for name in candidates:
+        p = base_dir / name
+        if p.exists():
             return p
-    return ""
+    return None
 
 
-def _safe_read_csv(path: str) -> pd.DataFrame:
-    """Read a CSV safely and fast.
-
-    - Returns an empty DataFrame if path is empty or missing.
-    - Uses cached reader (C engine first, python fallback).
-    """
-    if not path:
-        return pd.DataFrame()
-    if not os.path.exists(path):
-        return pd.DataFrame()
-    try:
-        return _read_csv_cached(path, _file_sig(path))
-    except Exception:
-        return pd.DataFrame()
-
-
-def _guess_col(df: pd.DataFrame, candidates: List[str]) -> str:
-    for c in candidates:
-        if c in df.columns:
-            return c
-    return ""
-
-
-def _as_float(x) -> Optional[float]:
-    try:
-        if pd.isna(x):
-            return None
-        s = str(x).replace(",", "").replace("$", "").strip()
-        if not s:
-            return None
-        return float(s)
-    except Exception:
+def _team_logo_path(team: str) -> Path:
+    team = str(team or "").strip()
+    cands = TEAM_LOGO_CANDIDATES.get(team, [])
+    for fn in cands:
+        p = ASSETS_DIR / fn
+        if p.exists():
+            return _transparent_copy_edge(p)
+    p = ASSETS_DIR / f"{team}_Logo.png"
+    return _transparent_copy_edge(p) if p.exists() else Path("")
+def _emoji_path(slug: str) -> Optional[Path]:
+    fn = EMOJI_FILES.get(slug)
+    if not fn:
         return None
+    p = ASSETS_DIR / fn
+    return _transparent_copy(p) if p.exists() else None
 
 
-def _money(v) -> str:
-    f = _as_float(v)
-    if f is None:
-        s = str(v or "").strip()
-        return s if s else "—"
-    return f"{int(round(f)):,}".replace(",", " ") + " $"
+def _gm_logo_path() -> Path:
+    p = DATA_DIR / "gm_logo.png"
+    return p if p.exists() else Path("")
+
+def _apply_css():
+    """Inject global CSS (SAFE: all CSS stays inside strings)."""
+    css = r"""
+<style>
+
+/* === Apple WOW++++++++++++ Active Pill (expanded sidebar) === */
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]{
+  background: linear-gradient(180deg, rgba(255,92,92,1) 0%, rgba(239,68,68,1) 55%, rgba(220,38,38,1) 100%) !important;
+  border: 1px solid rgba(255,255,255,0.18) !important;
+  box-shadow:
+    0 18px 55px rgba(239,68,68,0.28),
+    inset 0 1px 0 rgba(255,255,255,0.22),
+    inset 0 -10px 22px rgba(0,0,0,0.18) !important;
+  position: relative !important;
+  overflow: hidden !important;
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]::before{
+  content:"";
+  position:absolute;
+  left: 10px;
+  right: 10px;
+  top: 7px;
+  height: 55%;
+  border-radius: 14px;
+  background: radial-gradient(ellipse at top, rgba(255,255,255,0.26) 0%, rgba(255,255,255,0.10) 42%, rgba(255,255,255,0.00) 70%);
+  pointer-events:none;
+}
+@keyframes pmsPillSheen {
+  0% { transform: translateX(-120%) rotate(12deg); opacity: 0.0; }
+  18% { opacity: 0.20; }
+  100% { transform: translateX(220%) rotate(12deg); opacity: 0.0; }
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]::after{
+  content:"";
+  position:absolute;
+  inset:-40% -60%;
+  background: linear-gradient(90deg,
+    rgba(255,255,255,0.00) 0%,
+    rgba(255,255,255,0.10) 40%,
+    rgba(255,255,255,0.22) 50%,
+    rgba(255,255,255,0.10) 60%,
+    rgba(255,255,255,0.00) 100%);
+  transform: translateX(-140%) rotate(12deg);
+  opacity: 0;
+  pointer-events:none;
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover::after{
+  animation: pmsPillSheen 780ms ease-out;
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"]:active{
+  transform: translateY(0px) scale(0.985) !important;
+}
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] p,
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
+  color: rgba(255,255,255,0.98) !important;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.22);
+}
 
 
-def _safe_str(v, default: str = "—") -> str:
-    if v is None:
-        return default
-    if isinstance(v, float) and pd.isna(v):
-        return default
-    s = str(v).strip()
-    return s if s else default
+/* === Apple WOW+++++++++++ Dock (collapsed) === */
+.pms-nav.pms-collapsed { padding-top: 6px; }
+.pms-dock-item{ position: relative; display:flex; justify-content:center; align-items:center; margin: 10px 0; }
+.pms-dock-ico{
+  width: 58px; height: 58px; border-radius: 18px; object-fit: contain;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 18px 55px rgba(0,0,0,0.28);
+}
+.pms-dock-item.active .pms-dock-ico{
+  transform: scale(1.05);
+  box-shadow: 0 18px 46px rgba(239,68,68,0.22), 0 0 0 2px rgba(239,68,68,0.30);
+}
+.pms-dock-item:hover .pms-dock-ico{ transform: translateY(-1px) scale(1.03); }
 
+/* Invisible overlay button in dock */
+.pms-dock-item .stButton{ position:absolute; inset:0; margin:0 !important; display:flex; justify-content:center; align-items:center; }
+.pms-dock-item .stButton > button{
+  width: 58px !important; height: 58px !important; border-radius: 18px !important;
+  opacity: 0 !important; padding:0 !important; margin:0 !important;
+}
 
-def _detect_bucket(label: str) -> str:
-    s = str(label or "").strip().lower()
-    if not s:
-        return "Autre"
-    if any(k in s for k in ["actif", "active", "starter", "lineup", "alignement", "a:"]):
-        return "Actifs"
-    if any(k in s for k in ["banc", "bench", "reserve", "res", "bn"]):
-        return "Banc"
-    if any(k in s for k in ["ir", "inj", "injury", "ltir"]):
-        return "IR"
-    if any(k in s for k in ["mineur", "minor", "ahl", "farm", "prospect"]):
-        return "Mineur"
-    return "Autre"
+/* Team logo next to dropdown (rounded card + transparent logo) */
+.pms-team-hero{ display:flex; align-items:center; justify-content:center; min-height: 92px; margin-top: 18px; }
+.pms-team-card{
+  border-radius: 22px;
+  padding: 14px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 18px 60px rgba(0,0,0,0.30);
+  display: inline-block;
+}
+.pms-team-card img{
+  width: 96px; height: 96px;
+  border-radius: 16px;
+  object-fit: contain;
+  display: block;
+}
 
+/* Pool logo centered above Home */
+.pms-pool-wrap{ display:flex; justify-content:center; margin: 6px 0 14px 0; }
+.pms-pool-card{
+  border-radius: 24px;
+  padding: 16px 18px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 18px 60px rgba(0,0,0,0.28);
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+}
+.pms-pool-card img{ width: min(704px, 100%);  height: auto; display:block; object-fit: contain; }
 
-def _resolve_plafonds(ctx: dict) -> Dict[str, float]:
-    pl = ctx.get("plafonds")
-    if isinstance(pl, dict):
-        out = {}
-        for k, v in pl.items():
-            f = _as_float(v)
-            if f is not None:
-                out[str(k)] = f
-        return out
+/* Brand row (GM + selected team) */
+.pms-brand-row{ display:flex; gap:12px; align-items:center; justify-content:flex-start; margin: 14px 0 6px 0; }
+.pms-brand-row .pms-chip{ padding: 8px; }
+.pms-brand-row img{ display:block; object-fit:contain; border-radius: 16px; }
+.pms-brand-row img.pms-gm{ width: 96px; height: 96px; }
+.pms-brand-row img.pms-team{ width: 96px; height: 96px; }
 
-    if isinstance(pl, pd.DataFrame) and not pl.empty:
-        owner_col = _guess_col(pl, ["Owner", "Proprietaire", "Équipe", "Equipe", "Team"])
-        cap_col = _guess_col(pl, ["Plafond", "Cap", "Cap Limit", "Limit", "Salary Cap"])
-        if owner_col and cap_col:
-            out = {}
-            for _, r in pl.iterrows():
-                o = str(r.get(owner_col, "") or "").strip()
-                f = _as_float(r.get(cap_col))
-                if o and f is not None:
-                    out[o] = f
-            return out
+/* Center page icon (Home/GM/Joueurs/...) */
+.pms-page-header{ display:flex; align-items:center; gap:10px; margin: 6px 0 10px 0; }
+.pms-page-ico{
+  width: clamp(260px, 20vw, 360px);
+  height: clamp(260px, 20vw, 360px);
+  border-radius: 0px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  object-fit: contain;
+  display:block;
+}
+.pms-page-title{ font-size: 3.0rem; font-weight: 800; line-height: 1.05; margin:0; padding:0; }
 
-    return {}
-
-
-def _asset_dirs(data_dir: str) -> List[str]:
-    return [
-        os.path.join("assets", "previews"),
-        data_dir,
-        ".",
-    ]
-
-
-def _find_image(filename: str, data_dir: str) -> str:
-    for d in _asset_dirs(data_dir):
-        p = os.path.join(d, filename)
-        if os.path.exists(p):
-            return p
-    return ""
-
-
-def _find_team_logo(owner: str, data_dir: str) -> str:
-    """
-    Cherche un logo d'équipe correspondant au GM/Owner.
-    - Match: filename contient owner normalisé
-    - Priorité: assets/previews puis data
-    """
-    owner_key = _norm(owner)
-    if not owner_key:
-        return ""
-
-    candidates: List[str] = []
-    for d in _asset_dirs(data_dir):
-        if not os.path.isdir(d):
-            continue
-        for fn in os.listdir(d):
-            if not fn.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                continue
-            # évite gm_logo
-            if fn.lower() in ["gm_logo.png", "logo_pool.png", "logo_pool.jpg", "logo_pool.webp"]:
-                continue
-            fkey = _norm(fn.replace("_logo", "").replace("logo", ""))
-            if owner_key and owner_key in fkey:
-                candidates.append(os.path.join(d, fn))
-
-    # si rien: tenter pattern <Owner>_Logo.png
-    if not candidates:
-        for d in _asset_dirs(data_dir):
-            p = os.path.join(d, f"{owner}_Logo.png")
-            if os.path.exists(p):
-                return p
-        return ""
-
-    # choisir le plus court (souvent le plus “exact”)
-    candidates = sorted(candidates, key=lambda x: len(os.path.basename(x)))
-    return candidates[0]
-
-
-def _level_badge(level: str) -> str:
-    lvl = (level or "—").upper().strip()
-    if lvl == "ELC":
-        return "ELC 🟢"
-    if lvl == "STD":
-        return "STD 🔵"
-    return "—"
-
-
-def _parse_year(s: str) -> Optional[int]:
-    try:
-        m = re.search(r"(19|20)\d{2}", str(s))
-        if not m:
-            return None
-        return int(m.group(0))
-    except Exception:
-        return None
-
-
-def _season_end_year(season: str) -> Optional[int]:
-    # "2025-2026" -> 2026
-    try:
-        parts = re.split(r"[-–]", season)
-        if len(parts) >= 2:
-            return int(parts[1])
-        return int(parts[0])
-    except Exception:
-        return None
-
-
-# =====================================================
-# Loaders
-# =====================================================
-@st.cache_data(show_spinner=False, max_entries=8)
-def load_equipes_joueurs(data_dir: str, season: str) -> pd.DataFrame:
-    path = _first_existing(
-        os.path.join(data_dir, f"equipes_joueurs_{season}.csv"),
-        os.path.join(data_dir, f"equipes_joueurs_{season.replace('–','-')}.csv"),
-    )
-    df = _safe_read_csv(path)
-    if df.empty:
-        return pd.DataFrame()
-
-    df = df.copy()
-    df.attrs["__path__"] = path
-
-    player_col = _guess_col(df, ["Joueur", "Player", "Name", "player", "name"])
-    if not player_col:
-        player_col = df.columns[0]
-    df["_player"] = df[player_col].astype(str)
-    df["_name_key"] = df["_player"].astype(str).map(_norm_player_key)
-
-    owner_col = _guess_col(df, ["Proprietaire", "Owner", "Équipe", "Equipe", "Team", "GM"])
-    df["_owner"] = df[owner_col].astype(str) if owner_col else ""
-
-    slot_col = _guess_col(df, ["Statut", "Status", "Slot", "Position Slot", "Roster Slot", "Type"])
-    df["_slot"] = df[slot_col].astype(str) if slot_col else ""
-
-    club_col = _guess_col(df, ["Club", "Ligue", "League", "Groupe", "Roster"])
-    if club_col and "_slot" in df.columns:
-        df["_slot"] = df["_slot"].where(df["_slot"].astype(str).str.strip().ne(""), df[club_col].astype(str))
-
-    return df
-
-
-@st.cache_data(show_spinner=False, max_entries=8)
-def _load_players_db_cached(path: str, sig: tuple[int,int]) -> pd.DataFrame:
-    df = _safe_read_csv(path)
-    if df.empty:
-        return pd.DataFrame()
-    df = df.copy()
-    df.attrs['__path__'] = path
-    name_col = _guess_col(df, ['Joueur','Player','Name','name'])
-    if not name_col:
-        name_col = df.columns[0]
-    df['_name_key'] = df[name_col].astype(str).map(_norm_player_key)
-    df['_display_name'] = df[name_col].astype(str)
-    return df
-
-def load_players_db(data_dir: str) -> pd.DataFrame:
-    path = _first_existing(
-        os.path.join(data_dir, "hockey.players.csv"),
-        os.path.join(data_dir, "Hockey.Players.csv"),
-        os.path.join(data_dir, "data", "hockey.players.csv"),
-    )
-    return _load_players_db_cached(path, _file_sig(path))
+/* Hide tiny loader dots/containers sometimes rendered by st.image */
+/* Hide Streamlit image skeleton/loader artifacts (keep real images visible) */
+div[data-testid="stImage"] [data-testid="stSkeleton"] { display:none !important; }
+div[data-testid="stImage"] [role="progressbar"] { display:none !important; }
+div[data-testid="stImage"] svg { display:none !important; }
+div[data-testid="stSpinner"], .stSpinner { display:none !important; }
 
 
 
-def _find_contracts_file(data_dir: str) -> str:
-    """Return first existing contracts CSV path (PuckPedia)."""
-    return _first_existing(
-        os.path.join(data_dir, "puckpedia.contracts.csv"),
-        os.path.join(data_dir, "PuckPedia2025_26.csv"),
-        os.path.join(data_dir, "puckpedia2025_26.csv"),
-        os.path.join(data_dir, "puckpedia2025_26_contracts.csv"),
-        os.path.join(data_dir, "puckpedia_contracts.csv"),
-    )
+/* === Apple WOW+++++++ === */
 
-@st.cache_data(show_spinner=False, max_entries=8)
-def load_contracts(data_dir: str) -> pd.DataFrame:
-    path = _first_existing(
-        os.path.join(data_dir, "puckpedia.contracts.csv"),
-        os.path.join(data_dir, "PuckPedia2025_26.csv"),
-        os.path.join(data_dir, "puckpedia2025_26.csv"),
-        os.path.join(data_dir, "puckpedia2025_26_contracts.csv"),
-        os.path.join(data_dir, "puckpedia_contracts.csv"),
-    )
-    df = _safe_read_csv(path)
-    if df.empty:
-        return pd.DataFrame()
-    df = df.copy()
-    df.attrs["__path__"] = path
-    name_col = _guess_col(df, ["Player", "Joueur", "Name", "name"])
-    if not name_col:
-        name_col = df.columns[0]
-    df["_name_key"] = df[name_col].astype(str).map(_norm_player_key)
-    return df
+/* hide Streamlit image loaders (little circles) */
+section[data-testid="stSidebar"] [role="progressbar"],
+section.main [role="progressbar"] { display:none !important; }
+
+/* global polish */
+* { -webkit-font-smoothing: antialiased; }
+section[data-testid="stSidebar"] > div {
+  backdrop-filter: blur(18px) saturate(125%) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(125%) !important;
+}
+
+/* premium glass cards */
+.pms-card, .pms-chip, .pms-item, section[data-testid="stSidebar"] .stButton > button {
+  border: 1px solid rgba(255,255,255,.10) !important;
+  box-shadow: 0 18px 55px rgba(0,0,0,.26) !important;
+}
+
+/* Expanded sidebar nav: bigger icons + perfect vertical alignment */
+section[data-testid="stSidebar"] .pms-nav img.pms-emoji{
+  width: 84px !important;
+  height: 84px !important;
+  border-radius: 18px !important;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+  padding: 2px;
+}
+section[data-testid="stSidebar"] .pms-nav div[data-testid="stHorizontalBlock"]{
+  align-items:center !important;
+}
+section[data-testid="stSidebar"] .pms-nav div[data-testid="stHorizontalBlock"] > div{
+  display:flex;
+  align-items:center;
+}
+section[data-testid="stSidebar"] .pms-nav div[data-testid="stHorizontalBlock"] > div:first-child{
+  justify-content:center;
+}
+section[data-testid="stSidebar"] .pms-nav .stButton > button{
+  min-height: 66px !important;
+}
 
 
-# =====================================================
-# Merge + compute
-# =====================================================
-def _merge_roster(roster: pd.DataFrame, players: pd.DataFrame, contracts: pd.DataFrame) -> pd.DataFrame:
-    out = roster.copy()
+/* icon sizes */
 
-    if players is not None and not players.empty:
-        keep_cols = ["_name_key", "_display_name", "Pos", "Team", "Country", "Level", "Cap Hit", "_nhl_id"]
-        keep_cols = [c for c in keep_cols if c in players.columns]
-        p = players[keep_cols].drop_duplicates("_name_key", keep="first")
-        out = out.merge(p, on="_name_key", how="left")
+/* Sidebar nav rows: align emoji icons with their buttons */
+.pms-nav div[data-testid="stHorizontalBlock"] { align-items: center !important; }
+.pms-nav div[data-testid="stHorizontalBlock"] > div { align-items: center !important; }
+.pms-nav div[data-testid="stColumn"], .pms-nav div[data-testid="column"] { display:flex !important; align-items:center !important; }
+.pms-nav div[data-testid="stColumn"] > div, .pms-nav div[data-testid="column"] > div { width:100% !important; }
+section[data-testid="stSidebar"] .stButton > button { min-height: var(--pms-emo, 60px) !important; }
 
-    if contracts is not None and not contracts.empty:
-        c_keep = ["_name_key"]
-        for c in ["AAV", "Cap Hit", "CapHit", "Expiry", "Expiry Year", "End", "Term", "Clause", "Clauses", "Type", "Contract Type"]:
-            if c in contracts.columns and c not in c_keep:
-                c_keep.append(c)
-        cdf = contracts[c_keep].drop_duplicates("_name_key", keep="first")
-        out = out.merge(cdf, on="_name_key", how="left", suffixes=("", "_pp"))
+:root{
+  --pms-emo: 72px;
+  --pms-emo-c: 52px;
+  --pms-gm: 120px;
+}
 
-    if "_display_name" not in out.columns:
-        out["_display_name"] = out["_player"].astype(str)
+/* keep ratio for all icons */
+.pms-item img, .pms-brand img, .pms-team-badge img { object-fit: contain !important; }
 
-    cap_series = None
-    if "Cap Hit" in out.columns:
-        cap_series = out["Cap Hit"]
-    elif "AAV" in out.columns:
-        cap_series = out["AAV"]
+/* hover + active */
+section[data-testid="stSidebar"] .stButton > button:hover { transform: translateY(-1px); }
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+  box-shadow: 0 14px 38px rgba(239,68,68,.22) !important;
+}
+
+/* collapsed sidebar: hide any leftover labels */
+.pms-collapsed label, .pms-collapsed .stSelectbox { display:none !important; }
+
+/* Layout: custom sidebar widths */
+section[data-testid="stSidebar"] {
+  width: var(--pms-sb-w, 320px) !important;
+  min-width: var(--pms-sb-w, 320px) !important;
+  max-width: var(--pms-sb-w, 320px) !important;
+}
+/* Hide Streamlit menu footer spacing a bit */
+section.main .block-container { padding-top: 2.2rem !important; }
+
+/* Apple glass sidebar */
+section[data-testid="stSidebar"] > div { backdrop-filter: blur(16px) !important; }
+
+/* "Chip" glass frame for logos */
+.pms-chip {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius: 18px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.06);
+  box-shadow: 0 18px 40px rgba(0,0,0,0.18);
+  padding: 8px;
+}
+.pms-chip img { display:block; border-radius: 14px; }
+
+/* NAV */
+.pms-nav { margin-top: 12px; display:flex; flex-direction:column; gap: 10px; }
+.pms-item {
+  position: relative;
+  display:flex;
+  align-items:center;
+  gap: 12px;
+  border-radius: 18px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.05);
+  box-shadow: 0 10px 22px rgba(0,0,0,0.12);
+  transition: transform 120ms ease, box-shadow 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+.pms-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(239,68,68,0.55);
+  background: rgba(255,255,255,0.08);
+  box-shadow: 0 14px 28px rgba(0,0,0,0.18);
+}
+.pms-item.active {
+  background: rgba(239,68,68,0.95);
+  border-color: rgba(220,38,38,1);
+  box-shadow: 0 16px 34px rgba(239,68,68,0.22);
+}
+.pms-item.active::before {
+  content:"";
+  position:absolute;
+  left:-7px; top:10px; bottom:10px;
+  width:3px; border-radius:6px;
+  background: rgba(239,68,68,1);
+  box-shadow: 0 10px 24px rgba(239,68,68,0.45);
+}
+
+/* Emojis/logos never stretch */
+.pms-emoji, .pms-emoji-c, .pms-teamlogo, .pms-gmlogo {
+  object-fit: contain !important;
+  aspect-ratio: 1/1;
+}
+
+/* icon sizes */
+.pms-item img.pms-emoji { width: var(--pms-emo, 60px); height: var(--pms-emo, 60px); border-radius: 16px; }
+.pms-item img.pms-teamlogo { width: var(--pms-emo, 60px); height: var(--pms-emo, 60px); border-radius: 16px; }
+.pms-brand img.pms-gmlogo { width: var(--pms-gm, 80px); height: var(--pms-gm, 80px); border-radius: 18px; }
+
+/* Collapsed mode: show icons centered */
+.pms-collapsed .pms-item { justify-content:center; padding: 10px 0; }
+.pms-collapsed .pms-item .lbl { display:none; }
+.pms-collapsed .pms-item img.pms-emoji,
+.pms-collapsed .pms-item img.pms-teamlogo { width: var(--pms-emo-c,44px); height: var(--pms-emo-c,44px); border-radius: 14px; }
+
+/* Primary buttons red (match selection) */
+.stButton > button[kind="primary"] {
+  background: rgba(239,68,68,1) !important;
+  border-color: rgba(220,38,38,1) !important;
+  box-shadow: 0 18px 40px rgba(239,68,68,0.18) !important;
+}
+.stButton > button[kind="primary"]:hover { filter: brightness(1.03); }
+
+/* Micro press */
+section[data-testid="stSidebar"] .pms-item:active,
+section[data-testid="stSidebar"] div.stButton > button:active {
+  transform: translateY(0px) scale(0.98) !important;
+}
+
+/* Snap page transition */
+@keyframes pmsPageIn { from { opacity:0; transform:translateY(6px);} to { opacity:1; transform:translateY(0px);} }
+section.main .block-container { animation: pmsPageIn 240ms ease-out; }
+
+/* micro iOS press for all sidebar buttons */
+section[data-testid="stSidebar"] .stButton > button{
+  transition: transform 120ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+section[data-testid="stSidebar"] .stButton > button:active{
+  transform: scale(0.985);
+}
+
+</style>
+"""
+    st.markdown(css, unsafe_allow_html=True)
+
+
+def _set_sidebar_mode(collapsed: bool):
+    # In Streamlit, easiest is to set CSS vars on :root
+    if collapsed:
+        st.markdown(
+            """
+<style>
+:root { --pms-sb-w: 76px; --pms-ico: 54px; --pms-ico-c: 44px; --pms-gm: 52px; --pms-emo: 44px; --pms-emo-c: 40px; }
+section[data-testid="stSidebar"] { padding-left: 4px !important; padding-right: 4px !important; }
+</style>
+""",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<style>section[data-testid='stSidebar']{}</style>", unsafe_allow_html=True)
+        # Also add a class hook
+        st.markdown("<style>body{}</style>", unsafe_allow_html=True)
     else:
-        cap_series = pd.Series([""] * len(out))
-
-    out["_cap_num"] = pd.to_numeric(
-        cap_series.astype(str).str.replace(",", "", regex=False).str.replace("$", "", regex=False),
-        errors="coerce",
-    ).fillna(0.0)
-
-    exp = pd.Series([""] * len(out))
-    for c in ["Expiry", "Expiry Year", "End"]:
-        if c in out.columns:
-            exp = out[c].astype(str)
-            break
-    out["_expiry"] = exp.replace({"nan": "", "None": ""})
-
-    # Level robust
-    lvl = out.get("Level", pd.Series([""] * len(out))).astype(str).str.upper().str.strip()
-    if "Type" in out.columns:
-        t = out["Type"].astype(str).str.upper()
-        lvl = lvl.where(lvl.isin(["ELC", "STD"]), t.apply(lambda x: "ELC" if ("ELC" in x or "ENTRY" in x) else ""))
-    elif "Contract Type" in out.columns:
-        t = out["Contract Type"].astype(str).str.upper()
-        lvl = lvl.where(lvl.isin(["ELC", "STD"]), t.apply(lambda x: "ELC" if ("ELC" in x or "ENTRY" in x) else ""))
-
-    out["_level"] = lvl.where(lvl.astype(str).str.strip().ne(""), "—")
-    out["_bucket"] = out["_slot"].apply(_detect_bucket)
-
-    return out
-
-
-def _build_owner_list(roster: pd.DataFrame) -> List[str]:
-    if roster is None or roster.empty:
-        return []
-    owners = roster["_owner"].astype(str).str.strip()
-    owners = owners[owners.ne("") & owners.ne("nan") & owners.ne("(N/A)")]
-    return sorted(owners.unique().tolist())
-
-
-def _owner_summary(roster_base: pd.DataFrame, owner: str, plafonds: Dict[str, float]) -> Dict[str, Any]:
-    sub = roster_base[roster_base["_owner"].astype(str).str.strip() == str(owner).strip()].copy()
-    cap_total = float(sub["_cap_num"].sum()) if not sub.empty else 0.0
-    counts = sub["_bucket"].value_counts().to_dict() if not sub.empty else {}
-
-    cap_limit = plafonds.get(owner)
-    return {
-        "owner": owner,
-        "cap_total": cap_total,
-        "cap_limit": cap_limit,
-        "n_total": int(len(sub)),
-        "n_actifs": int(counts.get("Actifs", 0)),
-        "n_banc": int(counts.get("Banc", 0)),
-        "n_ir": int(counts.get("IR", 0)),
-        "n_mineur": int(counts.get("Mineur", 0)),
-        "df": sub,
-    }
-
-
-def _roster_table(df: pd.DataFrame) -> pd.DataFrame:
-    show = pd.DataFrame()
-    show["Joueur"] = df["_display_name"].astype(str)
-    # Pos column can be missing; df.get default would be a scalar string -> no .astype
-    if isinstance(df, pd.DataFrame) and "Pos" in df.columns:
-        show["Pos"] = df["Pos"].astype(str)
-    else:
-        show["Pos"] = pd.Series(["—"] * len(df), index=df.index if isinstance(df, pd.DataFrame) else None)
-    if isinstance(df, pd.DataFrame) and "Team" in df.columns:
-        show["Team"] = df["Team"].astype(str)
-    else:
-        show["Team"] = pd.Series(["—"] * len(df), index=df.index)
-    if isinstance(df, pd.DataFrame) and "Country" in df.columns:
-        show["Country"] = df["Country"].astype(str)
-    else:
-        show["Country"] = pd.Series(["—"] * len(df), index=df.index)
-    show["Level"] = df["_level"].astype(str).apply(_level_badge)
-    show["Cap Hit"] = df["_cap_num"].apply(_money)
-    show["Expiry"] = df["_expiry"].astype(str).replace({"nan": "—"}).replace({"": "—"})
-    return show
-
-
-def _top_cap_hits(df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame()
-    out = df.sort_values("_cap_num", ascending=False).head(n).copy()
-    return _roster_table(out)
-
-
-def _expiring_contracts(df: pd.DataFrame, season: str) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame()
-
-    end_year = _season_end_year(season)
-    if end_year is None:
-        return pd.DataFrame()
-
-    tmp = df.copy()
-    tmp["_exp_year"] = tmp["_expiry"].apply(_parse_year)
-    tmp = tmp[tmp["_exp_year"].notna()].copy()
-    tmp = tmp[tmp["_exp_year"].astype(int) <= int(end_year)].copy()
-    tmp = tmp.sort_values(["_exp_year", "_cap_num"], ascending=[True, False])
-    out = _roster_table(tmp)
-    out.insert(0, "ExpiryYear", tmp["_exp_year"].astype(int).values)
-    return out
-
-
-# =====================================================
-# UI
-# =====================================================
-def _render_header(owner: str, data_dir: str) -> None:
-    gm_logo = _find_image("gm_logo.png", data_dir)
-    team_logo = _find_team_logo(owner, data_dir)
-
-    c1, c2, c3 = st.columns([1, 3, 1], gap="large")
-    with c1:
-        if gm_logo:
-            try:
-                st.image(gm_logo, width=90)
-            except Exception:
-                pass
-    with c2:
-        st.title("🧑‍💼 GM")
-        st.caption("Vue pro : roster, cap hit, contrats, et comparatif.")
-    with c3:
-        if team_logo:
-            try:
-                st.image(team_logo, width=90)
-            except Exception:
-                pass
-
-
-def _render_overview(summary: Dict[str, Any], season: str) -> None:
-    cap_total = summary["cap_total"]
-    cap_limit = summary.get("cap_limit")
-
-    a, b, c, d = st.columns(4)
-    with a:
-        st.metric("Cap hit total", _money(cap_total))
-    with b:
-        st.metric("Joueurs", str(summary["n_total"]))
-    with c:
-        st.metric("Actifs", str(summary["n_actifs"]))
-    with d:
-        st.metric("Mineur", str(summary["n_mineur"]))
-
-    if cap_limit is not None and cap_limit > 0:
-        st.caption(f"Plafond: {_money(cap_limit)}")
-        ratio = min(1.0, float(cap_total) / float(cap_limit))
-        st.progress(ratio)
-        st.caption(f"Écart plafond: {_money(float(cap_limit) - float(cap_total))}")
-    else:
-        st.caption("Plafond: — (non configuré)")
-
-    st.caption(f"Saison: **{season}**")
-
-
-def _render_rosters(df: pd.DataFrame) -> None:
-    # affichage structuré
-    for bucket in ["Actifs", "Banc", "IR", "Mineur", "Autre"]:
-        sub = df[df["_bucket"] == bucket].copy()
-        if sub.empty:
-            continue
-        st.subheader(bucket)
-        st.dataframe(_roster_table(sub.sort_values("_cap_num", ascending=False)), use_container_width=True, hide_index=True)
-
-
-def _render_contracts(df: pd.DataFrame, season: str) -> None:
-    st.subheader("Top 10 Cap Hits")
-    top = _top_cap_hits(df, 10)
-    if top.empty:
-        st.info("Aucune donnée cap hit.")
-    else:
-        st.dataframe(top, use_container_width=True, hide_index=True)
-
-    st.divider()
-    st.subheader("Contrats expirants (≤ fin de saison)")
-    exp = _expiring_contracts(df, season)
-    if exp.empty:
-        st.info("Aucun contrat expirant détecté (ou puckpedia.contracts.csv absent).")
-    else:
-        st.dataframe(exp, use_container_width=True, hide_index=True)
-
-
-def _render_compare(owners: List[str], roster_base: pd.DataFrame, plafonds: Dict[str, float], season: str, data_dir: str) -> None:
-    st.subheader("⚖️ Comparatif GM vs GM")
-
-    if len(owners) < 2:
-        st.info("Il faut au moins 2 équipes dans equipes_joueurs pour comparer.")
-        return
-
-    colA, colB = st.columns(2)
-    with colA:
-        o1 = st.selectbox("GM A", owners, index=0, key="gm_cmp_a")
-    with colB:
-        o2 = st.selectbox("GM B", owners, index=1, key="gm_cmp_b")
-
-    s1 = _owner_summary(roster_base, o1, plafonds)
-    s2 = _owner_summary(roster_base, o2, plafonds)
-
-    df_sum = pd.DataFrame(
-        [
-            {
-                "GM": s1["owner"],
-                "Cap total": _money(s1["cap_total"]),
-                "Plafond": _money(s1["cap_limit"]) if s1.get("cap_limit") is not None else "—",
-                "Actifs": s1["n_actifs"],
-                "Banc": s1["n_banc"],
-                "IR": s1["n_ir"],
-                "Mineur": s1["n_mineur"],
-                "Total": s1["n_total"],
-            },
-            {
-                "GM": s2["owner"],
-                "Cap total": _money(s2["cap_total"]),
-                "Plafond": _money(s2["cap_limit"]) if s2.get("cap_limit") is not None else "—",
-                "Actifs": s2["n_actifs"],
-                "Banc": s2["n_banc"],
-                "IR": s2["n_ir"],
-                "Mineur": s2["n_mineur"],
-                "Total": s2["n_total"],
-            },
-        ]
-    )
-
-    st.dataframe(df_sum, use_container_width=True, hide_index=True)
-
-    st.divider()
-    c1, c2 = st.columns(2, gap="large")
-
-    with c1:
-        _render_header(s1["owner"], data_dir)
-        _render_overview(s1, season)
-        st.divider()
-        st.subheader("Top 10 Cap Hits (A)")
-        st.dataframe(_top_cap_hits(s1["df"], 10), use_container_width=True, hide_index=True)
-
-    with c2:
-        _render_header(s2["owner"], data_dir)
-        _render_overview(s2, season)
-        st.divider()
-        st.subheader("Top 10 Cap Hits (B)")
-        st.dataframe(_top_cap_hits(s2["df"], 10), use_container_width=True, hide_index=True)
-
-
-# =====================================================
-# Main render
-# =====================================================
-def render(ctx: dict) -> None:
-    data_dir = _data_dir(ctx)
-    season = _season(ctx)
-
-    equipes = load_equipes_joueurs(data_dir, season)
-    if equipes is None or equipes.empty:
-        st.error("Aucune donnée d'équipes. Ajoute `data/equipes_joueurs_<season>.csv` via Gestion Admin → Restore.")
-        st.code(os.path.join(data_dir, f"equipes_joueurs_{season}.csv"))
-        return
-
-    players = load_players_db(data_dir)
-    # ⚡ PERF: contracts file can be very large (PuckPedia). Don't load it unless needed.
-    # We build a base roster from equipes + players only. Contracts are merged lazily in the Contracts tab.
-    contracts = pd.DataFrame()
-
-    roster_base = _merge_roster(equipes, players, contracts)
-    owners = _build_owner_list(roster_base)
-    if not owners:
-        st.error("Impossible de détecter les équipes/GM (colonne Owner/Proprietaire/Equipe manquante ?).")
-        st.write("Colonnes détectées:", list(equipes.columns))
-        return
-
-    plafonds = _resolve_plafonds(ctx)
-
-    # Sélection GM
-    selected_owner = st.selectbox("Choisir une équipe", owners, key="gm_owner_pick")
-
-    # Header pro + logos
-    _render_header(selected_owner, data_dir)
-
-    summary = _owner_summary(roster_base, selected_owner, plafonds)
-
-    # Sous-onglets pro
-    t_over, t_roster, t_contracts, t_compare = st.tabs(["📌 Vue d’ensemble", "📋 Roster", "📄 Contrats", "⚖️ Comparatif"])
-
-    with t_over:
-        _render_overview(summary, season)
-
-        st.divider()
-        st.subheader("Top 10 Cap Hits")
-        top = _top_cap_hits(summary["df"], 10)
-        if top.empty:
-            st.info("Aucune donnée cap hit.")
-        else:
-            st.dataframe(top, use_container_width=True, hide_index=True)
-
-        st.divider()
-        st.subheader("Résumé roster")
-        st.write(
-            f"Actifs: **{summary['n_actifs']}** | "
-            f"Banc: **{summary['n_banc']}** | "
-            f"IR: **{summary['n_ir']}** | "
-            f"Mineur: **{summary['n_mineur']}** | "
-            f"Total: **{summary['n_total']}**"
+        st.markdown(
+            """
+<style>
+:root { --pms-sb-w: 320px; --pms-ico: 54px; --pms-ico-c: 44px; --pms-gm: 80px; --pms-emo: 60px; --pms-emo-c: 44px; }
+</style>
+""",
+            unsafe_allow_html=True,
         )
 
-    with t_roster:
-        _render_rosters(summary["df"])
 
-    with t_contracts:
-        # Load contracts lazily (can be heavy). Cached on disk.
-        contracts2 = load_contracts(data_dir)
-        roster_with_contracts = _merge_roster(equipes, players, contracts2)
-        summary2 = _summary_for_owner(roster_with_contracts, selected_owner, plafonds)
-        _render_contracts(summary2["df"], season)
 
-    with t_compare:
-        # Comparatif can be heavy; use base roster first.
-        _render_compare(owners, roster_base, plafonds, season, data_dir)
 
-    # Debug minimal
-    with st.expander("🧪 Debug (sources)", expanded=False):
-        st.write("equipes_joueurs:", equipes.attrs.get("__path__", ""))
-        st.write("players db:", players.attrs.get("__path__", "(absent)"))
-        st.write("contracts:", _find_contracts_file(data_dir) or "(absent)")
-        st.write("gm_logo:", _find_image("gm_logo.png", data_dir) or "(introuvable)")
-        st.write("team_logo:", _find_team_logo(selected_owner, data_dir) or "(introuvable)")
+def _sidebar_nav(owner_key: str, active_slug: str):
+    collapsed = bool(st.session_state.get("pms_sidebar_collapsed", False))
+
+    # Expanded: season + team controls
+    if not collapsed:
+        st.sidebar.selectbox(
+            "Saison",
+            options=[st.session_state.get("season", "2025-2026"), "2024-2025", "2023-2024"],
+            key="season",
+        )
+        st.sidebar.selectbox(
+            "Équipe",
+            options=POOL_TEAMS,
+            index=POOL_TEAMS.index(st.session_state.get("owner", owner_key)) if st.session_state.get("owner", owner_key) in POOL_TEAMS else 0,
+            key="owner",
+        )
+        owner_key = str(st.session_state.get("owner", owner_key))
+
+    _set_sidebar_mode(collapsed)
+
+    # Brand: GM logo + selected team logo (side-by-side in expanded sidebar)
+    gm_logo = _gm_logo_path()
+    t_logo = _team_logo_path(owner_key)
+
+    if (not collapsed) and gm_logo and gm_logo.exists():
+        b64g = _b64_png(gm_logo)
+        b64t = _b64_png(t_logo) if (t_logo and t_logo.exists() and t_logo.is_file()) else ""
+        team_html = (
+            f"<div class='pms-chip'><img class='pms-team' src='data:image/png;base64,{b64t}' alt='team'/></div>"
+            if b64t else ""
+        )
+        st.sidebar.markdown(
+            f"""<div class='pms-brand-row'>
+  <div class='pms-chip'><img class='pms-gm' src='data:image/png;base64,{b64g}' alt='gm'/></div>
+  {team_html}
+</div>""",
+            unsafe_allow_html=True,
+        )
+    else:
+        # Fallback (collapsed mode or missing assets): stack like before
+        if gm_logo and gm_logo.exists():
+            st.sidebar.markdown("<div class='pms-brand pms-chip'>", unsafe_allow_html=True)
+            st.sidebar.image(str(gm_logo), width=(56 if collapsed else 110))
+            st.sidebar.markdown("</div>", unsafe_allow_html=True)
+            # Intentionally no text labels under the brand images
+
+        if t_logo and t_logo.exists() and t_logo.is_file():
+            st.sidebar.markdown("<div class='pms-chip' style='margin-top:10px'>", unsafe_allow_html=True)
+            st.sidebar.image(str(t_logo), width=(44 if collapsed else 56))
+            st.sidebar.markdown("</div>", unsafe_allow_html=True)
+            # Intentionally no text labels under the brand images
+
+
+    # Items
+    items = []
+    for it in NAV_ORDER:
+        if it.slug == "admin" and owner_key != "Whalers":
+            continue
+        items.append(it)
+
+    st.sidebar.markdown("<div class='pms-nav %s'>" % ("pms-collapsed" if collapsed else ""), unsafe_allow_html=True)
+
+    for it in items:
+        icon_p = _emoji_path(it.slug)  # png emoji (no stretch)
+        is_active = (it.slug == active_slug)
+        # Collapsed: iOS dock item (image + invisible overlay button)
+        if collapsed:
+            cls = "pms-dock-item active" if is_active else "pms-dock-item"
+            st.sidebar.markdown(f"<div class='{cls}'>", unsafe_allow_html=True)
+
+            if icon_p and icon_p.exists():
+                b64 = _b64_png(icon_p)
+                st.sidebar.markdown(
+                    f"<img class='pms-dock-ico' src='data:image/png;base64,{b64}' alt='{it.label}'/>",
+                    unsafe_allow_html=True,
+                )
+
+            # Invisible overlay button (captures click, no ugly box)
+            if st.sidebar.button(" ", key=f"nav_{it.slug}", help=it.label, type="primary" if is_active else "secondary"):
+                st.session_state["active_tab"] = it.slug
+                st.session_state["_pms_qp_applied"] = True
+                _set_query_tab(it.slug)
+                st.rerun()
+
+            st.sidebar.markdown("</div>", unsafe_allow_html=True)
+        else:
+            c1, c2 = st.sidebar.columns([1.6, 4.0], gap="small")
+            with c1:
+                if icon_p and icon_p.exists():
+                    b64i = _b64_png(icon_p)
+                    st.markdown(f"<img class='pms-emoji' src='data:image/png;base64,{b64i}' alt='{it.label}' />", unsafe_allow_html=True)
+            with c2:
+                if st.button(it.label, key=f"nav_{it.slug}", use_container_width=True, type="primary" if is_active else "secondary"):
+                    st.session_state["active_tab"] = it.slug
+                    st.session_state["_pms_qp_applied"] = True
+                    _set_query_tab(it.slug)
+                    st.rerun()
+
+    st.sidebar.markdown("</div>", unsafe_allow_html=True)
+
+    # Collapse toggle
+    if st.sidebar.button("◀" if not collapsed else "▶", key="pms_collapse_btn"):
+        st.session_state["pms_sidebar_collapsed"] = not collapsed
+
+    # Theme toggle (sun above)
+    st.sidebar.markdown("<div style='margin-top:10px'>☀️</div>", unsafe_allow_html=True)
+    light = bool(st.session_state.get("pms_light_mode", False))
+    st.sidebar.toggle("Clair", value=light, key="pms_light_toggle")
+    st.session_state["pms_light_mode"] = bool(st.session_state.get("pms_light_toggle", False))
+
+def _apply_theme_mode():
+    # Light mode quick polish without breaking your global theme:
+    # We switch background + default text a bit. Keeps your existing dark theme too.
+    light = bool(st.session_state.get("pms_light_mode", False))
+    if not light:
+        return
+    st.markdown(
+        f"""
+<style>
+/* Light mode look */
+html, body, [data-testid="stAppViewContainer"] {{
+  background: #f6f7fb !important;
+}}
+section[data-testid="stSidebar"] {{
+  background: #ffffff !important;
+  border-right: 1px solid rgba(0,0,0,.06);
+}}
+/* Card backgrounds */
+div[data-testid="stVerticalBlock"] > div {{
+  background: transparent;
+}}
+/* Make our nav readable */
+.pms-item {{
+  background: rgba(0,0,0,.03) !important;
+  border-color: rgba(0,0,0,.06) !important;
+  color: rgba(0,0,0,.78) !important;
+}}
+.pms-item:hover {{
+  background: rgba(0,0,0,.05) !important;
+}}
+.pms-item.active {{
+  color: white !important;
+}}
+.pms-brand .t, .pms-team .tt {{
+  color: rgba(0,0,0,.80) !important;
+}}
+/* Title color */
+h1, h2, h3 {{
+  color: rgba(0,0,0,.86) !important;
+}}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _get_query_tab() -> Optional[str]:
+    # Supports both new & old Streamlit query param APIs
+    try:
+        q = st.query_params  # type: ignore
+        if "tab" in q:
+            v = q["tab"]
+            if isinstance(v, list):
+                return str(v[0])
+            return str(v)
+    except Exception:
+        pass
+    try:
+        q = st.experimental_get_query_params()
+        v = (q.get("tab") or [None])[0]
+        return str(v) if v else None
+    except Exception:
+        return None
+
+
+def _set_query_tab(slug: str) -> None:
+    try:
+        st.query_params.update({"tab": slug})  # type: ignore
+    except Exception:
+        try:
+            st.experimental_set_query_params(tab=slug)
+        except Exception:
+            pass
+
+
+# ----------------------------
+# Page renders
+# ----------------------------
+
+def _nav_label(slug: str) -> str:
+    for it in NAV_ORDER:
+        if it.slug == slug:
+            return it.label
+    return slug.title()
+
+
+def _render_page_header(slug: str, label: str, show_title: bool = True) -> None:
+    """Renders the PNG emoji icon in the main area (optionally with a big title)."""
+    icon_p = _emoji_path(slug)
+    b64i = _b64_png(icon_p) if icon_p and icon_p.exists() else ""
+    if not b64i:
+        if show_title:
+            st.title(label)
+        return
+
+    if show_title:
+        st.markdown(
+            f"""<div class='pms-page-header'>
+  <img class='pms-page-ico' src='data:image/png;base64,{b64i}' alt='{label}' />
+  <div><div class='pms-page-title'>{label}</div></div>
+</div>""",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""<div class='pms-page-header'>
+  <img class='pms-page-ico' src='data:image/png;base64,{b64i}' alt='{label}' />
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+def _sync_owner_from_home():
+    try:
+        val = st.session_state.get("owner_select")
+        if val:
+            st.session_state["owner"] = val
+    except Exception:
+        pass
+
+def _render_home(owner_key: str):
+    # ✅ Pool logo — centered ABOVE title
+    if POOL_LOGO.exists():
+        p = _transparent_copy_edge(POOL_LOGO)
+        mime_p, b64p = _b64_image(p if (p and p.exists()) else POOL_LOGO, max_w=680)
+        if b64p:
+            st.markdown(
+                f"""<div class='pms-pool-wrap'><div class='pms-pool-card'>
+<img src='data:{mime_p};base64,{b64p}' alt='pool' />
+</div></div>""",
+                unsafe_allow_html=True,
+            )
+
+    _render_page_header('home', 'Home', show_title=True)
+    st.caption("Choisis ton équipe ci-dessous.")
+
+    st.subheader("🏒 Sélection d'équipe")
+    st.caption("Cette sélection alimente Alignement / GM / Transactions (même clé session_state).")
+
+    # Select team (full width) — team logo is shown in sidebar only
+    idx = POOL_TEAMS.index(owner_key) if owner_key in POOL_TEAMS else 0
+    st.selectbox(
+        "Équipe (propriétaire)",
+        POOL_TEAMS,
+        index=idx,
+        key="owner_select",
+        on_change=_sync_owner_from_home,
+    )
+    new_owner = st.session_state.get("owner_select", owner_key)
+
+    st.success(f"✅ Équipe sélectionnée: {TEAM_LABEL.get(new_owner, new_owner)}")
+
+    # Optional banner (rendered as HTML to avoid loader dots)
+    banner = DATA_DIR / "nhl_teams_header_banner.png"
+    if active == 'home' and banner.exists():
+        b = _transparent_copy_edge(banner)
+        mime_b, b64b = _b64_image(b if (b and b.exists()) else banner, max_w=980)
+        if b64b:
+            st.markdown(
+                f"""<div class='pms-pool-wrap'><div class='pms-pool-card'>
+<img src='data:{mime_b};base64,{b64b}' alt='banner' />
+</div></div>""",
+                unsafe_allow_html=True,
+            )
+TAB_MODULES = {
+    "home": None,
+    "gm": "tabs.gm",
+    "joueurs": "tabs.joueurs",
+    "alignement": "tabs.alignement",
+    "transactions": "tabs.transactions",
+    "historique": "tabs.historique",
+    "classement": "tabs.classement",
+    "admin": "tabs.admin",
+}
+
+@st.cache_resource(show_spinner=False)
+def _import_module_cached(modpath: str):
+    import importlib
+    return importlib.import_module(modpath)
+
+def _safe_import_tab(slug: str):
+    modpath = TAB_MODULES.get(slug)
+    if not modpath:
+        return None
+    try:
+        return _import_module_cached(modpath)
+    except Exception as e:
+        return e
+
+def _safe_import_tabs() -> Dict[str, Any]:
+    """Compatibility helper (avoid using this in main; it's slower)."""
+    modules: Dict[str, Any] = {}
+    for slug, modpath in TAB_MODULES.items():
+        if not modpath:
+            continue
+        modules[slug] = _safe_import_tab(slug)
+    return modules
+
+def _render_module(mod: Any, ctx: Dict[str, Any]):
+    if isinstance(mod, Exception):
+        st.error(f"❌ Module erreur: {mod}")
+        return
+    # expected: module.render(ctx) else fallback
+    if hasattr(mod, "render"):
+        try:
+            mod.render(ctx)  # type: ignore
+            return
+        except Exception as e:
+            st.exception(e)
+            return
+    st.warning("Ce module n'a pas de fonction render(ctx).")
+
+
+def main():
+    st.set_page_config(page_title=APP_TITLE, page_icon="🏒", layout="wide")
+
+    # state defaults
+    st.session_state.setdefault("season", "2025-2026")
+    st.session_state.setdefault("owner", "Canadiens")
+    st.session_state.setdefault("active_tab", "home")
+    st.session_state.setdefault("_pms_qp_applied", False)
+    st.session_state.setdefault("_pms_booted", False)
+    st.session_state.setdefault("pms_sidebar_collapsed", False)
+    st.session_state.setdefault("pms_light_mode", False)
+    st.session_state.setdefault("_pms_prof", {})
+
+    _t0 = time.perf_counter()
+    _apply_css()
+    _apply_theme_mode()
+    st.session_state['_pms_prof']['css_theme_ms'] = int((time.perf_counter()-_t0)*1000)
+
+    # Read query param tab
+    qp = (_get_query_tab() or "").strip().lower()
+    allowed = {it.slug for it in NAV_ORDER}
+    # Apply URL query param only once (otherwise it can overwrite sidebar clicks and feel like "2 clicks").
+    # Apply URL query param only at first boot (prevents overwrite + avoids the '2 clicks' feeling).
+    if not bool(st.session_state.get("_pms_booted", False)):
+        if qp in allowed:
+            st.session_state["active_tab"] = qp
+        st.session_state["_pms_booted"] = True
+        st.session_state["_pms_qp_applied"] = True
+
+    # Owner is needed for access control + sidebar rendering.
+    owner = str(st.session_state.get("owner") or "Canadiens")
+    active_pre = str(st.session_state.get("active_tab") or "home")
+    # Sidebar: season + nav (handled inside _sidebar_nav)
+    _t1 = time.perf_counter()
+    _sidebar_nav(owner, active_pre)
+    st.session_state['_pms_prof']['sidebar_ms'] = int((time.perf_counter()-_t1)*1000)
+    # Re-read after sidebar: avoids "2 clicks" even if rerun is skipped
+    active = str(st.session_state.get("active_tab") or active_pre or "home")
+
+    # Prevent non-whalers from accessing Admin
+    if active == "admin" and owner != "Whalers":
+        st.session_state["active_tab"] = "home"
+        active = "home"
+
+    # Context passed to tabs
+    ctx: Dict[str, Any] = {
+        "season": st.session_state.get("season"),
+        "owner": owner,
+        "selected_owner": owner,
+        "data_dir": str(DATA_DIR),
+        "assets_dir": str(ASSETS_DIR),
+    }
+
+    # Render page
+    if active == "home":
+        _render_home(owner)
+        return
+
+    # Center icon for other pages (keeps tab modules intact; shows the same PNG icon as sidebar)
+    _render_page_header(active, _nav_label(active), show_title=True)
+
+    _t2 = time.perf_counter()
+    mod = _safe_import_tab(active)
+    st.session_state['_pms_prof']['import_ms'] = int((time.perf_counter()-_t2)*1000)
+    if mod is None:
+        st.warning("Onglet indisponible.")
+        return
+
+    _t3 = time.perf_counter()
+    _render_module(mod, ctx)
+    st.session_state['_pms_prof']['render_ms'] = int((time.perf_counter()-_t3)*1000)
+    # Quick perf readout
+    with st.sidebar.expander('⚡ Perf', expanded=False):
+        st.json(st.session_state.get('_pms_prof', {}))
+
+
+if __name__ == "__main__":
+    main()
