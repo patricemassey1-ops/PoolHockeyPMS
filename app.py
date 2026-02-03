@@ -888,19 +888,6 @@ def _render_home(owner_key: str):
     new_owner = st.session_state.get("owner_select", owner_key)
 
     st.success(f"✅ Équipe sélectionnée: {TEAM_LABEL.get(new_owner, new_owner)}")
-
-    # Optional banner (rendered as HTML to avoid loader dots)
-    banner = DATA_DIR / "nhl_teams_header_banner.png"
-    if active == 'home' and banner.exists():
-        b = _transparent_copy_edge(banner)
-        mime_b, b64b = _b64_image(b if (b and b.exists()) else banner, max_w=980)
-        if b64b:
-            st.markdown(
-                f"""<div class='pms-pool-wrap'><div class='pms-pool-card'>
-<img src='data:{mime_b};base64,{b64b}' alt='banner' />
-</div></div>""",
-                unsafe_allow_html=True,
-            )
 TAB_MODULES = {
     "home": None,
     "gm": "tabs.gm",
