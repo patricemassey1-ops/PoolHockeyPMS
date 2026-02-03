@@ -124,141 +124,34 @@ def _transparent_copy(src: Path, thr: int = 245) -> Path:
         im.putdata(new_px)
         im.save(dst, "PNG")
         return dst
-    if True:
-        return src
-
-
-def _transparent_copy_edge(src: Path, thr: int = 245) -> Path:
-    """
-    Creates a cached RGBA version removing a near-white *edge-connected* background.
-    This preserves internal whites (e.g., logo highlights) while removing the white square behind it.
-    Returns original if Pillow is unavailable or file missing.
-    """
-    try:
-        if not src.exists():
-            return src
-        dst = CACHE_UI_DIR / (src.stem + "_edge_t.png")
-        # Cache: regenerate only if missing or older
-        if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
-            return dst
-
-        try:
-            from PIL import Image  # type: ignore
-        except Exception:
-            return src
-
-        im = Image.open(src).convert("RGBA")
-        w, h = im.size
-        px = im.load()
-        if px is None:
-            return src
-
-        # Helper: near-white pixel?
-        def is_bg(x: int, y: int) -> bool:
-            r, g, b, a = px[x, y]
-            return a > 0 and r >= thr and g >= thr and b >= thr
-
-        # BFS flood fill from edges for background pixels
-        from collections import deque
-
-        visited = bytearray(w * h)
-        q = deque()
-
-        def push(x: int, y: int):
-            idx = y * w + x
-            if visited[idx]:
-                return
-            if not is_bg(x, y):
-                return
-            visited[idx] = 1
-            q.append((x, y))
-
-        # seed with corner pixels (preserves internal/edge whites better)
-        k = 6  # corner box size
-        for y in range(min(k, h)):
-            for x in range(min(k, w)):
-                push(x, y)  # top-left
-                push(w - 1 - x, y)  # top-right
-                push(x, h - 1 - y)  # bottom-left
-                push(w - 1 - x, h - 1 - y)  # bottom-right
-
-        while q:
-            x, y = q.popleft()
-            # Make transparent
-            r, g, b, a = px[x, y]
-            px[x, y] = (r, g, b, 0)
-            # neighbors
-            if x > 0:
-                push(x - 1, y)
-            if x < w - 1:
-                push(x + 1, y)
-            if y > 0:
-                push(x, y - 1)
-            if y < h - 1:
-                push(x, y + 1)
-
-        im.save(dst, "PNG")
-        return dst
-    if True:
+    except Exception:
         return src
 
 
 @st.cache_data(show_spinner=False)
-def _file_sig(path: Path) -> tuple[int, int]:
+def _b64_png(path: Path) -> str:
     try:
-        st_ = path.stat()
-        return (int(st_.st_mtime_ns), int(st_.st_size))
+        data = path.read_bytes()
+        return base64.b64encode(data).decode("utf-8")
     except Exception:
-        return (0, 0)
+        return ""
+
+
 
 @st.cache_data(show_spinner=False, max_entries=256)
-def _img_bytes_cached(p: str, sig: tuple[int,int]) -> bytes:
+def _img_bytes_cached(p: str, mtime_size: tuple[float, int]) -> bytes:
     try:
         return Path(p).read_bytes()
     except Exception:
         return b""
 
 def _img_bytes(path: Path) -> bytes:
-    return _img_bytes_cached(str(path), _file_sig(path))
-
-@st.cache_data(show_spinner=False, max_entries=256)
-def _b64_png_cached(p: str, sig: tuple[int, int]) -> str:
     try:
-        b = Path(p).read_bytes()
-        return base64.b64encode(b).decode("utf-8")
+        st_ = path.stat()
+        sig = (st_.st_mtime, st_.st_size)
     except Exception:
-        return ""
-
-def _b64_png(path: Path) -> str:
-    return _b64_png_cached(str(path), _file_sig(path))
-@st.cache_data(show_spinner=False, max_entries=256)
-def _b64_image_resized_cached(p: str, sig: tuple[int, int], max_w: int) -> tuple[str, str]:
-    """Return (mime, b64) for a resized WEBP (fast to transfer)."""
-    try:
-        from PIL import Image  # type: ignore
-        src = Path(p)
-        if not src.exists():
-            return ("", "")
-        im = Image.open(src).convert("RGBA")
-        if max_w and im.width > max_w:
-            h = max(1, int(im.height * (max_w / float(im.width))))
-            im = im.resize((max_w, h), Image.LANCZOS)
-        buf = io.BytesIO()
-        im.save(buf, format="WEBP", quality=82, method=6)
-        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-        return ("image/webp", b64)
-    if True:
-        # Fallback to raw bytes
-        try:
-            b = Path(p).read_bytes()
-            return ("image/png", base64.b64encode(b).decode("utf-8"))
-        except Exception:
-            return ("", "")
-
-def _b64_image(path: Path, max_w: int = 0) -> tuple[str, str]:
-    return _b64_image_resized_cached(str(path), _file_sig(path), int(max_w or 0))
-
-
+        sig = (0.0, 0)
+    return _img_bytes_cached(str(path), sig)
 
 
 def _pick_existing(base_dir: Path, candidates: list[str]) -> Optional[Path]:
@@ -275,9 +168,10 @@ def _team_logo_path(team: str) -> Path:
     for fn in cands:
         p = ASSETS_DIR / fn
         if p.exists():
-            return _transparent_copy_edge(p)
+            return p
     p = ASSETS_DIR / f"{team}_Logo.png"
-    return _transparent_copy_edge(p) if p.exists() else Path("")
+    return p if p.exists() else Path("")
+
 def _emoji_path(slug: str) -> Optional[Path]:
     fn = EMOJI_FILES.get(slug)
     if not fn:
@@ -371,65 +265,17 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
   opacity: 0 !important; padding:0 !important; margin:0 !important;
 }
 
-/* Team logo next to dropdown (rounded card + transparent logo) */
-.pms-team-hero{ display:flex; align-items:center; justify-content:center; min-height: 92px; margin-top: 18px; }
-.pms-team-card{
-  border-radius: 22px;
-  padding: 14px;
-  background: rgba(255,255,255,0.04);
+/* Team logo next to dropdown */
+.pms-team-hero{ height: 100%; display:flex; align-items:center; justify-content:center; }
+.pms-team-hero img{
+  width: 96px; height: 96px; border-radius: 20px; object-fit: contain;
+  background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.10);
   box-shadow: 0 18px 60px rgba(0,0,0,0.30);
-  display: inline-block;
 }
-.pms-team-card img{
-  width: 96px; height: 96px;
-  border-radius: 16px;
-  object-fit: contain;
-  display: block;
-}
-
-/* Pool logo centered above Home */
-.pms-pool-wrap{ display:flex; justify-content:center; margin: 6px 0 14px 0; }
-.pms-pool-card{
-  border-radius: 24px;
-  padding: 16px 18px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.10);
-  box-shadow: 0 18px 60px rgba(0,0,0,0.28);
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-}
-.pms-pool-card img{ width: min(704px, 100%);  height: auto; display:block; object-fit: contain; }
-
-/* Brand row (GM + selected team) */
-.pms-brand-row{ display:flex; gap:12px; align-items:center; justify-content:flex-start; margin: 14px 0 6px 0; }
-.pms-brand-row .pms-chip{ padding: 8px; }
-.pms-brand-row img{ display:block; object-fit:contain; border-radius: 16px; }
-.pms-brand-row img.pms-gm{ width: 96px; height: 96px; }
-.pms-brand-row img.pms-team{ width: 96px; height: 96px; }
-
-/* Center page icon (Home/GM/Joueurs/...) */
-.pms-page-header{ display:flex; align-items:center; gap:10px; margin: 6px 0 10px 0; }
-.pms-page-ico{
-  width: clamp(260px, 20vw, 360px);
-  height: clamp(260px, 20vw, 360px);
-  border-radius: 0px;
-  background: transparent;
-  border: none;
-  box-shadow: none;
-  object-fit: contain;
-  display:block;
-}
-.pms-page-title{ font-size: 3.0rem; font-weight: 800; line-height: 1.05; margin:0; padding:0; }
 
 /* Hide tiny loader dots/containers sometimes rendered by st.image */
-/* Hide Streamlit image skeleton/loader artifacts (keep real images visible) */
-div[data-testid="stImage"] [data-testid="stSkeleton"] { display:none !important; }
-div[data-testid="stImage"] [role="progressbar"] { display:none !important; }
-div[data-testid="stImage"] svg { display:none !important; }
-div[data-testid="stSpinner"], .stSpinner { display:none !important; }
-
+div[data-testid="stImage"] > div { display:none !important; }
 
 
 /* === Apple WOW+++++++ === */
@@ -451,40 +297,7 @@ section[data-testid="stSidebar"] > div {
   box-shadow: 0 18px 55px rgba(0,0,0,.26) !important;
 }
 
-/* Expanded sidebar nav: bigger icons + perfect vertical alignment */
-section[data-testid="stSidebar"] .pms-nav img.pms-emoji{
-  width: 84px !important;
-  height: 84px !important;
-  border-radius: 18px !important;
-  background: rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.10);
-  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
-  padding: 2px;
-}
-section[data-testid="stSidebar"] .pms-nav div[data-testid="stHorizontalBlock"]{
-  align-items:center !important;
-}
-section[data-testid="stSidebar"] .pms-nav div[data-testid="stHorizontalBlock"] > div{
-  display:flex;
-  align-items:center;
-}
-section[data-testid="stSidebar"] .pms-nav div[data-testid="stHorizontalBlock"] > div:first-child{
-  justify-content:center;
-}
-section[data-testid="stSidebar"] .pms-nav .stButton > button{
-  min-height: 66px !important;
-}
-
-
 /* icon sizes */
-
-/* Sidebar nav rows: align emoji icons with their buttons */
-.pms-nav div[data-testid="stHorizontalBlock"] { align-items: center !important; }
-.pms-nav div[data-testid="stHorizontalBlock"] > div { align-items: center !important; }
-.pms-nav div[data-testid="stColumn"], .pms-nav div[data-testid="column"] { display:flex !important; align-items:center !important; }
-.pms-nav div[data-testid="stColumn"] > div, .pms-nav div[data-testid="column"] > div { width:100% !important; }
-section[data-testid="stSidebar"] .stButton > button { min-height: var(--pms-emo, 60px) !important; }
-
 :root{
   --pms-emo: 72px;
   --pms-emo-c: 52px;
@@ -659,28 +472,24 @@ def _sidebar_nav(owner_key: str, active_slug: str):
     _set_sidebar_mode(collapsed)
 
 
-    # Brand: GM logo + selected team logo (bytes-cached; big only on Home)
-gm_logo = _gm_logo_path()
-t_logo = _team_logo_path(owner_key)
+    # Brand: GM logo + team logo (no text; cached bytes)
+    gm_logo = _gm_logo_path()
+    t_logo = _team_logo_path(owner_key)
 
-is_home = (active_pre == "home" or st.session_state.get("active_tab") == "home")
-
-if not collapsed:
-    cols = st.sidebar.columns([1, 1, 6], vertical_alignment="center")
-    with cols[0]:
+    if gm_logo and gm_logo.exists() and t_logo and t_logo.exists() and (not collapsed):
+        c1, c2 = st.sidebar.columns([1, 1], gap="small")
+        with c1:
+            st.image(_img_bytes(gm_logo), width=110)
+        with c2:
+            st.image(_img_bytes(t_logo), width=110)
+    else:
+        # collapsed or missing one logo: show what we have, smaller
         if gm_logo and gm_logo.exists():
-            st.image(_img_bytes(gm_logo), width=(96 if is_home else 52))
-    with cols[1]:
-        if t_logo and t_logo.exists() and t_logo.is_file():
-            st.image(_img_bytes(t_logo), width=(96 if is_home else 44))
-else:
-    if gm_logo and gm_logo.exists():
-        st.sidebar.image(_img_bytes(gm_logo), width=(56 if is_home else 40))
-    if t_logo and t_logo.exists() and t_logo.is_file():
-        st.sidebar.image(_img_bytes(t_logo), width=(44 if is_home else 32))
+            st.sidebar.image(_img_bytes(gm_logo), width=(64 if collapsed else 110))
+        if t_logo and t_logo.exists() and (not collapsed):
+            st.sidebar.image(_img_bytes(t_logo), width=64)
 
-# Items
-
+    # Items
 
     items = []
     for it in NAV_ORDER:
@@ -693,38 +502,23 @@ else:
     for it in items:
         icon_p = _emoji_path(it.slug)  # png emoji (no stretch)
         is_active = (it.slug == active_slug)
-        # Collapsed: iOS dock item (image + invisible overlay button)
+
+        # Collapsed: icon + invisible-ish button (no base64 HTML)
         if collapsed:
-            cls = "pms-dock-item active" if is_active else "pms-dock-item"
-            st.sidebar.markdown(f"<div class='{cls}'>", unsafe_allow_html=True)
-
             if icon_p and icon_p.exists():
-                b64 = _b64_png(icon_p)
-                st.sidebar.markdown(
-                    f"<img class='pms-dock-ico' src='data:image/png;base64,{b64}' alt='{it.label}'/>",
-                    unsafe_allow_html=True,
-                )
-
-            # Invisible overlay button (captures click, no ugly box)
+                st.sidebar.image(_img_bytes(icon_p), width=46)
             if st.sidebar.button(" ", key=f"nav_{it.slug}", help=it.label, type="primary" if is_active else "secondary"):
                 st.session_state["active_tab"] = it.slug
-                st.session_state["_pms_qp_applied"] = True
-                _set_query_tab(it.slug)
                 st.rerun()
-
-            st.sidebar.markdown("</div>", unsafe_allow_html=True)
         else:
-            c1, c2 = st.sidebar.columns([1.6, 4.0], gap="small")
+
+            c1, c2 = st.sidebar.columns([1.1, 3.4], gap="small")
             with c1:
                 if icon_p and icon_p.exists():
-                    b64i = _b64_png(icon_p)
-                    st.markdown(f"<img class='pms-emoji' src='data:image/png;base64,{b64i}' alt='{it.label}' />", unsafe_allow_html=True)
+                    st.image(str(icon_p), width=82)
             with c2:
                 if st.button(it.label, key=f"nav_{it.slug}", use_container_width=True, type="primary" if is_active else "secondary"):
                     st.session_state["active_tab"] = it.slug
-                    st.session_state["_pms_qp_applied"] = True
-                    _set_query_tab(it.slug)
-                    st.rerun()
 
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
@@ -737,6 +531,11 @@ else:
     light = bool(st.session_state.get("pms_light_mode", False))
     st.sidebar.toggle("Clair", value=light, key="pms_light_toggle")
     st.session_state["pms_light_mode"] = bool(st.session_state.get("pms_light_toggle", False))
+
+
+    # ⚡ Perf (basic timings captured in st.session_state.get('_pms_perf', {}))
+    with st.sidebar.expander("⚡ Perf", expanded=False):
+        st.code(st.session_state.get("_pms_perf", {}), language="json")
 
 def _apply_theme_mode():
     # Light mode quick polish without breaking your global theme:
@@ -804,45 +603,18 @@ def _get_query_tab() -> Optional[str]:
 
 
 def _set_query_tab(slug: str) -> None:
-    # URL sync disabled for speed/stability
-    return
+    try:
+        st.query_params.update({"tab": slug})  # type: ignore
+    except Exception:
+        try:
+            st.experimental_set_query_params(tab=slug)
+        except Exception:
+            pass
+
 
 # ----------------------------
 # Page renders
 # ----------------------------
-
-def _nav_label(slug: str) -> str:
-    for it in NAV_ORDER:
-        if it.slug == slug:
-            return it.label
-    return slug.title()
-
-
-def _render_page_header(slug: str, label: str, show_title: bool = True) -> None:
-    """Renders the PNG emoji icon in the main area (optionally with a big title)."""
-    icon_p = _emoji_path(slug)
-    b64i = _b64_png(icon_p) if icon_p and icon_p.exists() else ""
-    if not b64i:
-        if show_title:
-            st.title(label)
-        return
-
-    if show_title:
-        st.markdown(
-            f"""<div class='pms-page-header'>
-  <img class='pms-page-ico' src='data:image/png;base64,{b64i}' alt='{label}' />
-  <div><div class='pms-page-title'>{label}</div></div>
-</div>""",
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            f"""<div class='pms-page-header'>
-  <img class='pms-page-ico' src='data:image/png;base64,{b64i}' alt='{label}' />
-</div>""",
-            unsafe_allow_html=True,
-        )
-
 def _sync_owner_from_home():
     try:
         val = st.session_state.get("owner_select")
@@ -852,69 +624,72 @@ def _sync_owner_from_home():
         pass
 
 def _render_home(owner_key: str):
-    # ✅ Pool logo — centered ABOVE title
+    # ✅ Pool logo (double size) — centered ABOVE title
     if POOL_LOGO.exists():
-        p = _transparent_copy_edge(POOL_LOGO)
-        mime_p, b64p = _b64_image(p if (p and p.exists()) else POOL_LOGO, max_w=680)
-        if b64p:
-            st.markdown(
-                f"""<div class='pms-pool-wrap'><div class='pms-pool-card'>
-<img src='data:{mime_p};base64,{b64p}' alt='pool' />
-</div></div>""",
-                unsafe_allow_html=True,
-            )
+        c1, c2, c3 = st.columns([1, 6, 1])
+        with c2:
+            st.markdown("<div class='pms-chip'>", unsafe_allow_html=True)
+            st.image(str(POOL_LOGO), use_container_width=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    _render_page_header('home', 'Home', show_title=True)
+    st.title("🏠 Home")
     st.caption("Choisis ton équipe ci-dessous.")
 
     st.subheader("🏒 Sélection d'équipe")
     st.caption("Cette sélection alimente Alignement / GM / Transactions (même clé session_state).")
 
-    # Select team (full width) — team logo is shown in sidebar only
-    idx = POOL_TEAMS.index(owner_key) if owner_key in POOL_TEAMS else 0
-    st.selectbox(
-        "Équipe (propriétaire)",
-        POOL_TEAMS,
-        index=idx,
-        key="owner_select",
-        on_change=_sync_owner_from_home,
-    )
-    new_owner = st.session_state.get("owner_select", owner_key)
+    colA, colB = st.columns([6, 1.4])
+    with colA:
+        idx = POOL_TEAMS.index(owner_key) if owner_key in POOL_TEAMS else 0
+        st.selectbox(
+            "Équipe (propriétaire)",
+            POOL_TEAMS,
+            index=idx,
+            key="owner_select",
+            on_change=_sync_owner_from_home,
+        )
+        new_owner = st.session_state.get("owner_select", owner_key)
+    with colB:
+        p = _team_logo_path(new_owner)
+        if p and p.exists():
+            b64t = _b64_png(p)
+            st.markdown("<div class='pms-team-hero'>", unsafe_allow_html=True)
+            st.markdown(f"<img src='data:image/png;base64,{b64t}' alt='team' />", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
     st.success(f"✅ Équipe sélectionnée: {TEAM_LABEL.get(new_owner, new_owner)}")
-TAB_MODULES = {
-    "home": None,
-    "gm": "tabs.gm",
-    "joueurs": "tabs.joueurs",
-    "alignement": "tabs.alignement",
-    "transactions": "tabs.transactions",
-    "historique": "tabs.historique",
-    "classement": "tabs.classement",
-    "admin": "tabs.admin",
-}
 
-@st.cache_resource(show_spinner=False)
-def _import_module_cached(modpath: str):
-    import importlib
-    return importlib.import_module(modpath)
-
-def _safe_import_tab(slug: str):
-    modpath = TAB_MODULES.get(slug)
-    if not modpath:
-        return None
-    try:
-        return _import_module_cached(modpath)
-    except Exception as e:
-        return e
+    # Optional banner
+    banner = DATA_DIR / "nhl_teams_header_banner.png"
+    if banner.exists():
+        st.image(str(banner), use_container_width=True)
 
 def _safe_import_tabs() -> Dict[str, Any]:
-    """Compatibility helper (avoid using this in main; it's slower)."""
+    """
+    IMPORTANT:
+    - Avoid importing tabs/__init__.py that imports everything.
+    - Your tabs/__init__.py should be EMPTY or minimal.
+    """
     modules: Dict[str, Any] = {}
-    for slug, modpath in TAB_MODULES.items():
-        if not modpath:
-            continue
-        modules[slug] = _safe_import_tab(slug)
+    try:
+        import importlib
+        for slug, mod in [
+            ("joueurs", "tabs.joueurs"),
+            ("alignement", "tabs.alignement"),
+            ("transactions", "tabs.transactions"),
+            ("gm", "tabs.gm"),
+            ("historique", "tabs.historique"),
+            ("classement", "tabs.classement"),
+            ("admin", "tabs.admin"),
+        ]:
+            try:
+                modules[slug] = importlib.import_module(mod)
+            except Exception as e:
+                modules[slug] = e
+    except Exception:
+        pass
     return modules
+
 
 def _render_module(mod: Any, ctx: Dict[str, Any]):
     if isinstance(mod, Exception):
@@ -938,37 +713,24 @@ def main():
     st.session_state.setdefault("season", "2025-2026")
     st.session_state.setdefault("owner", "Canadiens")
     st.session_state.setdefault("active_tab", "home")
-    st.session_state.setdefault("_pms_qp_applied", False)
-    st.session_state.setdefault("_pms_booted", False)
     st.session_state.setdefault("pms_sidebar_collapsed", False)
     st.session_state.setdefault("pms_light_mode", False)
-    st.session_state.setdefault("_pms_prof", {})
 
-    _t0 = time.perf_counter()
     _apply_css()
     _apply_theme_mode()
-    st.session_state['_pms_prof']['css_theme_ms'] = int((time.perf_counter()-_t0)*1000)
 
     # Read query param tab
     qp = (_get_query_tab() or "").strip().lower()
     allowed = {it.slug for it in NAV_ORDER}
-    # Apply URL query param only once (otherwise it can overwrite sidebar clicks and feel like "2 clicks").
-    # Apply URL query param only at first boot (prevents overwrite + avoids the '2 clicks' feeling).
-    if not bool(st.session_state.get("_pms_booted", False)):
-        if qp in allowed:
-            st.session_state["active_tab"] = qp
-        st.session_state["_pms_booted"] = True
-        st.session_state["_pms_qp_applied"] = True
+    if qp in allowed:
+        st.session_state["active_tab"] = qp
 
-    # Owner is needed for access control + sidebar rendering.
     owner = str(st.session_state.get("owner") or "Canadiens")
-    active_pre = str(st.session_state.get("active_tab") or "home")
-    # Sidebar: season + nav (handled inside _sidebar_nav)
+    active = str(st.session_state.get("active_tab") or "home")
+    # Sidebar: season + nav
+    _t0 = time.perf_counter()
+    _sidebar_nav(owner, active)
     _t1 = time.perf_counter()
-    _sidebar_nav(owner, active_pre)
-    st.session_state['_pms_prof']['sidebar_ms'] = int((time.perf_counter()-_t1)*1000)
-    # Re-read after sidebar: avoids "2 clicks" even if rerun is skipped
-    active = str(st.session_state.get("active_tab") or active_pre or "home")
 
     # Prevent non-whalers from accessing Admin
     if active == "admin" and owner != "Whalers":
@@ -986,25 +748,34 @@ def main():
 
     # Render page
     if active == "home":
+        _t4 = time.perf_counter()
         _render_home(owner)
+        _t5 = time.perf_counter()
+        st.session_state["_pms_perf"] = {
+            "css_theme_ms": int((_t0 - _t0) * 1000),
+            "sidebar_ms": int((_t1 - _t0) * 1000),
+            "import_ms": 0,
+            "render_ms": int((_t5 - _t4) * 1000),
+        }
         return
 
-    # Center icon for other pages (keeps tab modules intact; shows the same PNG icon as sidebar)
-    _render_page_header(active, _nav_label(active), show_title=True)
-
     _t2 = time.perf_counter()
-    mod = _safe_import_tab(active)
-    st.session_state['_pms_prof']['import_ms'] = int((time.perf_counter()-_t2)*1000)
+    mods = _safe_import_tabs()
+    _t3 = time.perf_counter()
+    mod = mods.get(active)
     if mod is None:
         st.warning("Onglet indisponible.")
         return
 
-    _t3 = time.perf_counter()
+    _t4 = time.perf_counter()
     _render_module(mod, ctx)
-    st.session_state['_pms_prof']['render_ms'] = int((time.perf_counter()-_t3)*1000)
-    # Quick perf readout
-    with st.sidebar.expander('⚡ Perf', expanded=False):
-        st.json(st.session_state.get('_pms_prof', {}))
+    _t5 = time.perf_counter()
+    st.session_state["_pms_perf"] = {
+        "css_theme_ms": 0,
+        "sidebar_ms": int((_t1 - _t0) * 1000),
+        "import_ms": int((_t3 - _t2) * 1000),
+        "render_ms": int((_t5 - _t4) * 1000),
+    }
 
 
 if __name__ == "__main__":
