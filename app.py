@@ -350,20 +350,21 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
   align-items:center;
   justify-content:center;
 }
-.pms-pool-card img{ width: 220px; height: auto; display:block; object-fit: contain; }
+.pms-pool-card img{ width: min(880px, 100%);  height: auto; display:block; object-fit: contain; }
 
 /* Brand row (GM + selected team) */
 .pms-brand-row{ display:flex; gap:12px; align-items:center; justify-content:flex-start; margin: 14px 0 6px 0; }
 .pms-brand-row .pms-chip{ padding: 8px; }
 .pms-brand-row img{ display:block; object-fit:contain; border-radius: 16px; }
 .pms-brand-row img.pms-gm{ width: 96px; height: 96px; }
-.pms-brand-row img.pms-team{ width: 62px; height: 62px; }
+.pms-brand-row img.pms-team{ width: 96px; height: 96px; }
 
 /* Center page icon (Home/GM/Joueurs/...) */
 .pms-page-header{ display:flex; align-items:center; gap:14px; margin: 6px 0 10px 0; }
 .pms-page-ico{
-  width: 64px; height: 64px;
-  border-radius: 18px;
+  
+  width: 192px; height: 192px;
+  border-radius: 28px;
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.10);
   box-shadow: 0 18px 55px rgba(0,0,0,0.22);
@@ -377,6 +378,8 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
 div[data-testid="stImage"] [data-testid="stSkeleton"] { display:none !important; }
 div[data-testid="stImage"] [role="progressbar"] { display:none !important; }
 div[data-testid="stImage"] svg { display:none !important; }
+div[data-testid="stSpinner"], .stSpinner { display:none !important; }
+
 
 
 /* === Apple WOW+++++++ === */
@@ -399,6 +402,14 @@ section[data-testid="stSidebar"] > div {
 }
 
 /* icon sizes */
+
+/* Sidebar nav rows: align emoji icons with their buttons */
+.pms-nav div[data-testid="stHorizontalBlock"] { align-items: center !important; }
+.pms-nav div[data-testid="stHorizontalBlock"] > div { align-items: center !important; }
+.pms-nav div[data-testid="stColumn"], .pms-nav div[data-testid="column"] { display:flex !important; align-items:center !important; }
+.pms-nav div[data-testid="stColumn"] > div, .pms-nav div[data-testid="column"] > div { width:100% !important; }
+section[data-testid="stSidebar"] .stButton > button { min-height: var(--pms-emo, 60px) !important; }
+
 :root{
   --pms-emo: 72px;
   --pms-emo-c: 52px;
@@ -819,11 +830,18 @@ def _render_home(owner_key: str):
 
     st.success(f"✅ Équipe sélectionnée: {TEAM_LABEL.get(new_owner, new_owner)}")
 
-    # Optional banner
+    # Optional banner (rendered as HTML to avoid loader dots)
     banner = DATA_DIR / "nhl_teams_header_banner.png"
     if banner.exists():
-        st.image(str(banner), use_container_width=True)
-
+        b = _transparent_copy_edge(banner)
+        b64b = _b64_png(b) if b and b.exists() else _b64_png(banner)
+        if b64b:
+            st.markdown(
+                f"""<div class='pms-pool-wrap'><div class='pms-pool-card'>
+<img src='data:image/png;base64,{b64b}' alt='banner' />
+</div></div>""",
+                unsafe_allow_html=True,
+            )
 def _safe_import_tabs() -> Dict[str, Any]:
     """
     IMPORTANT:
