@@ -12,23 +12,6 @@ from typing import Dict, Any, List, Optional
 import pandas as pd
 import streamlit as st
 
-# -----------------------------------------------------
-# Cache helpers (speed: avoid re-reading CSV on every rerun)
-# -----------------------------------------------------
-def _file_sig(path: str) -> tuple[int, int]:
-    try:
-        st_ = os.stat(path)
-        return (int(st_.st_mtime_ns), int(st_.st_size))
-    except Exception:
-        return (0, 0)
-
-@st.cache_data(show_spinner=False)
-def _read_csv_cached(path: str, sig: tuple[int, int]) -> pd.DataFrame:
-    try:
-        return pd.read_csv(path, low_memory=False)
-    except Exception:
-        return pd.read_csv(path, engine="python", on_bad_lines="skip", low_memory=False)
-
 
 # =====================================================
 # Helpers
@@ -69,7 +52,15 @@ def _norm_player_key(name: str) -> str:
 
 
 def _safe_read_csv(path: str) -> pd.DataFrame:
-    return _read_csv_cached(path, _file_sig(path))
+    if not path or not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        try:
+            return pd.read_csv(path, engine="python", on_bad_lines="skip")
+        except Exception:
+            return pd.DataFrame()
 
 
 def _safe_write_csv(df: pd.DataFrame, path: str) -> bool:
@@ -215,7 +206,7 @@ TX_COLS = [
 # =====================================================
 # Loaders
 # =====================================================
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, persist="disk", max_entries=8)
 def load_equipes_joueurs(data_dir: str, season: str) -> pd.DataFrame:
     path = _equipes_path(data_dir, season)
     df = _safe_read_csv(path)
@@ -253,7 +244,7 @@ def load_equipes_joueurs(data_dir: str, season: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, persist="disk", max_entries=8)
 def load_transactions(data_dir: str, season: str) -> pd.DataFrame:
     path = _transactions_path(data_dir, season)
     df = _safe_read_csv(path)
