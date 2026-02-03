@@ -705,6 +705,6 @@ def render(ctx: dict) -> None:
     with st.expander("🧪 Debug (sources)", expanded=False):
         st.write("equipes_joueurs:", equipes.attrs.get("__path__", ""))
         st.write("players db:", players.attrs.get("__path__", "(absent)"))
-                st.write("contracts:", _find_contracts_file(data_dir) or "(absent)")
+        st.write("contracts:", _find_contracts_file(data_dir) or "(absent)")
         st.write("gm_logo:", _find_image("gm_logo.png", data_dir) or "(introuvable)")
         st.write("team_logo:", _find_team_logo(selected_owner, data_dir) or "(introuvable)")
