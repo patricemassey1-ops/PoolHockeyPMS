@@ -80,7 +80,19 @@ def _first_existing(*paths: str) -> str:
 
 
 def _safe_read_csv(path: str) -> pd.DataFrame:
-    return _read_csv_cached(path, _file_sig(path))
+    """Read a CSV safely and fast.
+
+    - Returns an empty DataFrame if path is empty or missing.
+    - Uses cached reader (C engine first, python fallback).
+    """
+    if not path:
+        return pd.DataFrame()
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        return _read_csv_cached(path, _file_sig(path))
+    except Exception:
+        return pd.DataFrame()
 
 
 def _guess_col(df: pd.DataFrame, candidates: List[str]) -> str:
@@ -252,7 +264,7 @@ def load_equipes_joueurs(data_dir: str, season: str) -> pd.DataFrame:
         os.path.join(data_dir, f"equipes_joueurs_{season.replace('–','-')}.csv"),
     )
     df = _safe_read_csv(path)
-    if df is None or df.empty:
+    if df.empty:
         return pd.DataFrame()
 
     df = df.copy()
@@ -285,7 +297,7 @@ def load_players_db(data_dir: str) -> pd.DataFrame:
         os.path.join(data_dir, "data", "hockey.players.csv"),
     )
     df = _safe_read_csv(path)
-    if df is None or df.empty:
+    if df.empty:
         return pd.DataFrame()
     df = df.copy()
     df.attrs["__path__"] = path
@@ -316,9 +328,15 @@ def load_players_db(data_dir: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, persist="disk", max_entries=8)
 def load_contracts(data_dir: str) -> pd.DataFrame:
-    path = _first_existing(os.path.join(data_dir, "puckpedia.contracts.csv"))
+    path = _first_existing(
+        os.path.join(data_dir, "puckpedia.contracts.csv"),
+        os.path.join(data_dir, "PuckPedia2025_26.csv"),
+        os.path.join(data_dir, "puckpedia2025_26.csv"),
+        os.path.join(data_dir, "puckpedia2025_26_contracts.csv"),
+        os.path.join(data_dir, "puckpedia_contracts.csv"),
+    )
     df = _safe_read_csv(path)
-    if df is None or df.empty:
+    if df.empty:
         return pd.DataFrame()
     df = df.copy()
     df.attrs["__path__"] = path
@@ -427,14 +445,14 @@ def _roster_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _top_cap_hits(df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
-    if df is None or df.empty:
+    if df.empty:
         return pd.DataFrame()
     out = df.sort_values("_cap_num", ascending=False).head(n).copy()
     return _roster_table(out)
 
 
 def _expiring_contracts(df: pd.DataFrame, season: str) -> pd.DataFrame:
-    if df is None or df.empty:
+    if df.empty:
         return pd.DataFrame()
 
     end_year = _season_end_year(season)
