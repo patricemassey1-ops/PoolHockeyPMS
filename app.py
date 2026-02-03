@@ -248,7 +248,6 @@ def _b64_image_resized_cached(p: str, sig: tuple[int, int], max_w: int) -> tuple
 def _b64_image(path: Path, max_w: int = 0) -> tuple[str, str]:
     return _b64_image_resized_cached(str(path), _file_sig(path), int(max_w or 0))
 
-(str(path), _file_sig(path))
 
 
 
