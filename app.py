@@ -350,7 +350,7 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
   align-items:center;
   justify-content:center;
 }
-.pms-pool-card img{ width: min(880px, 100%);  height: auto; display:block; object-fit: contain; }
+.pms-pool-card img{ width: min(704px, 100%);  height: auto; display:block; object-fit: contain; }
 
 /* Brand row (GM + selected team) */
 .pms-brand-row{ display:flex; gap:12px; align-items:center; justify-content:flex-start; margin: 14px 0 6px 0; }
@@ -360,14 +360,14 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
 .pms-brand-row img.pms-team{ width: 96px; height: 96px; }
 
 /* Center page icon (Home/GM/Joueurs/...) */
-.pms-page-header{ display:flex; align-items:center; gap:14px; margin: 6px 0 10px 0; }
+.pms-page-header{ display:flex; align-items:center; gap:10px; margin: 6px 0 10px 0; }
 .pms-page-ico{
-  
-  width: 192px; height: 192px;
-  border-radius: 28px;
-  background: rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.10);
-  box-shadow: 0 18px 55px rgba(0,0,0,0.22);
+  width: clamp(260px, 20vw, 360px);
+  height: clamp(260px, 20vw, 360px);
+  border-radius: 0px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
   object-fit: contain;
   display:block;
 }
@@ -400,6 +400,31 @@ section[data-testid="stSidebar"] > div {
   border: 1px solid rgba(255,255,255,.10) !important;
   box-shadow: 0 18px 55px rgba(0,0,0,.26) !important;
 }
+
+/* Expanded sidebar nav: bigger icons + perfect vertical alignment */
+section[data-testid="stSidebar"] .pms-nav img.pms-emoji{
+  width: 84px !important;
+  height: 84px !important;
+  border-radius: 18px !important;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+  padding: 2px;
+}
+section[data-testid="stSidebar"] .pms-nav div[data-testid="stHorizontalBlock"]{
+  align-items:center !important;
+}
+section[data-testid="stSidebar"] .pms-nav div[data-testid="stHorizontalBlock"] > div{
+  display:flex;
+  align-items:center;
+}
+section[data-testid="stSidebar"] .pms-nav div[data-testid="stHorizontalBlock"] > div:first-child{
+  justify-content:center;
+}
+section[data-testid="stSidebar"] .pms-nav .stButton > button{
+  min-height: 66px !important;
+}
+
 
 /* icon sizes */
 
@@ -650,11 +675,11 @@ def _sidebar_nav(owner_key: str, active_slug: str):
 
             st.sidebar.markdown("</div>", unsafe_allow_html=True)
         else:
-            c1, c2 = st.sidebar.columns([1.1, 3.4], gap="small")
+            c1, c2 = st.sidebar.columns([1.6, 4.0], gap="small")
             with c1:
                 if icon_p and icon_p.exists():
                     b64i = _b64_png(icon_p)
-                    st.markdown(f"<img class='pms-emoji' src='data:image/png;base64,{b64i}' style='width:72px;height:72px;border-radius:16px;' />", unsafe_allow_html=True)
+                    st.markdown(f"<img class='pms-emoji' src='data:image/png;base64,{b64i}' alt='{it.label}' />", unsafe_allow_html=True)
             with c2:
                 if st.button(it.label, key=f"nav_{it.slug}", use_container_width=True, type="primary" if is_active else "secondary"):
                     st.session_state["active_tab"] = it.slug
@@ -809,24 +834,16 @@ def _render_home(owner_key: str):
     st.subheader("🏒 Sélection d'équipe")
     st.caption("Cette sélection alimente Alignement / GM / Transactions (même clé session_state).")
 
-    colA, colB = st.columns([6.8, 1.8])
-    with colA:
-        idx = POOL_TEAMS.index(owner_key) if owner_key in POOL_TEAMS else 0
-        st.selectbox(
-            "Équipe (propriétaire)",
-            POOL_TEAMS,
-            index=idx,
-            key="owner_select",
-            on_change=_sync_owner_from_home,
-        )
-        new_owner = st.session_state.get("owner_select", owner_key)
-    with colB:
-        p = _team_logo_path(new_owner)
-        if p and p.exists():
-            b64t = _b64_png(p)
-            st.markdown("<div class='pms-team-hero'><div class='pms-team-card'>", unsafe_allow_html=True)
-            st.markdown(f"<img src='data:image/png;base64,{b64t}' alt='team' />", unsafe_allow_html=True)
-            st.markdown("</div></div>", unsafe_allow_html=True)
+    # Select team (full width) — team logo is shown in sidebar only
+    idx = POOL_TEAMS.index(owner_key) if owner_key in POOL_TEAMS else 0
+    st.selectbox(
+        "Équipe (propriétaire)",
+        POOL_TEAMS,
+        index=idx,
+        key="owner_select",
+        on_change=_sync_owner_from_home,
+    )
+    new_owner = st.session_state.get("owner_select", owner_key)
 
     st.success(f"✅ Équipe sélectionnée: {TEAM_LABEL.get(new_owner, new_owner)}")
 
