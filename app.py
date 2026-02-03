@@ -222,8 +222,6 @@ def _b64_png_cached(p: str, sig: tuple[int, int]) -> str:
 def _b64_png(path: Path) -> str:
     return _b64_png_cached(str(path), _file_sig(path))
 
-    except Exception:
-        return ""
 
 
 def _pick_existing(base_dir: Path, candidates: list[str]) -> Optional[Path]:
