@@ -127,6 +127,81 @@ def _transparent_copy(src: Path, thr: int = 245) -> Path:
         return src
 
 
+def _transparent_copy_edge(src: Path, thr: int = 245) -> Path:
+    """
+    Creates a cached RGBA version removing a near-white *edge-connected* background.
+    This preserves internal whites (e.g., logo highlights) while removing the white square behind it.
+    Returns original if Pillow is unavailable or file missing.
+    """
+    try:
+        if not src.exists():
+            return src
+        dst = CACHE_UI_DIR / (src.stem + "_edge_t.png")
+        # Cache: regenerate only if missing or older
+        if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+            return dst
+
+        try:
+            from PIL import Image  # type: ignore
+        except Exception:
+            return src
+
+        im = Image.open(src).convert("RGBA")
+        w, h = im.size
+        px = im.load()
+        if px is None:
+            return src
+
+        # Helper: near-white pixel?
+        def is_bg(x: int, y: int) -> bool:
+            r, g, b, a = px[x, y]
+            return a > 0 and r >= thr and g >= thr and b >= thr
+
+        # BFS flood fill from edges for background pixels
+        from collections import deque
+
+        visited = bytearray(w * h)
+        q = deque()
+
+        def push(x: int, y: int):
+            idx = y * w + x
+            if visited[idx]:
+                return
+            if not is_bg(x, y):
+                return
+            visited[idx] = 1
+            q.append((x, y))
+
+        # seed with corner pixels (preserves internal/edge whites better)
+        k = 6  # corner box size
+        for y in range(min(k, h)):
+            for x in range(min(k, w)):
+                push(x, y)  # top-left
+                push(w - 1 - x, y)  # top-right
+                push(x, h - 1 - y)  # bottom-left
+                push(w - 1 - x, h - 1 - y)  # bottom-right
+
+        while q:
+            x, y = q.popleft()
+            # Make transparent
+            r, g, b, a = px[x, y]
+            px[x, y] = (r, g, b, 0)
+            # neighbors
+            if x > 0:
+                push(x - 1, y)
+            if x < w - 1:
+                push(x + 1, y)
+            if y > 0:
+                push(x, y - 1)
+            if y < h - 1:
+                push(x, y + 1)
+
+        im.save(dst, "PNG")
+        return dst
+    except Exception:
+        return src
+
+
 @st.cache_data(show_spinner=False)
 def _b64_png(path: Path) -> str:
     try:
@@ -150,10 +225,9 @@ def _team_logo_path(team: str) -> Path:
     for fn in cands:
         p = ASSETS_DIR / fn
         if p.exists():
-            return p
+            return _transparent_copy_edge(p)
     p = ASSETS_DIR / f"{team}_Logo.png"
-    return p if p.exists() else Path("")
-
+    return _transparent_copy_edge(p) if p.exists() else Path("")
 def _emoji_path(slug: str) -> Optional[Path]:
     fn = EMOJI_FILES.get(slug)
     if not fn:
@@ -247,13 +321,21 @@ section[data-testid="stSidebar"] .stButton > button[kind="primary"] span{
   opacity: 0 !important; padding:0 !important; margin:0 !important;
 }
 
-/* Team logo next to dropdown */
+/* Team logo next to dropdown (rounded card + transparent logo) */
 .pms-team-hero{ height: 100%; display:flex; align-items:center; justify-content:center; }
-.pms-team-hero img{
-  width: 96px; height: 96px; border-radius: 20px; object-fit: contain;
-  background: rgba(255,255,255,0.06);
+.pms-team-card{
+  border-radius: 22px;
+  padding: 14px;
+  background: rgba(255,255,255,0.04);
   border: 1px solid rgba(255,255,255,0.10);
   box-shadow: 0 18px 60px rgba(0,0,0,0.30);
+  display: inline-block;
+}
+.pms-team-card img{
+  width: 96px; height: 96px;
+  border-radius: 16px;
+  object-fit: contain;
+  display: block;
 }
 
 /* Hide tiny loader dots/containers sometimes rendered by st.image */
@@ -636,9 +718,9 @@ def _render_home(owner_key: str):
         p = _team_logo_path(new_owner)
         if p and p.exists():
             b64t = _b64_png(p)
-            st.markdown("<div class='pms-team-hero'>", unsafe_allow_html=True)
+            st.markdown("<div class='pms-team-hero'><div class='pms-team-card'>", unsafe_allow_html=True)
             st.markdown(f"<img src='data:image/png;base64,{b64t}' alt='team' />", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("</div></div>", unsafe_allow_html=True)
 
     st.success(f"✅ Équipe sélectionnée: {TEAM_LABEL.get(new_owner, new_owner)}")
 
