@@ -922,10 +922,12 @@ def main():
     if qp in allowed:
         st.session_state["active_tab"] = qp
 
-    owner = str(st.session_state.get("owner") or "Canadiens")
-    active = str(st.session_state.get("active_tab") or "home")
+        owner = str(st.session_state.get("owner") or "Canadiens")
+    active_pre = str(st.session_state.get("active_tab") or "home")
     # Sidebar: season + nav (handled inside _sidebar_nav)
-    _sidebar_nav(owner, active)
+    _sidebar_nav(owner, active_pre)
+    # Re-read after sidebar: avoids "2 clicks" even if rerun is skipped
+    active = str(st.session_state.get("active_tab") or active_pre or "home")
 
     # Prevent non-whalers from accessing Admin
     if active == "admin" and owner != "Whalers":

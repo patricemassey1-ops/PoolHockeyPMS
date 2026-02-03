@@ -337,7 +337,7 @@ def _find_contracts_file(data_dir: str) -> str:
         os.path.join(data_dir, "puckpedia_contracts.csv"),
     )
 
-@st.cache_data(show_spinner=False, persist=\"disk\", max_entries=8)
+@st.cache_data(show_spinner=False, persist="disk", max_entries=8)
 def load_contracts(data_dir: str) -> pd.DataFrame:
     path = _first_existing(
         os.path.join(data_dir, "puckpedia.contracts.csv"),
@@ -451,8 +451,14 @@ def _roster_table(df: pd.DataFrame) -> pd.DataFrame:
         show["Pos"] = df["Pos"].astype(str)
     else:
         show["Pos"] = pd.Series(["—"] * len(df), index=df.index if isinstance(df, pd.DataFrame) else None)
-    show["Team"] = df.get("Team", "—").astype(str)
-    show["Country"] = df.get("Country", "—").astype(str)
+    if isinstance(df, pd.DataFrame) and "Team" in df.columns:
+        show["Team"] = df["Team"].astype(str)
+    else:
+        show["Team"] = pd.Series(["—"] * len(df), index=df.index)
+    if isinstance(df, pd.DataFrame) and "Country" in df.columns:
+        show["Country"] = df["Country"].astype(str)
+    else:
+        show["Country"] = pd.Series(["—"] * len(df), index=df.index)
     show["Level"] = df["_level"].astype(str).apply(_level_badge)
     show["Cap Hit"] = df["_cap_num"].apply(_money)
     show["Expiry"] = df["_expiry"].astype(str).replace({"nan": "—"}).replace({"": "—"})
