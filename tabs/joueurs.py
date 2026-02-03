@@ -173,15 +173,22 @@ PMS_TEAM_FILES = [
 
 def _read_csv_auto(fp: str) -> pd.DataFrame:
     """Lit un CSV avec détection auto du séparateur (',' ';' '\t' '|') + tolérance aux lignes brisées."""
-    # 1) Essai pandas auto-sniff
+    # 1) Essai rapide (engine C) + sniff (peut échouer si lignes brisées)
     try:
-        return pd.read_csv(fp, sep=None, engine="python", low_memory=False, on_bad_lines="skip")
+        return pd.read_csv(fp, sep=None, engine="c", low_memory=False, on_bad_lines="skip")
     except Exception:
         pass
+
+    # 2) Fallback sniff tolérant (engine python)
+    try:
+        return pd.read_csv(fp, sep=None, engine="python", on_bad_lines="skip")
+    except Exception:
+        pass
+
     # 2) Fallback séparateurs communs
     for sep in [",",";","\t","|"]:
         try:
-            return pd.read_csv(fp, sep=sep, engine="python", low_memory=False, on_bad_lines="skip")
+            return pd.read_csv(fp, sep=sep, engine="python", on_bad_lines="skip")
         except Exception:
             continue
     # 3) dernier recours
@@ -351,7 +358,7 @@ def render_team_with_logo(team_abbrev: str):
 # ----------------------------
 # Load local players DB
 # ----------------------------
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, persist="disk", max_entries=4)
 def load_players_db(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame()
@@ -422,8 +429,7 @@ def _detect_scope_column(df: pd.DataFrame) -> str | None:
     return None
 
 
-@st.cache_data(show_spinner=False)
-
+@st.cache_data(show_spinner=False, persist="disk", max_entries=8)
 def _read_csv_loose(path: str) -> pd.DataFrame:
     """Read CSV with very loose settings (delimiter sniff + bad lines skip)."""
     try:
@@ -462,49 +468,6 @@ def _read_csv_loose(path: str) -> pd.DataFrame:
             return pd.read_csv(io.StringIO(trimmed), sep=None, engine="python", on_bad_lines="skip", dtype=str)
         except Exception:
             return pd.DataFrame()
-
-
-@st.cache_data(show_spinner=False)
-def _load_owned_index_cached(data_dir: str, season_lbl: str | None, sig: tuple[int, int, int]) -> dict:
-    # Wrapper to make load_owned_index cacheable with file signatures.
-    return load_owned_index(data_dir, season_lbl)
-
-def _owned_sig(data_dir: str, season_lbl: str | None) -> tuple[int, int, int]:
-    # Returns (max_mtime_ns, total_size, file_count) across candidate sources.
-    try:
-        season_lbl = str(season_lbl or "").strip()
-        candidates = []
-        if season_lbl:
-            candidates += [
-                f"equipes_joueurs_{season_lbl}.csv",
-                f"equipes_joueurs_{season_lbl.replace('-', '_')}.csv",
-            ]
-        candidates += [
-            "equipes_joueurs_2025-2026.csv",
-            "equipes_joueurs_2025_2026.csv",
-            "equipes_joueurs.csv",
-            "Whalers.csv",
-            "Canadiens.csv",
-            "Nordiques.csv",
-            "Red_Wings.csv",
-            "Predateurs.csv",
-            "Cracheurs.csv",
-        ]
-        mt = 0
-        sz = 0
-        n = 0
-        for fn in candidates:
-            p = os.path.join(data_dir, fn)
-            if not os.path.exists(p):
-                continue
-            st_ = os.stat(p)
-            mt = max(mt, int(st_.st_mtime_ns))
-            sz += int(st_.st_size)
-            n += 1
-        return (mt, sz, n)
-    except Exception:
-        return (0, 0, 0)
-
 
 def load_owned_index(data_dir: str, season_lbl: str | None = None) -> dict:
     """
@@ -673,7 +636,7 @@ def render_owned_badge(pkey: str, owned_idx: dict):
 # ----------------------------
 # NHL API (landing)
 # ----------------------------
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False, ttl=600, max_entries=512)
 def nhl_player_landing(player_id: int) -> dict:
     url = f"https://api-web.nhle.com/v1/player/{int(player_id)}/landing"
     r = requests.get(url, timeout=12)
@@ -977,8 +940,8 @@ def render_tab_joueurs():
     if df.empty:
         st.error("❌ data/hockey.players.csv introuvable ou vide.")
         return
-    season_lbl = (st.session_state.get('season_lbl') or st.session_state.get('season') or '').strip()
-    owned_idx = _load_owned_index_cached(DATA_DIR, season_lbl, _owned_sig(DATA_DIR, season_lbl))
+
+    owned_idx = load_owned_index(DATA_DIR, st.session_state.get('season_lbl') or st.session_state.get('season') or '')
 
     # Filtres (1 ligne)
     c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
