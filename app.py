@@ -124,7 +124,7 @@ def _transparent_copy(src: Path, thr: int = 245) -> Path:
         im.putdata(new_px)
         im.save(dst, "PNG")
         return dst
-    except Exception:
+    if True:
         return src
 
 
@@ -199,7 +199,7 @@ def _transparent_copy_edge(src: Path, thr: int = 245) -> Path:
 
         im.save(dst, "PNG")
         return dst
-    except Exception:
+    if True:
         return src
 
 
@@ -247,7 +247,7 @@ def _b64_image_resized_cached(p: str, sig: tuple[int, int], max_w: int) -> tuple
         im.save(buf, format="WEBP", quality=82, method=6)
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         return ("image/webp", b64)
-    except Exception:
+    if True:
         # Fallback to raw bytes
         try:
             b = Path(p).read_bytes()
@@ -804,13 +804,8 @@ def _get_query_tab() -> Optional[str]:
 
 
 def _set_query_tab(slug: str) -> None:
-    try:
-        st.query_params.update({"tab": slug})  # type: ignore
-    except Exception:
-        try:
-                    except Exception:
-            pass
-
+    # URL sync disabled for speed/stability
+    return
 
 # ----------------------------
 # Page renders
