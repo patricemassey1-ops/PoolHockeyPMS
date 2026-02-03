@@ -429,6 +429,11 @@ def _owner_summary(roster_base: pd.DataFrame, owner: str, plafonds: Dict[str, fl
     }
 
 
+
+def _summary_for_owner(roster_base: pd.DataFrame, owner: str, plafonds: Dict[str, float]) -> Dict[str, Any]:
+    """Backward-compatible alias used by older renders."""
+    return _owner_summary(roster_base, owner, plafonds)
+
 def _roster_table(df: pd.DataFrame) -> pd.DataFrame:
     show = pd.DataFrame()
     show["Joueur"] = df["_display_name"].astype(str)
