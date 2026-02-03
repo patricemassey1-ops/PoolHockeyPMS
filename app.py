@@ -626,23 +626,19 @@ def _sidebar_nav(owner_key: str, active_slug: str):
 </div>""",
             unsafe_allow_html=True,
         )
-        st.sidebar.markdown("**Pool GM**")
-        st.sidebar.markdown(f"**{TEAM_LABEL.get(owner_key, owner_key)}**")
     else:
         # Fallback (collapsed mode or missing assets): stack like before
         if gm_logo and gm_logo.exists():
             st.sidebar.markdown("<div class='pms-brand pms-chip'>", unsafe_allow_html=True)
             st.sidebar.image(str(gm_logo), width=(56 if collapsed else 110))
             st.sidebar.markdown("</div>", unsafe_allow_html=True)
-            if not collapsed:
-                st.sidebar.markdown("**Pool GM**")
+            # Intentionally no text labels under the brand images
 
         if t_logo and t_logo.exists() and t_logo.is_file():
             st.sidebar.markdown("<div class='pms-chip' style='margin-top:10px'>", unsafe_allow_html=True)
             st.sidebar.image(str(t_logo), width=(44 if collapsed else 56))
             st.sidebar.markdown("</div>", unsafe_allow_html=True)
-            if not collapsed:
-                st.sidebar.markdown(f"**{TEAM_LABEL.get(owner_key, owner_key)}**")
+            # Intentionally no text labels under the brand images
 
 
     # Items
@@ -672,6 +668,8 @@ def _sidebar_nav(owner_key: str, active_slug: str):
             # Invisible overlay button (captures click, no ugly box)
             if st.sidebar.button(" ", key=f"nav_{it.slug}", help=it.label, type="primary" if is_active else "secondary"):
                 st.session_state["active_tab"] = it.slug
+                st.session_state["_pms_qp_applied"] = True
+                _set_query_tab(it.slug)
                 st.rerun()
 
             st.sidebar.markdown("</div>", unsafe_allow_html=True)
@@ -684,6 +682,8 @@ def _sidebar_nav(owner_key: str, active_slug: str):
             with c2:
                 if st.button(it.label, key=f"nav_{it.slug}", use_container_width=True, type="primary" if is_active else "secondary"):
                     st.session_state["active_tab"] = it.slug
+                    st.session_state["_pms_qp_applied"] = True
+                    _set_query_tab(it.slug)
                     st.rerun()
 
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
@@ -910,6 +910,7 @@ def main():
     st.session_state.setdefault("season", "2025-2026")
     st.session_state.setdefault("owner", "Canadiens")
     st.session_state.setdefault("active_tab", "home")
+    st.session_state.setdefault("_pms_qp_applied", False)
     st.session_state.setdefault("pms_sidebar_collapsed", False)
     st.session_state.setdefault("pms_light_mode", False)
 
@@ -919,10 +920,13 @@ def main():
     # Read query param tab
     qp = (_get_query_tab() or "").strip().lower()
     allowed = {it.slug for it in NAV_ORDER}
-    if qp in allowed:
+    # Apply URL query param only once (otherwise it can overwrite sidebar clicks and feel like "2 clicks").
+    if qp in allowed and not bool(st.session_state.get("_pms_qp_applied", False)):
         st.session_state["active_tab"] = qp
+        st.session_state["_pms_qp_applied"] = True
 
-        owner = str(st.session_state.get("owner") or "Canadiens")
+    # Owner is needed for access control + sidebar rendering.
+    owner = str(st.session_state.get("owner") or "Canadiens")
     active_pre = str(st.session_state.get("active_tab") or "home")
     # Sidebar: season + nav (handled inside _sidebar_nav)
     _sidebar_nav(owner, active_pre)
