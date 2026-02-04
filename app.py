@@ -418,6 +418,40 @@ section[data-testid="stSidebar"] .stButton > button:active{
   transform: scale(0.985);
 }
 
+
+/* PMS Collapsed Sidebar */
+section[data-testid="stSidebar"][aria-expanded="false"] {
+  background: #ffffff !important;
+  border-right: 1px solid rgba(0,0,0,.10);
+}
+section[data-testid="stSidebar"][aria-expanded="false"] * { color: #111827 !important; }
+.pms-collapse-wrap{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap: 14px;
+  padding: 10px 6px 18px 6px;
+}
+.pms-ic{
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color: rgba(17,24,39,.70);
+  background: rgba(17,24,39,.04);
+  border: 1px solid rgba(17,24,39,.08);
+  text-decoration:none !important;
+}
+.pms-ic svg{ width:22px; height:22px; }
+.pms-ic:hover{ background: rgba(17,24,39,.07); }
+.pms-ic.active{
+  background: #ef4444;
+  border-color: rgba(239,68,68,.6);
+  color: #ffffff !important;
+}
+
 </style>
 """
     st.markdown(css, unsafe_allow_html=True)
@@ -499,26 +533,65 @@ def _sidebar_nav(owner_key: str, active_slug: str):
 
     st.sidebar.markdown("<div class='pms-nav %s'>" % ("pms-collapsed" if collapsed else ""), unsafe_allow_html=True)
 
-    for it in items:
-        icon_p = _emoji_path(it.slug)  # png emoji (no stretch)
-        is_active = (it.slug == active_slug)
+    if collapsed:
+        # Clean collapsed sidebar: pure HTML icons (no Streamlit buttons => no empty squares)
+        active = active_slug
+        icon_map = {
+            "home": "home",
+            "gm": "users",
+            "joueurs": "grid",
+            "alignement": "clipboard",
+            "transactions": "swap",
+            "historique": "clock",
+            "classement": "trophy",
+            "admin": "gear",
+        }
 
-        # Collapsed: icon + invisible-ish button (no base64 HTML)
-        if collapsed:
-            if icon_p and icon_p.exists():
-                st.sidebar.image(_img_bytes(icon_p), width=46)
-            if st.sidebar.button(" ", key=f"nav_{it.slug}", help=it.label, type="primary" if is_active else "secondary"):
-                st.session_state["active_tab"] = it.slug
-                st.rerun()
-        else:
+        def _svg(name: str) -> str:
+            # Minimal inline SVG set (stroke icons)
+            if name == "home":
+                return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7"/><path d="M9 22V12h6v10"/></svg>'
+            if name == "users":
+                return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>'
+            if name == "grid":
+                return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>'
+            if name == "swap":
+                return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M4 20l16-16"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M3 8V3h5"/><path d="M9 9L3 3"/></svg>'
+            if name == "clipboard":
+                return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="4" rx="1"/><path d="M9 4H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/></svg>'
+            if name == "clock":
+                return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>'
+            if name == "trophy":
+                return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0V4z"/><path d="M5 4v3a3 3 0 0 0 3 3"/><path d="M19 4v3a3 3 0 0 1-3 3"/></svg>'
+                        if name == "gear":
+                return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a7.8 7.8 0 0 0 .1-2l2-1.2-2-3.5-2.3.6a7.6 7.6 0 0 0-1.7-1l-.3-2.4h-4l-.3 2.4a7.6 7.6 0 0 0-1.7 1l-2.3-.6-2 3.5 2 1.2a7.8 7.8 0 0 0 0 2l-2 1.2 2 3.5 2.3-.6c.5.4 1.1.7 1.7 1l.3 2.4h4l.3-2.4c.6-.3 1.2-.6 1.7-1l2.3.6 2-3.5-2-1.2z"/></svg>'
+            return '<svg viewBox="0 0 24 24"></svg>'
+
+        # Build HTML
+        html = ["<div class='pms-collapse-wrap'>"]
+        for it in items:
+            if it.slug == "admin" and owner_key != "Whalers":
+                continue
+            icon = icon_map.get(it.slug, "grid")
+            cls = "pms-ic active" if it.slug == active else "pms-ic"
+            html.append(f"<a class='{cls}' href='?tab={it.slug}' title='{it.label}' aria-label='{it.label}'>{_svg(icon)}</a>")
+        html.append("</div>")
+        st.sidebar.markdown("\n".join(html), unsafe_allow_html=True)
+
+    else:
+        for it in items:
+            icon_p = _emoji_path(it.slug)  # png emoji (no stretch)
+            is_active = (it.slug == active_slug)
 
             c1, c2 = st.sidebar.columns([1.1, 3.4], gap="small")
             with c1:
                 if icon_p and icon_p.exists():
-                    st.image(str(icon_p), width=82)
+                    st.image(_img_bytes(icon_p), width=82)
             with c2:
                 if st.button(it.label, key=f"nav_{it.slug}", use_container_width=True, type="primary" if is_active else "secondary"):
                     st.session_state["active_tab"] = it.slug
+                    _set_query_tab(it.slug)
+                    st.rerun()
 
     st.sidebar.markdown("</div>", unsafe_allow_html=True)
 
@@ -780,4 +853,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
