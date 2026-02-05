@@ -2129,50 +2129,50 @@ def _render_impl(ctx: Optional[Dict[str, Any]] = None):
             # -------------------------------------------------
             # 🏒 Points des joueurs (par équipe) — overrides
             # -------------------------------------------------
-            with st.expander("🕛 Backups AUTO — Drive (midi & minuit)", expanded=False):
-                st.caption("Auto = quand l’app est ouverte (Streamlit ne tourne pas en cron). Whalers only.")
-                pol = load_policy(DATA_DIR)
-                policy_path = os.path.join(DATA_DIR, "backup_policy.json")
-                if not os.path.exists(policy_path):
-                    st.warning("⚠️ Aucun fichier `data/backup_policy.json` pour l’instant. Normal: il sera créé quand tu cliques **Sauver paramètres**.")
-                    if st.button("🧱 Créer policy par défaut maintenant", use_container_width=True, key="bk_create_policy"):
-                        pol0 = BackupPolicy(enabled=True, retention_days=int(pol.retention_days), tz_offset_hours=int(pol.tz_offset_hours), folder_id=str(pol.folder_id or "").strip(), window_minutes=int(pol.window_minutes), include_patterns=pol.include_patterns)
-                        ok0, err0 = save_policy(DATA_DIR, pol0)
-                        if ok0:
-                            st.success("✅ `data/backup_policy.json` créé.")
-                            st.rerun()
-                        else:
-                            st.error("❌ " + str(err0))
-                else:
-                    st.info("✅ Policy trouvée: `data/backup_policy.json` (tu peux modifier les jours de rétention ici).")
-                c1, c2, c3 = st.columns([1,1,1])
-                with c1:
-                    enabled = st.toggle("Activer", value=pol.enabled, key="bk_enabled")
-                with c2:
-                    retention = st.number_input("Garder (jours)", min_value=1, max_value=365, value=int(pol.retention_days), step=1, key="bk_ret")
-                with c3:
-                    tz = st.number_input("Fuseau (UTC offset)", min_value=-12, max_value=14, value=int(pol.tz_offset_hours), step=1, key="bk_tz")
-                window = st.number_input("Fenêtre (minutes) après 00:00/12:00", min_value=10, max_value=180, value=int(pol.window_minutes), step=5, key="bk_win")
-                folder = st.text_input("Folder ID (optionnel)", value=str(pol.folder_id or ""), help="Laisse vide = utilise secrets[gdrive_oauth].folder_id", key="bk_folder")
-                if st.button("💾 Sauver paramètres", use_container_width=True, key="bk_save"):
-                    pol2 = BackupPolicy(enabled=enabled, retention_days=int(retention), tz_offset_hours=int(tz), folder_id=str(folder).strip(), window_minutes=int(window), include_patterns=pol.include_patterns)
-                    ok, err = save_policy(DATA_DIR, pol2)
-                    if ok:
-                        st.success("✅ Paramètres sauvegardés dans data/backup_policy.json")
-                    else:
-                        st.error("❌ " + str(err))
-                st.markdown("---")
-                if st.button("🚀 Lancer un backup maintenant", type="primary", use_container_width=True, key="bk_run_now"):
-                    pol = load_policy(DATA_DIR)
-                    ok, res = run_backup_now(DATA_DIR, str(st.session_state.get("season_lbl") or "2025-2026"), pol, label="manual")
-                    if ok:
-                        st.success(f"✅ Backup uploadé: {res}")
-                    else:
-                        st.error("❌ " + str(res))
-                st.markdown("---")
-                if st.button("🔎 Tester le scheduler (tick)", use_container_width=True, key="bk_tick"):
-                    did, msg = scheduled_backup_tick(DATA_DIR, str(st.session_state.get("season_lbl") or "2025-2026"), str(owner), show_debug=True)
-                    st.write({"did": did, "msg": msg})
+            # with st.expander("🕛 Backups AUTO — Drive (midi & minuit)", expanded=False):
+            #    st.caption("Auto = quand l’app est ouverte (Streamlit ne tourne pas en cron). Whalers only.")
+            #    pol = load_policy(DATA_DIR)
+            #    policy_path = os.path.join(DATA_DIR, "backup_policy.json")
+            #    if not os.path.exists(policy_path):
+            #        st.warning("⚠️ Aucun fichier `data/backup_policy.json` pour l’instant. Normal: il sera créé quand tu cliques **Sauver paramètres**.")
+            #        if st.button("🧱 Créer policy par défaut maintenant", use_container_width=True, key="bk_create_policy"):
+            #            pol0 = BackupPolicy(enabled=True, retention_days=int(pol.retention_days), tz_offset_hours=int(pol.tz_offset_hours), folder_id=str(pol.folder_id or "").strip(), window_minutes=int(pol.window_minutes), include_patterns=pol.include_patterns)
+            #            ok0, err0 = save_policy(DATA_DIR, pol0)
+            #            if ok0:
+            #                st.success("✅ `data/backup_policy.json` créé.")
+            #                st.rerun()
+            #            else:
+            #                st.error("❌ " + str(err0))
+            #    else:
+            #        st.info("✅ Policy trouvée: `data/backup_policy.json` (tu peux modifier les jours de rétention ici).")
+            #    c1, c2, c3 = st.columns([1,1,1])
+            #    with c1:
+            #        enabled = st.toggle("Activer", value=pol.enabled, key="bk_enabled")
+            #    with c2:
+            #        retention = st.number_input("Garder (jours)", min_value=1, max_value=365, value=int(pol.retention_days), step=1, key="bk_ret")
+            #    with c3:
+            #        tz = st.number_input("Fuseau (UTC offset)", min_value=-12, max_value=14, value=int(pol.tz_offset_hours), step=1, key="bk_tz")
+            #    window = st.number_input("Fenêtre (minutes) après 00:00/12:00", min_value=10, max_value=180, value=int(pol.window_minutes), step=5, key="bk_win")
+            #    folder = st.text_input("Folder ID (optionnel)", value=str(pol.folder_id or ""), help="Laisse vide = utilise secrets[gdrive_oauth].folder_id", key="bk_folder")
+            #    if st.button("💾 Sauver paramètres", use_container_width=True, key="bk_save"):
+            #        pol2 = BackupPolicy(enabled=enabled, retention_days=int(retention), tz_offset_hours=int(tz), folder_id=str(folder).strip(), window_minutes=int(window), include_patterns=pol.include_patterns)
+            #        ok, err = save_policy(DATA_DIR, pol2)
+            #        if ok:
+            #            st.success("✅ Paramètres sauvegardés dans data/backup_policy.json")
+            #        else:
+            #           st.error("❌ " + str(err))
+            #    st.markdown("---")
+            #    if st.button("🚀 Lancer un backup maintenant", type="primary", use_container_width=True, key="bk_run_now"):
+            #        pol = load_policy(DATA_DIR)
+            #        ok, res = run_backup_now(DATA_DIR, str(st.session_state.get("season_lbl") or "2025-2026"), pol, label="manual")
+            #        if ok:
+            #            st.success(f"✅ Backup uploadé: {res}")
+            #        else:
+            #            st.error("❌ " + str(res))
+            #    st.markdown("---")
+            #    if st.button("🔎 Tester le scheduler (tick)", use_container_width=True, key="bk_tick"):
+            #        did, msg = scheduled_backup_tick(DATA_DIR, str(st.session_state.get("season_lbl") or "2025-2026"), str(owner), show_debug=True)
+            #        st.write({"did": did, "msg": msg})
 
             with st.expander("🏒 Points joueurs — modifier par équipe (bonus/malus)", expanded=False):
                 st.caption("Bonus/malus par joueur. **Ne bloque pas l'écran** même si l'équipe est vide (idiot-proof).")
